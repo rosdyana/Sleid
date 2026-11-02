@@ -23,19 +23,26 @@ export function chartToEchartsOption(chart: ChartElement, theme: Theme): ECharts
   const stacked = chart.options.stacked === true || chart.chartType === 'stacked-bar'
   const bodyFont = fontStack(theme.fonts.body, 'sans-serif')
 
+  // Sizes are slide-space pixels on the 1920×1080 stage; ECharts' 12px defaults are unreadable there.
+  const small = theme.sizes.small
+  const titleSize = Math.round(theme.sizes.heading * 0.6)
+  const titleH = chart.options.title ? titleSize + 24 : 0
+  const legendH = chart.options.legend ? small + 24 : 0
+  const label = { color: muted, fontSize: small }
+
   const base: Record<string, unknown> = {
     animation: false,
     backgroundColor: 'transparent',
     color: palette,
-    textStyle: { color: text, fontFamily: bodyFont },
+    textStyle: { color: text, fontFamily: bodyFont, fontSize: small },
     title: chart.options.title
-      ? { text: chart.options.title, left: 'center', textStyle: { color: text, fontSize: theme.sizes.heading * 0.6 } }
+      ? { text: chart.options.title, left: 'center', top: 0, textStyle: { color: text, fontSize: titleSize } }
       : { show: false },
     legend: chart.options.legend
-      ? { show: true, top: chart.options.title ? 60 : 10, textStyle: { color: text } }
+      ? { show: true, top: titleH, itemWidth: small * 1.2, itemHeight: small * 0.7, itemGap: small, textStyle: { color: text, fontSize: small } }
       : { show: false },
     // Leave room above the plot for the title and the legend.
-    grid: { top: chart.options.title ? (chart.options.legend ? 120 : 80) : chart.options.legend ? 60 : 30, containLabel: true },
+    grid: { top: titleH + legendH + 16, left: 16, right: 24, bottom: 16, containLabel: true },
   }
 
   const isPie = chart.chartType === 'pie' || chart.chartType === 'donut'
@@ -48,16 +55,16 @@ export function chartToEchartsOption(chart: ChartElement, theme: Theme): ECharts
         radius: chart.chartType === 'donut' ? ['40%', '70%'] : '65%',
         center: ['50%', '55%'],
         data,
-        label: { color: text },
+        label: { color: text, fontSize: small },
       },
     ]
     return applyOverride(base, chart.echartsOverride)
   }
 
-  const yAxisStyle = { axisLabel: { color: muted }, splitLine: { lineStyle: { color: muted, opacity: 0.25 } } }
+  const yAxisStyle = { axisLabel: label, splitLine: { lineStyle: { color: muted, opacity: 0.25 } } }
 
   if (chart.chartType === 'scatter') {
-    base.xAxis = { type: 'value', axisLabel: { color: muted }, splitLine: { show: false } }
+    base.xAxis = { type: 'value', axisLabel: label, splitLine: { show: false } }
     base.yAxis = { type: 'value', ...yAxisStyle }
     base.series = valueColumns.map((col) => ({
       type: 'scatter',
@@ -69,7 +76,7 @@ export function chartToEchartsOption(chart: ChartElement, theme: Theme): ECharts
 
   const seriesType = chart.chartType === 'line' || chart.chartType === 'area' ? 'line' : 'bar'
   const isArea = chart.chartType === 'area'
-  base.xAxis = { type: 'category', data: rows.map((r) => String(r[0] ?? '')), axisLabel: { color: muted } }
+  base.xAxis = { type: 'category', data: rows.map((r) => String(r[0] ?? '')), axisLabel: label }
   base.yAxis = { type: 'value', ...yAxisStyle }
   base.series = valueColumns.map((col) => {
     const series: Record<string, unknown> = {

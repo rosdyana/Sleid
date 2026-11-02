@@ -127,7 +127,7 @@ export function ElementBody({ el, theme, scale }: { el: Element; theme: Theme; s
       return <img src={src} alt={el.alt ?? ''} draggable={false} className="h-full w-full select-none" style={{ objectFit: el.fit }} />
     }
     case 'chart':
-      return <ChartView el={el} theme={theme} />
+      return <ChartView key={scale < 0.5 ? 'lo' : 'hi'} el={el} theme={theme} scale={scale} />
     case 'diagram':
       return <DiagramView source={el.source} />
     case 'table':
@@ -263,29 +263,38 @@ function renderNode(node: RichNode, key: number): ReactNode {
   }
 }
 
-function ChartView({ el, theme }: { el: ChartElement; theme: Theme }) {
+// The ECharts option uses slide-space pixel sizes (fonts, grid offsets) tuned for the 1920×1080
+// stage, so the chart is laid out at its real size and scaled down visually. This keeps the
+// editor, thumbnails and the reveal render identical.
+function ChartView({ el, theme, scale }: { el: ChartElement; theme: Theme; scale: number }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<echarts.ECharts | null>(null)
 
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    const chart = echarts.init(host, undefined, { renderer: 'canvas' })
+    const chart = echarts.init(host, undefined, { renderer: 'canvas', devicePixelRatio: Math.max(1, (window.devicePixelRatio || 1) * Math.min(1, scale)) })
     chartRef.current = chart
-    const observer = new ResizeObserver(() => chart.resize())
-    observer.observe(host)
     return () => {
-      observer.disconnect()
       chart.dispose()
       chartRef.current = null
     }
+    // devicePixelRatio is fixed at init; a zoom change re-creates the chart via the key below.
   }, [])
+
+  useEffect(() => {
+    chartRef.current?.resize({ width: el.w, height: el.h })
+  }, [el.w, el.h])
 
   useEffect(() => {
     chartRef.current?.setOption(chartToEchartsOption(el, theme), { notMerge: true })
   }, [el, theme])
 
-  return <div ref={hostRef} className="h-full w-full" />
+  return (
+    <div className="h-full w-full overflow-hidden">
+      <div ref={hostRef} style={{ width: el.w, height: el.h, transform: `scale(${scale})`, transformOrigin: '0 0' }} />
+    </div>
+  )
 }
 
 function DiagramView({ source }: { source: string }) {

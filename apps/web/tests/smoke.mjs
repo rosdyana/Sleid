@@ -2,7 +2,7 @@
 // Requires the dev server running with SLEID_TEST_AUTH=1 (email+password login enabled).
 // Usage: node tests/smoke.mjs [baseUrl]   (default http://localhost:3000)
 // Browser: uses CHROME_PATH if set, otherwise the Playwright-managed Chromium.
-// Screenshots go to SCREENSHOT_DIR (default: the session scratchpad).
+// Screenshots go to SCREENSHOT_DIR (default: test-results/screenshots).
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { chromium } from 'playwright-core'
@@ -12,9 +12,7 @@ const stamp = Date.now().toString(36)
 const email = `smoke-${stamp}@example.com`
 const password = 'password123'
 const launchOptions = process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}
-const shotDir =
-  process.env.SCREENSHOT_DIR ??
-  '/private/tmp/claude-501/-Users-rosdyanakusuma-Ross-projects-sleid/c1400ba8-0388-449b-ad43-785f923a7331/scratchpad'
+const shotDir = process.env.SCREENSHOT_DIR ?? join(process.cwd(), 'test-results', 'screenshots')
 mkdirSync(shotDir, { recursive: true })
 
 const log = (msg) => console.log(`ok  ${msg}`)
