@@ -78,6 +78,9 @@ function stopReasonOf(reason: string | null | undefined): StopReason {
 /** Maps an SDK or fetch error to an LlmError. The message never includes the key. */
 export function mapFoundryError(err: unknown, secrets: readonly string[]): LlmError {
   if (err instanceof LlmError) return err
+  // The SDK wraps a rejected fetch (for example the endpoint policy refusing it) in APIConnectionError.
+  const cause = (err as { cause?: unknown } | undefined)?.cause
+  if (cause instanceof LlmError) return cause
   const e = err as { name?: string; status?: unknown; message?: unknown; headers?: { get?: (name: string) => string | null } } | undefined
   // The SDK sets name to "Error" on its subclasses, so the class name is the reliable signal.
   const name = e?.constructor?.name ?? e?.name ?? ''

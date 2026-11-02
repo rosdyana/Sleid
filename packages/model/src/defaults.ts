@@ -48,7 +48,7 @@ export const BUILT_IN_THEMES: readonly Theme[] = [
       muted: '#7a6a58',
       accent: '#b5541c',
       accent2: '#6b8f3a',
-      accent3: '#c9962b',
+      accent3: '#b48627',
       accent4: '#8a4b7a',
     },
     fonts: { heading: 'Georgia, serif', body: 'Georgia, serif', mono: 'Menlo, monospace' },

@@ -5,7 +5,7 @@
 import { z } from 'zod'
 import type { Deck, Op } from '@sleid/model'
 import { describeDeck } from '../context.ts'
-import { LlmError } from '../errors.ts'
+import { LlmError, publicMessage } from '../errors.ts'
 import { checkOps, allowlist } from '../ops-check.ts'
 import type { Message, ToolCall, ToolDef, Usage } from '../types.ts'
 import { addUsage, ZERO_USAGE } from '../types.ts'
@@ -262,7 +262,8 @@ export async function* runChat(env: AbilityEnv, input: ChatInput, newId: () => s
         }
       }
     } catch (err) {
-      yield { type: 'error', message: err instanceof Error ? err.message : 'The assistant failed.' }
+      env.onFailure?.(err)
+      yield { type: 'error', message: env.hideDetails ? publicMessage(err) : err instanceof Error ? err.message : 'The assistant failed.' }
       return
     }
     history.push({ role: 'assistant', content: text, ...(calls.length ? { toolCalls: calls } : {}) })

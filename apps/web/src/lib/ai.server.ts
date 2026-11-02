@@ -1,12 +1,12 @@
 // The assistant's request path, shared by the ability server function and the chat route.
 // Order of checks: signed in, editor on the deck, rate limit, provider, deck, the run, the usage row.
 // Everything that can fail with a user-facing message throws an LlmError, which the callers show as-is.
-import { ABILITY_NAMES, LlmError, runAbility, scrubError, type AbilityEnv, type AbilityInputs, type AbilityName, type ImagePart, type Usage } from '@sleid/llm'
+import { ABILITY_NAMES, failureMessage, LlmError, runAbility, type AbilityEnv, type AbilityInputs, type AbilityName, type ImagePart, type Usage } from '@sleid/llm'
 import { canEdit, countLlmRequestsSince, getAssetWithDeck, getDeckRole, recordLlmUsage, readDeck, type Db, type LiveDeckSource } from '@sleid/db'
 import type { Deck, Op } from '@sleid/model'
 import type { StorageDriver } from '@sleid/storage'
 import { rateLimitFromEnv, type RateLimit } from './llm-config.server'
-import { resolveProvider, type AiUser, type ResolvedProvider, type SettingsDeps } from './llm-settings.server'
+import { logProviderFailure, resolveProvider, type AiUser, type ResolvedProvider, type SettingsDeps } from './llm-settings.server'
 
 export interface AiDeps extends SettingsDeps {
   live?: LiveDeckSource | undefined
@@ -95,12 +95,17 @@ export async function recordUsage(
   })
 }
 
-/** The environment an ability runs in. Local model servers get the compact schemas. */
+/**
+ * The environment an ability runs in. Local model servers get the compact schemas. Failures of a user-owned
+ * provider show only the status; the detail goes to the server log.
+ */
 export function abilityEnv(provider: ResolvedProvider, deck: Deck, signal?: AbortSignal): AbilityEnv {
   return {
     provider: provider.provider,
     deck,
     compact: provider.info.kind === 'openai-compatible',
+    hideDetails: provider.scope === 'user',
+    onFailure: (err) => logProviderFailure(err, provider),
     ...(signal ? { signal } : {}),
   }
 }
@@ -166,6 +171,7 @@ export async function runAbilityForDeck(
       provider: { id: resolved.info.id, name: resolved.info.name, kind: resolved.info.kind, model: outcome.model },
     }
   } catch (err) {
+    logProviderFailure(err, resolved)
     await recordUsage(deps.db, {
       userId: user.id,
       deckId: args.deckId,
@@ -175,8 +181,9 @@ export async function runAbilityForDeck(
       latencyMs: Date.now() - started,
       ok: false,
     }).catch(() => undefined)
-    if (err instanceof LlmError) throw new LlmError(err.kind, scrubError(err, resolved.secrets), { ...(err.status ? { status: err.status } : {}) })
-    throw new LlmError('bad-request', scrubError(err, resolved.secrets))
+    const message = failureMessage(err, resolved.secrets, resolved.scope === 'user')
+    if (err instanceof LlmError) throw new LlmError(err.kind, message, { ...(err.status ? { status: err.status } : {}) })
+    throw new LlmError('bad-request', message)
   }
 }
 

@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { BUILT_IN_THEMES } from '@sleid/model'
 import { contrastRatio, contrastViolations, enforceThemeContrast, ensureContrast, parseHex, toHex } from './contrast.ts'
 
+/** Hue in degrees (0 to 360) of a hex colour. */
+function hueOf(hex: string): number {
+  const { r, g, b } = parseHex(hex)
+  const rn = r / 255
+  const gn = g / 255
+  const bn = b / 255
+  const max = Math.max(rn, gn, bn)
+  const min = Math.min(rn, gn, bn)
+  const d = max - min
+  if (d === 0) return 0
+  const h = max === rn ? ((gn - bn) / d) % 6 : max === gn ? (bn - rn) / d + 2 : (rn - gn) / d + 4
+  return (h * 60 + 360) % 360
+}
+
 describe('contrast', () => {
   it('computes WCAG ratios at the extremes', () => {
     expect(contrastRatio('#000000', '#ffffff')).toBeCloseTo(21, 5)
@@ -55,14 +69,19 @@ describe('contrast', () => {
     expect(adjusted.some((line) => line.startsWith('accent '))).toBe(true)
   })
 
-  it('leaves the built-in themes alone, except one known accent in Warm Paper', () => {
-    // Finding: Warm Paper's accent3 (#c9962b) is below 3:1 on its background. The built-in theme is
-    // not changed here (the rule applies to AI-generated themes), and docs/DESIGN.md records it.
+  it('every built-in theme passes the same rules as AI themes, without adjustment', () => {
     const found: string[] = []
     for (const theme of BUILT_IN_THEMES) {
+      for (const violation of contrastViolations(theme.colors)) found.push(`${theme.name}: ${violation}`)
       const { adjusted } = enforceThemeContrast(theme.colors)
       for (const line of adjusted) found.push(`${theme.name}: ${line.split(' ')[0]}`)
     }
-    expect(found).toEqual(['Warm Paper: accent3'])
+    expect(found).toEqual([])
+  })
+
+  it('Warm Paper accent3 keeps the hue of the original and reaches 3:1 on the background', () => {
+    const warm = BUILT_IN_THEMES.find((t) => t.name === 'Warm Paper')!
+    expect(contrastRatio(warm.colors.accent3, warm.colors.background)).toBeGreaterThanOrEqual(3)
+    expect(hueOf(warm.colors.accent3)).toBeCloseTo(hueOf('#c9962b'), 0)
   })
 })

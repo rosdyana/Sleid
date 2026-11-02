@@ -11,6 +11,10 @@ export interface AbilityEnv {
   signal?: AbortSignal
   /** Smaller schemas and prompts for local models. */
   compact?: boolean
+  /** Shows only the status-derived message for a provider failure (user-owned providers). */
+  hideDetails?: boolean
+  /** Receives a provider failure with its full detail, for the server log. */
+  onFailure?: (err: unknown) => void
 }
 
 export interface AbilityOutcome {

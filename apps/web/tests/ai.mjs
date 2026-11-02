@@ -1,5 +1,9 @@
 // M4 browser check: the AI assistant against a fake OpenAI-compatible server (tests/fake-openai-server.mjs).
 // Needs `pnpm dev` running with SLEID_TEST_AUTH=1, LLM_SECRET_KEY, COLLAB_TOKEN_SECRET and COLLAB_INTERNAL_SECRET.
+// The fake server listens on 127.0.0.1, and this script adds it as a USER provider (through the UI). A user provider
+// may use a loopback address only when the dev server has LLM_USER_ALLOW_PRIVATE_URLS=1. So start the dev server with:
+//   LLM_USER_ALLOW_PRIVATE_URLS=1 SLEID_TEST_AUTH=1 LLM_SECRET_KEY=... pnpm dev
+// (The alternative, adding the provider as an administrator, would need an ADMIN_EMAILS account and a workspace provider.)
 //   CHROME_PATH=... SCREENSHOT_DIR=... node tests/ai.mjs [http://localhost:3000]
 // Covers: settings (add a provider, Test connection OK, key never shown), generate a slide (Preview, Apply, Undo),
 // shorten a text box, a chart from a prompt in the panel, a theme with a brand colour, a collaborator seeing the

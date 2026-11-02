@@ -5,9 +5,12 @@
 // Keys are written once and never returned: the view carries only `hasSecret`.
 import { z } from 'zod'
 import {
+  assertAllowedEndpoint,
+  createPinnedFetch,
   createProvider,
   decryptSecret,
   encryptSecret,
+  failureMessage,
   foundryEndpointOptions,
   chatUrl,
   azureChatUrl,
@@ -15,6 +18,7 @@ import {
   LlmError,
   scrubError,
   type LlmProvider,
+  type LookupFn,
   type ProviderSpec,
 } from '@sleid/llm'
 import {
@@ -28,7 +32,9 @@ import {
   type LlmProviderKind,
   type LlmProviderRow,
 } from '@sleid/db'
-import { envProvider, ENV_PROVIDER_ID, isAdminEmail, llmSecretKey, type EnvProvider } from './llm-config.server'
+import { envProvider, ENV_PROVIDER_ID, isAdminEmail, llmSecretKey, networkPolicyFor, type EnvProvider } from './llm-config.server'
+
+export type ProviderScope = 'user' | 'workspace' | 'environment'
 
 export interface AiUser {
   id: string
@@ -73,8 +79,10 @@ export type ProviderInput = z.infer<typeof ProviderInput>
 export interface SettingsDeps {
   db: Db
   env: NodeJS.ProcessEnv
-  /** Overrides the HTTP layer of the adapters (tests). */
+  /** Overrides the HTTP layer of the adapters (tests). Endpoint checks still run. */
   fetch?: typeof fetch
+  /** Overrides host name resolution for the endpoint checks (tests). */
+  lookup?: LookupFn
 }
 
 export interface ResolvedProvider {
@@ -82,6 +90,7 @@ export interface ResolvedProvider {
   info: { id: string; name: string; kind: LlmProviderKind; model: string }
   /** Every secret this provider holds, for redaction. */
   secrets: string[]
+  scope: ProviderScope
 }
 
 function configOf(row: LlmProviderRow): { endpoint: string; apiVersion?: string; structured?: string; supportsImages?: boolean } {
@@ -156,12 +165,31 @@ export function checkEndpoint(kind: LlmProviderKind, endpoint: string, defaultMo
   }
 }
 
+/** The URL an adapter calls for an endpoint, derived the same way the adapters derive it. */
+export function providerEndpointUrl(kind: LlmProviderKind, endpoint: string, model: string): string {
+  if (kind === 'foundry-claude') {
+    const options = foundryEndpointOptions(endpoint)
+    return options.baseURL ?? `https://${options.resource}.services.ai.azure.com/anthropic/`
+  }
+  if (kind === 'azure-openai') return azureChatUrl(endpoint, model, DEFAULT_AZURE_API_VERSION)
+  return chatUrl(endpoint)
+}
+
+/**
+ * Refuses an endpoint that the scope's network policy does not allow. Runs when a provider is saved and before
+ * every request, because a host name can resolve differently later.
+ */
+export async function checkNetworkPolicy(deps: SettingsDeps, scope: ProviderScope, kind: LlmProviderKind, endpoint: string, model: string): Promise<void> {
+  await assertAllowedEndpoint(providerEndpointUrl(kind, endpoint, model), networkPolicyFor(scope, deps.env), deps.lookup)
+}
+
 export async function saveProvider(deps: SettingsDeps, user: AiUser, rawInput: unknown): Promise<ProviderView> {
   const input = ProviderInput.parse(rawInput)
   if (input.scope === 'workspace' && !isAdminEmail(user.email, deps.env)) {
     throw new LlmError('auth', 'Only an administrator can change workspace providers.')
   }
   checkEndpoint(input.kind, input.endpoint, input.defaultModel)
+  await checkNetworkPolicy(deps, input.scope, input.kind, input.endpoint, input.defaultModel)
   const key = input.apiKey?.trim() || undefined
   const config = {
     endpoint: input.endpoint,
@@ -256,23 +284,35 @@ function envSecrets(env: EnvProvider): string[] {
   return key ? [key] : []
 }
 
-function providerOptions(deps: SettingsDeps) {
-  return deps.fetch ? { fetch: deps.fetch } : {}
+/**
+ * The HTTP layer for a provider of this scope: every request is checked against the scope's policy and connects
+ * only to the addresses that passed (see url-policy.ts). A deps.fetch override (tests) replaces the transport only.
+ */
+function providerOptions(deps: SettingsDeps, scope: ProviderScope) {
+  const fetch = deps.fetch ?? createPinnedFetch(networkPolicyFor(scope, deps.env), deps.lookup ? { lookup: deps.lookup } : {})
+  return { fetch }
+}
+
+function envResolved(deps: SettingsDeps, fromEnv: EnvProvider): ResolvedProvider {
+  return {
+    provider: createProvider(fromEnv.spec, providerOptions(deps, 'environment')),
+    info: { id: ENV_PROVIDER_ID, name: fromEnv.name, kind: fromEnv.kind, model: fromEnv.model },
+    secrets: envSecrets(fromEnv),
+    scope: 'environment',
+  }
 }
 
 /**
  * The provider for a request. Order: the chosen one (when it is visible to the user), otherwise the user's default,
- * the workspace default, and the environment default.
+ * the workspace default, and the environment default. The endpoint is checked against the policy first, because
+ * the policy and the DNS answer can both have changed since the provider was saved.
  */
 export async function resolveProvider(deps: SettingsDeps, user: AiUser, providerId: string | null | undefined): Promise<ResolvedProvider> {
   const fromEnv = envProvider(deps.env)
   if (providerId === ENV_PROVIDER_ID) {
     if (!fromEnv) throw new LlmError('not-configured', 'The server default AI provider is not set (SLEID_LLM_KIND).')
-    return {
-      provider: createProvider(fromEnv.spec, providerOptions(deps)),
-      info: { id: ENV_PROVIDER_ID, name: fromEnv.name, kind: fromEnv.kind, model: fromEnv.model },
-      secrets: envSecrets(fromEnv),
-    }
+    await checkNetworkPolicy(deps, 'environment', fromEnv.kind, fromEnv.endpoint, fromEnv.model)
+    return envResolved(deps, fromEnv)
   }
   let row: LlmProviderRow | null = null
   if (providerId) {
@@ -282,21 +322,34 @@ export async function resolveProvider(deps: SettingsDeps, user: AiUser, provider
     const visible = await listLlmProvidersFor(deps.db, user.id)
     row = visible.find((r) => r.isDefault && r.scope === 'user') ?? visible.find((r) => r.isDefault) ?? null
     if (!row && fromEnv) {
-      return {
-        provider: createProvider(fromEnv.spec, providerOptions(deps)),
-        info: { id: ENV_PROVIDER_ID, name: fromEnv.name, kind: fromEnv.kind, model: fromEnv.model },
-        secrets: envSecrets(fromEnv),
-      }
+      await checkNetworkPolicy(deps, 'environment', fromEnv.kind, fromEnv.endpoint, fromEnv.model)
+      return envResolved(deps, fromEnv)
     }
     if (!row) throw new LlmError('not-configured', 'No AI provider is set up yet. Add one in Settings › AI.')
   }
+  await checkNetworkPolicy(deps, row.scope, row.kind, configOf(row).endpoint, row.defaultModel)
   const apiKey = secretOf(row, deps.env)
   const spec = specFrom(row, apiKey)
   return {
-    provider: createProvider(spec, providerOptions(deps)),
+    provider: createProvider(spec, providerOptions(deps, row.scope)),
     info: { id: row.id, name: row.name, kind: row.kind, model: row.defaultModel },
     secrets: apiKey ? [apiKey] : [],
+    scope: row.scope,
   }
+}
+
+/**
+ * The server log for a provider failure: kind, status and the scrubbed detail, truncated. This is where the
+ * upstream text goes when the user is shown only the status. Never the key.
+ */
+export function logProviderFailure(err: unknown, resolved: Pick<ResolvedProvider, 'info' | 'scope' | 'secrets'>): void {
+  console.warn('[assistant] provider failed', {
+    provider: resolved.info.id,
+    scope: resolved.scope,
+    kind: err instanceof LlmError ? err.kind : 'unexpected',
+    status: err instanceof LlmError ? err.status : undefined,
+    detail: scrubError(err, resolved.secrets).slice(0, 500),
+  })
 }
 
 export interface ConnectionTest {
@@ -332,6 +385,12 @@ export async function testProvider(deps: SettingsDeps, user: AiUser, providerId:
       reply: reply.text.trim().slice(0, 40),
     }
   } catch (err) {
-    return { ok: false, model: resolved.info.model, latencyMs: Date.now() - started, error: scrubError(err, resolved.secrets) }
+    logProviderFailure(err, resolved)
+    return {
+      ok: false,
+      model: resolved.info.model,
+      latencyMs: Date.now() - started,
+      error: failureMessage(err, resolved.secrets, resolved.scope === 'user'),
+    }
   }
 }

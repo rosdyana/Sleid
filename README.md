@@ -74,6 +74,14 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 | `ADMIN_EMAILS` | web | Comma-separated administrator emails. Only they can add or change workspace providers. |
 | `SLEID_LLM_KIND`, `SLEID_LLM_ENDPOINT`, `SLEID_LLM_API_KEY`, `SLEID_LLM_MODEL`, `SLEID_LLM_API_VERSION`, `SLEID_LLM_STRUCTURED`, `SLEID_LLM_SUPPORTS_IMAGES`, `SLEID_LLM_NAME` | web | Optional server-wide default provider (see AI assistant below). |
 | `AI_RATE_LIMIT_MAX`, `AI_RATE_LIMIT_WINDOW_SECONDS` | web | Assistant requests per user in a sliding window. Default 30 per 600 seconds. |
+| `LLM_USER_ALLOW_PRIVATE_URLS` | web | `1` lets a user's own AI provider use loopback and private addresses (a local Ollama or LM Studio). Off by default. See the note below. |
+
+**AI provider endpoints.** Every provider endpoint is checked when it is saved and before each request. A user's own provider may not point at loopback, private, shared (CGNAT) or other non-public addresses, so the server cannot be used to reach its own services (for example the collab internal API on `127.0.0.1:3002`). Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) are refused for every provider, always. Workspace providers (added by an administrator) and the server default may use private addresses.
+
+- **Local, single-user setup:** set `LLM_USER_ALLOW_PRIVATE_URLS=1` in `.env`, then add the local server (for example `http://127.0.0.1:11434/v1`) as your own provider.
+- **Shared setup:** leave the flag off, and have an administrator (`ADMIN_EMAILS`) add the local server as a workspace provider.
+
+Anyone who can set the flag, or who uses a user provider on a private network, can probe that network through the error messages, so keep it off on a multi-user server.
 
 ## Google OAuth client
 

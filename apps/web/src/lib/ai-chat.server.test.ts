@@ -32,8 +32,9 @@ const THEME = JSON.stringify({
   bodyFont: 'Inter',
 })
 
+// The fake server is on 127.0.0.1, which a user provider may only use when the environment allows private addresses.
 function env(): NodeJS.ProcessEnv {
-  return { LLM_SECRET_KEY: KEY, ADMIN_EMAILS: '' } as NodeJS.ProcessEnv
+  return { LLM_SECRET_KEY: KEY, ADMIN_EMAILS: '', LLM_USER_ALLOW_PRIVATE_URLS: '1' } as NodeJS.ProcessEnv
 }
 
 function chatRequest(body: unknown, headers: Record<string, string> = {}): Request {
@@ -141,7 +142,7 @@ describe('POST /api/decks/:deckId/ai/chat', () => {
     expect(server.seen[0]!.headers.authorization).toBe('Bearer sk-chat-test-key-1234')
   })
 
-  it('a provider failure ends the stream with an error line and no key in it', async () => {
+  it('a provider failure ends the stream with a status-only error line, and the upstream text stays in the log', async () => {
     if (!db) return
     server = await startLlmTestServer([{ status: 401, error: 'invalid key sk-chat-test-key-1234' }])
     const saved = await saveProvider({ db, env: env() }, owner, {
@@ -159,7 +160,9 @@ describe('POST /api/decks/:deckId/ai/chat', () => {
     const events = await ndjson(response)
     const last = events.at(-1)!
     expect(last.type).toBe('error')
-    expect(String(last.message)).not.toContain('sk-chat-test-key-1234')
-    expect(String(last.message)).toContain('[redacted]')
+    // A user-owned provider: the status, never the upstream body or the key.
+    expect(last.message).toBe('The provider answered HTTP 401 Unauthorized. Check the API key.')
+    expect(JSON.stringify(events)).not.toContain('sk-chat-test-key-1234')
+    expect(JSON.stringify(events)).not.toContain('invalid key')
   })
 })

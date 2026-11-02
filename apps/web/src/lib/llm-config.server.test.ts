@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adminEmails, envProvider, isAdminEmail, llmSecretKey, rateLimitFromEnv } from './llm-config.server.ts'
+import { adminEmails, allowPrivateUserUrls, envProvider, isAdminEmail, llmSecretKey, networkPolicyFor, rateLimitFromEnv } from './llm-config.server.ts'
 
 describe('assistant configuration from the environment', () => {
   it('reads admin emails case-insensitively', () => {
@@ -39,5 +39,21 @@ describe('assistant configuration from the environment', () => {
     expect(rateLimitFromEnv({})).toEqual({ max: 30, windowMs: 600_000 })
     expect(rateLimitFromEnv({ AI_RATE_LIMIT_MAX: '5', AI_RATE_LIMIT_WINDOW_SECONDS: '60' })).toEqual({ max: 5, windowMs: 60_000 })
     expect(rateLimitFromEnv({ AI_RATE_LIMIT_MAX: 'lots' })).toEqual({ max: 30, windowMs: 600_000 })
+  })
+})
+
+describe('network policy by scope', () => {
+  it('only the exact value 1 turns on private addresses for user providers', () => {
+    expect(allowPrivateUserUrls({ LLM_USER_ALLOW_PRIVATE_URLS: '1' })).toBe(true)
+    for (const value of [undefined, '', '0', 'true', 'yes', ' 1']) {
+      expect(allowPrivateUserUrls({ LLM_USER_ALLOW_PRIVATE_URLS: value })).toBe(false)
+    }
+  })
+
+  it('user providers follow the flag; workspace and environment providers always may use private addresses', () => {
+    expect(networkPolicyFor('user', {})).toEqual({ allowPrivate: false })
+    expect(networkPolicyFor('user', { LLM_USER_ALLOW_PRIVATE_URLS: '1' })).toEqual({ allowPrivate: true })
+    expect(networkPolicyFor('workspace', {})).toEqual({ allowPrivate: true })
+    expect(networkPolicyFor('environment', {})).toEqual({ allowPrivate: true })
   })
 })

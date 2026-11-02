@@ -2,10 +2,10 @@
 // text deltas, tool calls, proposals, an error, and a final done. Each proposal carries the provider
 // and model, and the editor shows it as a card. Nothing is applied on the server.
 import { z } from 'zod'
-import { LlmError, runChat, scrubError, type Usage } from '@sleid/llm'
+import { failureMessage, LlmError, runChat, type Usage } from '@sleid/llm'
 import type { Deck } from '@sleid/model'
 import { abilityEnv, checkRateLimit, loadDeck, recordUsage, requireEditorOn, type AiDeps } from './ai.server'
-import { resolveProvider, type AiUser } from './llm-settings.server'
+import { logProviderFailure, resolveProvider, type AiUser } from './llm-settings.server'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -88,7 +88,8 @@ export async function handleAiChat(request: Request, deckId: string, deps: AiDep
           if (ev.type === 'error') send({ type: 'error', message: ev.message })
         }
       } catch (err) {
-        send({ type: 'error', message: scrubError(err, resolved.secrets) })
+        logProviderFailure(err, resolved)
+        send({ type: 'error', message: failureMessage(err, resolved.secrets, resolved.scope === 'user') })
       } finally {
         await recordUsage(deps.db, {
           userId: user.id,

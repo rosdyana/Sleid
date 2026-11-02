@@ -2,7 +2,7 @@
 // the connection test, the rate limit and the editor-only rule. Skips when the database is unreachable.
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { decryptSecret, LlmError } from '@sleid/llm'
+import { decryptSecret, LlmError, type LookupFn } from '@sleid/llm'
 import { getLlmProviderFor, grantMembership, recordLlmUsage, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { checkRateLimit, requireEditorOn } from './ai.server.ts'
@@ -23,12 +23,28 @@ let deckId = ''
 const userIds: string[] = []
 let server: LlmTestServer | undefined
 
+// Host names are resolved by this stub, so the tests never depend on DNS. Unknown names fail like DNS does.
+const HOSTS: Record<string, string[]> = {
+  'example.openai.azure.com': ['93.184.216.34'],
+  'res.services.ai.azure.com': ['93.184.216.34'],
+  'my-res.services.ai.azure.com': ['93.184.216.34'],
+  'internal.test': ['10.0.0.7'],
+  'metadata.test': ['169.254.169.254'],
+}
+const lookup: LookupFn = async (host) => {
+  const addresses = HOSTS[host]
+  if (!addresses) throw Object.assign(new Error(`ENOTFOUND ${host}`), { code: 'ENOTFOUND' })
+  return addresses.map((address) => ({ address, family: 4 }))
+}
+
+// The user-scope environment flag is on by default, because these tests run a fake server on 127.0.0.1.
+// The network-policy tests turn it off explicitly.
 function env(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-  return { LLM_SECRET_KEY: KEY, ADMIN_EMAILS: ADMIN_EMAIL, ...extra } as NodeJS.ProcessEnv
+  return { LLM_SECRET_KEY: KEY, ADMIN_EMAILS: ADMIN_EMAIL, LLM_USER_ALLOW_PRIVATE_URLS: '1', ...extra } as NodeJS.ProcessEnv
 }
 
 function deps(extra: Record<string, string | undefined> = {}): SettingsDeps {
-  return { db: db!, env: env(extra) }
+  return { db: db!, env: env(extra), lookup }
 }
 
 beforeAll(async () => {
@@ -162,7 +178,7 @@ describe('provider settings (database)', () => {
     expect(server.seen.at(-1)!.headers.authorization).toBe(`Bearer ${SECRET}`)
   })
 
-  it('a test connection reports OK with the latency and the model, and scrubs the key from failures', async () => {
+  it('a test connection reports OK with the latency and the model, and a user provider failure shows only the status', async () => {
     if (!db) return
     server = await startLlmTestServer([{ text: 'OK' }, { status: 401, error: `bad key ${SECRET}` }])
     const view = await saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Test me', endpoint: server.url, defaultModel: 'fake-local', apiKey: SECRET })
@@ -171,9 +187,21 @@ describe('provider settings (database)', () => {
     expect(typeof ok.latencyMs).toBe('number')
     const failed = await testProvider(deps(), alice, view.id)
     expect(failed.ok).toBe(false)
-    expect(failed.error).toContain('[redacted]')
+    expect(failed.error).toBe('The provider answered HTTP 401 Unauthorized. Check the API key.')
     expect(JSON.stringify(failed)).not.toContain(SECRET)
+    expect(JSON.stringify(failed)).not.toContain('bad key')
     await removeProvider(deps(), alice, view.id)
+  })
+
+  it('a workspace provider keeps the provider text in its failure, with the key removed', async () => {
+    if (!db) return
+    server = await startLlmTestServer([{ status: 401, error: `bad key ${SECRET}` }])
+    const shared = await saveProvider(deps(), admin, { kind: 'openai-compatible', scope: 'workspace', name: 'Shared detail', endpoint: server.url, defaultModel: 'fake-local', apiKey: SECRET })
+    const failed = await testProvider(deps(), alice, shared.id)
+    expect(failed.ok).toBe(false)
+    expect(failed.error).toContain('[redacted]')
+    expect(failed.error).not.toContain(SECRET)
+    await removeProvider(deps(), admin, shared.id)
   })
 
   it('reports a missing provider without throwing', async () => {
@@ -181,6 +209,61 @@ describe('provider settings (database)', () => {
     const result = await testProvider(deps(), alice, randomUUID())
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/not available/)
+  })
+})
+
+describe('network policy (database)', () => {
+  it('refuses a user provider at 127.0.0.1:3002 (the collab internal API) with a clear message', async () => {
+    if (!db) return
+    const off = deps({ LLM_USER_ALLOW_PRIVATE_URLS: undefined })
+    const error = await saveProvider(off, alice, { kind: 'openai-compatible', name: 'Collab', endpoint: 'http://127.0.0.1:3002/v1', defaultModel: 'm' }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).kind).toBe('bad-request')
+    expect((error as LlmError).message).toMatch(/The address 127\.0\.0\.1 is a loopback address/)
+    expect((error as LlmError).message).toMatch(/LLM_USER_ALLOW_PRIVATE_URLS=1/)
+  })
+
+  it('refuses a user host name that resolves to a private address, unless the environment allows it', async () => {
+    if (!db) return
+    const body = { kind: 'openai-compatible' as const, name: 'Internal name', endpoint: 'http://internal.test:8080/v1', defaultModel: 'm' }
+    await expect(saveProvider(deps({ LLM_USER_ALLOW_PRIVATE_URLS: undefined }), alice, body)).rejects.toMatchObject({ kind: 'bad-request' })
+    const allowed = await saveProvider(deps(), alice, body)
+    expect(allowed).toMatchObject({ scope: 'user', name: 'Internal name' })
+    await removeProvider(deps(), alice, allowed.id)
+  })
+
+  it('refuses the cloud metadata address for every scope, even with private addresses allowed', async () => {
+    if (!db) return
+    await expect(saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Meta', endpoint: 'http://169.254.169.254/v1', defaultModel: 'm' })).rejects.toThrow(/never allowed/)
+    await expect(saveProvider(deps(), admin, { kind: 'openai-compatible', scope: 'workspace', name: 'Meta', endpoint: 'http://[fd00:ec2::254]/v1', defaultModel: 'm' })).rejects.toThrow(/never allowed/)
+    await expect(saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Meta name', endpoint: 'http://metadata.test/v1', defaultModel: 'm' })).rejects.toThrow(/never allowed/)
+  })
+
+  it('lets an administrator add a workspace provider on a private address, without the environment flag', async () => {
+    if (!db) return
+    const off = deps({ LLM_USER_ALLOW_PRIVATE_URLS: undefined })
+    const shared = await saveProvider(off, admin, { kind: 'openai-compatible', scope: 'workspace', name: 'Office Ollama', endpoint: 'http://10.0.0.7:11434/v1', defaultModel: 'llama' })
+    expect(shared).toMatchObject({ scope: 'workspace', endpoint: 'http://10.0.0.7:11434/v1' })
+    await removeProvider(off, admin, shared.id)
+  })
+
+  it('checks the policy again before each request, so a provider saved under a looser rule is refused', async () => {
+    if (!db) return
+    const saved = await saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Saved while allowed', endpoint: 'http://127.0.0.1:1/v1', defaultModel: 'm' })
+    await expect(resolveProvider(deps({ LLM_USER_ALLOW_PRIVATE_URLS: undefined }), alice, saved.id)).rejects.toMatchObject({ kind: 'bad-request' })
+    const failed = await testProvider(deps({ LLM_USER_ALLOW_PRIVATE_URLS: undefined }), alice, saved.id)
+    expect(failed).toMatchObject({ ok: false })
+    expect(failed.error).toMatch(/not allowed for this provider/)
+    await removeProvider(deps(), alice, saved.id)
+  })
+
+  it('the environment default is checked too: a metadata endpoint is refused, a private one is allowed', async () => {
+    if (!db) return
+    const meta = deps({ SLEID_LLM_KIND: 'openai-compatible', SLEID_LLM_ENDPOINT: 'http://169.254.169.254/v1', SLEID_LLM_MODEL: 'm' })
+    await expect(resolveProvider(meta, alice, 'env')).rejects.toThrow(/never allowed/)
+    const local = deps({ SLEID_LLM_KIND: 'openai-compatible', SLEID_LLM_ENDPOINT: 'http://127.0.0.1:11434/v1', SLEID_LLM_MODEL: 'm', LLM_USER_ALLOW_PRIVATE_URLS: undefined })
+    const resolved = await resolveProvider(local, alice, 'env')
+    expect(resolved.scope).toBe('environment')
   })
 })
 

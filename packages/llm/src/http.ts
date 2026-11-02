@@ -41,13 +41,19 @@ export async function postJson(url: string, headers: Record<string, string>, bod
       headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
       body: JSON.stringify(body),
       signal,
+      // A redirect is never followed, so it cannot bounce the request to another host.
+      redirect: 'manual',
     })
   } catch (err) {
     throw mapFetchError(err, ctx)
   }
   if (response.ok) return response
-  const detail = redact(await errorDetail(response), ctx.secrets)
   const status = response.status
+  if (status >= 300 && status < 400) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new LlmError('bad-request', `${ctx.label} answered with a redirect (HTTP ${status}). Redirects are not followed, so enter the address the provider serves directly.`, { status })
+  }
+  const detail = redact(await errorDetail(response), ctx.secrets)
   const kind = kindForStatus(status)
   const hint =
     kind === 'auth'

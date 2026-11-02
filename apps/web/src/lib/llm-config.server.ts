@@ -1,8 +1,25 @@
 // Environment settings for the assistant: admins, the key for stored secrets, an optional default
 // provider from the environment, and the per-user rate limit. Read at call time, so tests can set them.
-import type { ProviderSpec } from '@sleid/llm'
+import type { ProviderSpec, UrlPolicy } from '@sleid/llm'
 
 export const ENV_PROVIDER_ID = 'env'
+
+/**
+ * LLM_USER_ALLOW_PRIVATE_URLS=1 lets user-owned providers use loopback and private addresses (a local Ollama or
+ * LM Studio on a single-user setup). Off by default. Anything else, including "true", leaves it off.
+ */
+export function allowPrivateUserUrls(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.LLM_USER_ALLOW_PRIVATE_URLS === '1'
+}
+
+/**
+ * The endpoint policy for a provider. Workspace providers (admins only) and the server default are set by an
+ * operator, so they may use private addresses. User providers may not, unless the environment allows it.
+ * Link-local and metadata addresses are refused for every scope.
+ */
+export function networkPolicyFor(scope: 'user' | 'workspace' | 'environment', env: NodeJS.ProcessEnv = process.env): UrlPolicy {
+  return { allowPrivate: scope !== 'user' || allowPrivateUserUrls(env) }
+}
 
 /** Lower-cased emails from ADMIN_EMAILS (comma-separated). */
 export function adminEmails(env: NodeJS.ProcessEnv = process.env): string[] {

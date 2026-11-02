@@ -1,5 +1,5 @@
 // Builds an adapter from a stored or environment-provided provider spec.
-import { LlmError } from './errors.ts'
+import { LlmError, publicMessage } from './errors.ts'
 import { createFoundryClaudeProvider, type FoundryClaudeConfig } from './adapters/foundry-claude.ts'
 import { createAzureOpenAIProvider } from './adapters/azure-openai.ts'
 import { createOpenAICompatibleProvider } from './adapters/openai-compatible.ts'
@@ -68,4 +68,12 @@ export function scrubError(err: unknown, secrets: readonly string[]): string {
   let message = err instanceof Error ? err.message : String(err)
   for (const secret of secrets) if (secret.length >= 4) message = message.split(secret).join('[redacted]')
   return message
+}
+
+/**
+ * What the user is shown for a failure. With `hideDetails` (user-owned providers) only the status-derived
+ * message is returned. Otherwise the scrubbed message, which can include the provider's own error text.
+ */
+export function failureMessage(err: unknown, secrets: readonly string[], hideDetails: boolean): string {
+  return hideDetails ? publicMessage(err) : scrubError(err, secrets)
 }
