@@ -7,7 +7,8 @@ Living document. Update it as decisions change.
 | Milestone | State |
 |---|---|
 | 0. Scaffold monorepo, compose, Better Auth Google login, Drizzle schema, DESIGN.md + README | **Done** (checks run, see below) |
-| 1. Model + deck-ops + Sheets-style editor, single user, reveal.js present | Pending |
+| 1a. Model (zod schema, Yjs binding, deck-ops, undo) + reveal.js renderer + Markdown | **Done** (checks run, see M1a below) |
+| 1b. Sheets-style editor UI, single user, reveal.js present | Pending |
 | 2. Hocuspocus live co-edit, presence, sharing and roles, link tokens | Pending |
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON | Pending |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | Pending |
@@ -36,6 +37,43 @@ Living document. Update it as decisions change.
 - `drizzle-kit generate` output is checked by applying it to Postgres 17 once. No schema-level tests exist yet.
 - Bytea columns (`deck_snapshots.ydoc`, `deck_updates.update`) are not exercised with real Yjs data until M2.
 - No deployment, backup, or production build was run against a real Postgres beyond local dev.
+
+### What M1a built, and decisions taken while building it
+
+Scope: `packages/model` and `packages/render` only. The editor UI is M1b.
+
+- **Single write path.** Every deck change is a deck-op, applied with `applyOps(doc, ops, origin)`. Ops are zod-validated and JSON-serialisable, so the UI, the assistant and MCP can all send them. `getDeckMap` and `deckToYDoc`/`yDocToDeck` are the only other entry points.
+- **No partial apply.** `applyOps` works in three steps. (1) Parse every op with zod. (2) Dry-run the whole batch on a scratch copy of the doc. Any bad target, duplicate id or failed validation throws `OpError` (with `opIndex`, `opName`, `reason`) here, and the real doc is untouched. (3) Run the same batch on the real doc inside one `doc.transact(fn, origin)`. Step 3 cannot fail, because step 2 passed on the same state. The test suite checks that a failed batch fires no update event and leaves the encoded state vector unchanged.
+- **Ids are fixed before the batch runs.** `addSlide`, `addElement`, `addSection` and `duplicateSlide` get their ids at parse time, so a later op in the same batch can refer to them. Layout placeholders get deterministic ids `${slideId}-${index}`. The dry run and the real run therefore see the same ids. Ids for duplicated elements are generated per run, and nothing references them.
+- **Patch semantics** (`updateElement`, `updateSlide`, `setTheme`). A patch is deep-partial. Nested plain objects merge key by key, arrays and primitives replace, `null` deletes an optional key, and `undefined` is ignored. The merged result is validated with zod before any write. A key that zod would strip (an unknown top-level field) is rejected rather than silently dropped. Patches cannot change `id` or `type`.
+- **Rich text is JSON for now.** Text `content`, `shape.text`, `chart.data` and `chart.echartsOverride` are stored as opaque JSON values and replaced whole on update. Every other element field is a Y.Map entry, so two users editing different keys of one element both survive a merge. M2 moves rich text to Y.XmlFragment for y-prosemirror. Callers use `yDocToDeck` and `applyOps`, so only `ydoc.ts` and `ops.ts` change then.
+- **Rich text schema.** A permissive ProseMirror/TipTap subset. Known marks are typed (`bold`, `italic`, `underline`, `strike`, `code`, `link`, `textStyle`). Unknown nodes and extra keys pass through (`looseObject`). Renderers drop unknown node wrappers and keep their text.
+- **Slide moves re-create the slide.** Yjs has no array move, so `moveSlide` deletes the slide's Y.Map and inserts a copy. Two known consequences, both noted in `ydoc.ts`. (a) An edit to the same slide made concurrently with a move can be lost. Replicas still converge, and the concurrency suite checks that case. (b) Two concurrent moves of one slide can leave a duplicate id, and `yDocToDeck` keeps the first occurrence. Case (b) is not tested yet. Revisit in M2: keep slide order as an array of ids over an id-keyed Y.Map, so a move never re-creates content.
+- **Speaker notes are a plain string** (last writer wins). Y.Text can replace this later if concurrent note editing matters.
+- **Undo.** `createUndoManager(doc, origins, { captureTimeout })` tracks the `deck` root. Its default `captureTimeout` is 0, so each `applyOps` batch is one undo step. The UI can pass a larger value to merge typing. Yjs restores the value recorded when a change was made. So undo can overwrite an untracked remote edit to the same key. The test covers this with a remote change on a different key.
+- **Z-order** is a number per element. `front` and `back` go past the extremes, and `forward` and `backward` swap with the nearest neighbour. Two users reordering at once can produce ties. The renderer sorts by z, stable on array order.
+- **`createDeck`** makes one title slide, so the editor opens with something to edit. Themes: "Sheets Light" (the default) plus Midnight, Warm Paper and High Contrast.
+- **Renderer entry points.** `@sleid/render` (browser-safe, no fs) and `@sleid/render/node` (adds `renderStandaloneDeckHtml`, which reads reveal.js from node_modules). Present and print modes load reveal.js 5.2.1 from jsDelivr. Standalone mode inlines `reveal.css`, `reveal.js` and the notes plugin, which are the UMD builds, so they run as classic inline scripts. An inlined file that contains `</script>` or `</style>` makes the build throw.
+- **Mermaid is not bundled.** Standalone output loads mermaid 12.2.0 from jsDelivr, and only when the deck has a diagram. A deck with diagrams is therefore not fully offline. Bundling mermaid is a later decision, since the bundle is large and the size was not measured.
+- **Charts** render on the server as SVG (ECharts 6.1, `renderer: 'svg', ssr: true`), sized to the element. Pie and donut use the first value column. Scatter treats column 0 as numeric x. `echartsOverride` is deep-merged last, where objects merge and arrays replace. Chart SVG is also passed through a sanitiser that removes script tags, `on*` attributes and `javascript:` URLs.
+- **Untrusted content in HTML.** Text is escaped. Links are kept only for http, https and mailto, and are emitted with `target="_blank" rel="noopener noreferrer"`. Images accept http(s), raster `data:` URLs and root-relative paths. Embeds accept http(s) only, in an iframe sandboxed without `allow-same-origin`. Colours, font families, lengths, gradients and token classes are checked against allow-lists before they reach a `style` or `class` attribute.
+- **Markdown** (`deckToMarkdown` and `markdownToDeck`) covers the basic content only. Slides are separated by `---` lines, and an empty slide still makes a block so the slide count survives. Notes are written as `Note:`. Charts export as pipe tables and import as table elements. Subtitles export as plain paragraphs. Backgrounds, transitions, animations and positions are lost. Known gaps: a `---` line inside notes splits the slide, and a literal `*` pair in text imports as italics.
+- **Dependencies (installed).** `@sleid/model`: yjs 13.6.33, zod 4.6.7 (declared `^4.6.5`, the same range apps/web uses, and locked to the same 4.6.7), nanoid 6.0.2, vitest 5.0.5 (dev). `@sleid/render`: `@sleid/model`, reveal.js 5.2.1 (the newest 5.x), echarts 6.1.0, @types/node 26.6.6 and vitest 5.0.5 (dev). The render tsconfig loads `node` types, since the Node-only entry point needs them.
+
+### M1a verification
+
+- `pnpm install`, `pnpm typecheck` and `pnpm test` from the repo root all exit 0. The root `vitest.config.ts` already includes `packages/*/src/**/*.test.ts`, so it needed no change. Root tests: 9 files, 102 tests. That is 60 in `packages/model` (6 files, including 19 per-op invalid-target cases that cover all 15 op types), 37 in `packages/render` (2 files), and the 5 existing `apps/web` permission tests.
+- `tsc --noUnusedLocals --noUnusedParameters` is clean for both packages.
+- The sample deck (`packages/render/scripts/sample.ts`, 4 slides with a bar chart and an animated callout) was written as standalone HTML. Slides 1 and 3 were screenshotted with playwright-core on the installed Google Chrome. The screenshots are in the session scratchpad, `sample-1.png` and `sample-3.png`, and both match the intended layout.
+- Present mode was checked separately in Chrome. reveal.js loads from the pinned CDN. The animated callout starts hidden as a fragment, appears after one step, and the page logs no errors.
+
+### Unverified
+
+- The editor UI does not exist yet (M1b), so nothing in M1a runs in a live multi-user session. The concurrency tests use in-process `Y.applyUpdate` only, with no network or provider.
+- Mermaid rendering has not been exercised in a browser. The sample deck has no diagram.
+- The screenshots used the installed Google Chrome through `executablePath`, not Playwright's bundled Chromium.
+- Fonts are referenced by name with a generic fallback. Inter is not loaded from anywhere, so on a machine without it the text falls back to the system sans-serif.
+- Property-based tests were not written. Concurrency coverage is a fixed set of scenarios.
 
 ---
 
