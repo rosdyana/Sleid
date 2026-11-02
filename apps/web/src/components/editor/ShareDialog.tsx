@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { canInvite, SHARE_ROLES, type ShareRole } from '@sleid/db/permissions'
 import { inviteFn, listPeopleFn, removeInviteFn, removeMemberFn, setGeneralAccessFn, setMemberRoleFn } from '~/lib/sharing.functions'
+import { getPublishStateFn, setPublishedFn } from '~/lib/publish.functions'
 
 type People = Awaited<ReturnType<typeof listPeopleFn>>
 
@@ -203,6 +204,8 @@ export function ShareDialog({ deckId, onClose }: { deckId: string; onClose: () =
           )}
         </div>
 
+        <PublishSection deckId={deckId} />
+
         <div className="mt-4 flex justify-end">
           <button type="button" onClick={onClose} className="rounded bg-accent px-4 py-1.5 font-medium text-white">
             Done
@@ -210,5 +213,70 @@ export function ShareDialog({ deckId, onClose }: { deckId: string; onClose: () =
         </div>
       </div>
     </div>
+  )
+}
+
+type PublishInfo = { published: boolean; token: string | null; indexable: boolean }
+
+/** "Publish to web": a read-only public link to the presentation. Editors and owners only. */
+function PublishSection({ deckId }: { deckId: string }) {
+  const [info, setInfo] = useState<PublishInfo | null | 'none'>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    getPublishStateFn({ data: { deckId } })
+      .then((r) => setInfo(r.canManage ? (r.state ?? { published: false, token: null, indexable: false }) : 'none'))
+      .catch((err: unknown) => setError(errorText(err)))
+  }, [deckId])
+
+  if (info === 'none') return null
+
+  async function update(next: { published: boolean; indexable?: boolean }) {
+    setBusy(true)
+    setError(null)
+    try {
+      setInfo(await setPublishedFn({ data: { deckId, ...next } }))
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const link = info?.token ? `${window.location.origin}/p/${info.token}` : null
+  return (
+    <section aria-label="Publish to web" className="mt-5 border-t border-rule-soft pt-4">
+      <p className="mb-2 text-[12px] font-medium uppercase tracking-wide text-ink-muted">Publish to web</p>
+      {!info && !error && <p className="text-ink-muted">Loading…</p>}
+      {info && (
+        <>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" role="switch" aria-label="Publish to web" checked={info.published} disabled={busy} onChange={(e) => void update({ published: e.target.checked })} />
+            <span>{info.published ? 'Published: anyone with the link can view it, without signing in' : 'Off: the deck is not public'}</span>
+          </label>
+          {info.published && (
+            <>
+              <div className="mt-2 flex items-center gap-2">
+                <input aria-label="Public link" readOnly value={link ?? ''} onFocus={(e) => e.currentTarget.select()} className="h-9 min-w-0 flex-1 rounded border border-rule bg-[#f8f9fa] px-2 text-[12px]" />
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard?.writeText(link ?? '').then(() => setCopied(true), () => setCopied(false))}
+                  className="h-9 rounded border border-rule px-3 font-medium hover:bg-hover"
+                >
+                  {copied ? 'Copied' : 'Copy link'}
+                </button>
+              </div>
+              <label className="mt-2 flex items-center gap-2 text-[13px]">
+                <input type="checkbox" checked={info.indexable} disabled={busy} onChange={(e) => void update({ published: true, indexable: e.target.checked })} />
+                Allow search engines to index this page
+              </label>
+            </>
+          )}
+        </>
+      )}
+      {error && <p role="alert" className="mt-2 text-[13px] text-red-700">{error}</p>}
+    </section>
   )
 }

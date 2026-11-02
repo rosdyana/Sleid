@@ -15,6 +15,13 @@
       "when": 1793636767267,
       "tag": "0001_overconfident_pandemic",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793643250552,
+      "tag": "0002_new_rogue",
+      "breakpoints": true
     }
   ]
 }

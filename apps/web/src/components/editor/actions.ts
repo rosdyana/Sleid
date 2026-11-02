@@ -1,7 +1,7 @@
 // Editor commands. Menus, the toolbar, the fx bar, the side panel and the
 // keyboard all call these. Each one builds deck-ops and runs them through the
 // session, so every command is one undo step and is saved like any other edit.
-import { deckToMarkdown, renderDeckHtml } from '@sleid/render'
+import { deckToMarkdown } from '@sleid/render'
 import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, type Deck, type Element, type RichText, type Slide, type Theme } from '@sleid/model'
 import { createBlankDeckFn, setStarredFn } from '~/lib/decks.functions'
 import { copyDeckFn } from '~/lib/deck-doc.functions'
@@ -63,7 +63,7 @@ export interface ActionContext {
 
 export type Actions = ReturnType<typeof createActions>
 
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 export function slideIndex(deck: Deck, slideId: string): number {
   const i = deck.slides.findIndex((s) => s.id === slideId)
@@ -236,12 +236,22 @@ export function createActions(c: ActionContext) {
     })
   }
 
-  function insertImageFile(file: File) {
-    if (file.size > MAX_IMAGE_BYTES) return c.toast('Images are limited to 2 MB for now')
+  /** Uploads the image to the deck's asset store and inserts it by URL. Existing data-URL images keep working. */
+  async function insertImageFile(file: File) {
+    if (c.readOnly) return c.toast('View only: you cannot change this deck')
+    if (file.size > MAX_IMAGE_BYTES) return c.toast('Images are limited to 10 MB')
     if (!/^image\/(png|jpe?g|gif|webp|svg\+xml)$/.test(file.type)) return c.toast('Choose a PNG, JPEG, GIF, WebP or SVG image')
-    const reader = new FileReader()
-    reader.onload = () => insert(imageDraft(String(reader.result)))
-    reader.readAsDataURL(file)
+    c.toast('Uploading image…')
+    const form = new FormData()
+    form.append('file', file)
+    try {
+      const response = await fetch(`/api/decks/${c.deckId}/assets`, { method: 'POST', body: form, credentials: 'same-origin' })
+      const body = (await response.json().catch(() => null)) as { url?: string; error?: string } | null
+      if (!response.ok || !body?.url) return c.toast(body?.error ?? 'The image could not be uploaded')
+      insert(imageDraft(body.url))
+    } catch {
+      c.toast('The image could not be uploaded. Check your connection and try again.')
+    }
   }
 
   function deleteSelection() {
@@ -388,11 +398,11 @@ export function createActions(c: ActionContext) {
     }
   }
 
-  function download(format: 'json' | 'markdown' | 'html') {
+  /** Markdown and JSON are made in the browser. The other formats are worker exports (see the export tray). */
+  function download(format: 'json' | 'markdown') {
     const base = fileSafeName(deck.title)
     if (format === 'json') downloadText(`${base}.json`, 'application/json', JSON.stringify(deck, null, 2))
     if (format === 'markdown') downloadText(`${base}.md`, 'text/markdown', deckToMarkdown(deck))
-    if (format === 'html') downloadText(`${base}.html`, 'text/html', renderDeckHtml(deck, { mode: 'present' }))
   }
 
   function present(fromStart = false) {

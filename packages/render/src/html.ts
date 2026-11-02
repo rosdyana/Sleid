@@ -55,12 +55,20 @@ export function safeHref(value: unknown): string | undefined {
 }
 
 // Images: http(s), inline raster data URLs, or root-relative paths.
+/** A relative path to an exported asset, e.g. `assets/0f3c…png`. Only the export bundle uses these. */
+const BUNDLE_ASSET_RE = /^assets\/[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/
+
+export function safeBundleAssetPath(value: unknown): string | undefined {
+  return typeof value === 'string' && BUNDLE_ASSET_RE.test(value.trim()) ? value.trim() : undefined
+}
+
 export function safeImageSrc(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const v = value.trim()
   if (v === '') return undefined
   if (/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(v)) return v
   if (v.startsWith('/') && !v.startsWith('//')) return v
+  if (safeBundleAssetPath(v)) return v
   const href = safeHref(v)
   return href && href.startsWith('http') ? href : undefined
 }
@@ -83,6 +91,8 @@ export function safeGradient(value: unknown): string | undefined {
 
 // Background image URL for CSS url("..."). Only http(s).
 export function safeCssUrl(value: unknown): string | undefined {
+  const bundle = safeBundleAssetPath(value)
+  if (bundle) return `url("${bundle}")`
   const href = safeHref(value)
   return href && href.startsWith('http') ? `url("${href}")` : undefined
 }

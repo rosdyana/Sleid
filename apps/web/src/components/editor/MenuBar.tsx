@@ -20,6 +20,10 @@ export interface MenuDeps {
   redo: () => void
   focusTitle: () => void
   pickImage: () => void
+  /** Starts a worker export that needs no options (PowerPoint, HTML zip). */
+  startExport: (format: 'pptx' | 'html') => void
+  /** Opens the options dialog for an export (PDF, PNG, JPG). */
+  openExport: (format: 'pdf' | 'png' | 'jpg') => void
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
@@ -37,7 +41,11 @@ const VIEWER_ITEMS = new Set([
   'Make a copy',
   'JSON (.json)',
   'Markdown (.md)',
-  'HTML (.html)',
+  'HTML (zip)',
+  'PDF (.pdf)',
+  'PowerPoint (.pptx)',
+  'PNG (.png)',
+  'JPG (.jpg)',
   'Present from beginning',
   'Present from current slide',
   'Show speaker notes',
@@ -86,12 +94,13 @@ function buildAllMenus(d: MenuDeps): Menu[] {
         item('Make a copy', () => void a.makeCopy()),
         sep,
         group('Download', [
-          item('JSON (.json)', () => a.download('json')),
+          item('PDF (.pdf)', () => d.openExport('pdf')),
+          item('PowerPoint (.pptx)', () => d.startExport('pptx')),
+          item('PNG (.png)', () => d.openExport('png')),
+          item('JPG (.jpg)', () => d.openExport('jpg')),
+          item('HTML (zip)', () => d.startExport('html')),
           item('Markdown (.md)', () => a.download('markdown')),
-          item('HTML (.html)', () => a.download('html')),
-          { kind: 'item', label: 'PDF (.pdf)', ...TODO('M3') },
-          { kind: 'item', label: 'PowerPoint (.pptx)', ...TODO('M3') },
-          { kind: 'item', label: 'PNG per slide', ...TODO('M3') },
+          item('JSON (.json)', () => a.download('json')),
         ]),
         sep,
         item('Rename', d.focusTitle),
@@ -137,7 +146,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
       label: 'Insert',
       items: [
         item('Text box', a.insertText),
-        group('Image', [item('From URL…', a.insertImageUrl), item('Upload (up to 2 MB)…', d.pickImage)]),
+        group('Image', [item('From URL…', a.insertImageUrl), item('Upload (up to 10 MB)…', d.pickImage)]),
         group(
           'Shape',
           SHAPE_KINDS.map((k) => item(SHAPE_LABELS[k] ?? k, () => a.insertShape(k))),

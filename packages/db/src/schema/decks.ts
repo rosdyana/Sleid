@@ -3,6 +3,8 @@ import {
   bigserial,
   boolean,
   index,
+  integer,
+  jsonb,
   pgEnum,
   pgTable,
   primaryKey,
@@ -27,6 +29,11 @@ export const decks = pgTable('decks', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  /** "Publish to web" token. Null when the deck is not published. Anyone with it can view the deck. */
+  publishedToken: text('published_token').unique(),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
+  /** When false (the default) the public page asks search engines not to index it. */
+  publishedIndexable: boolean('published_indexable').notNull().default(false),
 })
 
 export const deckMembers = pgTable(
@@ -107,4 +114,54 @@ export const deckUpdates = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('deck_updates_deck_id_idx').on(t.deckId, t.id)],
+)
+
+/** Uploaded images. The bytes live in the storage driver under the asset id; this row holds the metadata. */
+export const assets = pgTable(
+  'assets',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    deckId: uuid('deck_id')
+      .notNull()
+      .references(() => decks.id, { onDelete: 'cascade' }),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    mime: text('mime').notNull(),
+    /** Size of the stored file in bytes. */
+    bytes: integer('bytes').notNull(),
+    sha256: text('sha256').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('assets_deck_id_idx').on(t.deckId)],
+)
+
+export const exportFormat = pgEnum('export_format', ['pdf', 'png', 'jpg', 'pptx', 'html', 'markdown', 'json'])
+export const exportStatus = pgEnum('export_status', ['queued', 'running', 'done', 'failed'])
+
+/** One row per export request. The worker fills in the status, the file location and any error. */
+export const exportJobs = pgTable(
+  'exports',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    deckId: uuid('deck_id')
+      .notNull()
+      .references(() => decks.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    format: exportFormat('format').notNull(),
+    status: exportStatus('status').notNull().default('queued'),
+    options: jsonb('options').$type<Record<string, unknown>>().notNull().default({}),
+    error: text('error'),
+    /** Storage key of the finished file. */
+    fileKey: text('file_key'),
+    fileName: text('file_name'),
+    contentType: text('content_type'),
+    bytes: integer('bytes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (t) => [index('exports_user_id_idx').on(t.userId, t.createdAt)],
 )

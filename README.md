@@ -1,19 +1,22 @@
 # Sleid
 
-A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, and (planned) export, an AI assistant and MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
+A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), publish to web, and (planned) an AI assistant and MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 2** (live co-editing through Hocuspocus, presence, roles, sharing). See the status table in DESIGN.md.
+Status: **milestone 3** (export worker, asset storage, publish to web). See the status table in DESIGN.md.
 
 ## Layout
 
 ```
 apps/web        TanStack Start app: UI, server functions, /api/auth, /api/health
 apps/collab     Hocuspocus WebSocket server (Yjs), auth, persistence, internal API
-apps/worker     placeholder (pg-boss jobs, milestone 3)
-packages/db     @sleid/db: Drizzle schema, DB client, deck persistence, roles, sharing, collab tokens
+apps/worker     export worker: pg-boss consumer, Chrome for PDF/PNG/diagrams, PPTX, HTML zip
+packages/db     @sleid/db: Drizzle schema, DB client, deck persistence, roles, sharing, collab tokens, assets, exports, publish
+packages/storage @sleid/storage: storage driver (local disk; S3 stub), data directory resolution
+packages/jobs   @sleid/jobs: pg-boss queue wrapper (export jobs)
+packages/pptx   @sleid/pptx: deck to PPTX (pptxgenjs, native text, shapes, tables, charts)
 packages/model  deck schema, Yjs binding, deck-ops
 packages/render deck to reveal.js HTML
-packages/*      placeholders: pptx, llm, ui
+packages/*      placeholders: llm, ui
 compose.yml     local Postgres 17 on 127.0.0.1:5433 (no collab container yet, see below)
 ```
 
@@ -38,12 +41,12 @@ Paste those values into `.env`. Fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SE
 ```bash
 docker compose up -d db     # Postgres on 127.0.0.1:5433
 pnpm db:migrate             # applies apps/web/drizzle/*.sql
-pnpm dev                    # web on http://localhost:3000, collab on ws://localhost:3001
+pnpm dev                    # web on http://localhost:3000, collab on ws://localhost:3001, export worker
 ```
 
 Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open the same deck in a second browser profile (or a private window) to see live co-editing.
 
-`pnpm dev` runs both services. If `COLLAB_TOKEN_SECRET` or `COLLAB_INTERNAL_SECRET` is missing, the collab service exits at startup with a message that names the variable.
+`pnpm dev` runs all three services. If `COLLAB_TOKEN_SECRET` or `COLLAB_INTERNAL_SECRET` is missing, the collab service exits at startup with a message that names the variable.
 
 ## Environment variables
 
@@ -60,6 +63,12 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 | `COLLAB_INTERNAL_PORT`, `COLLAB_INTERNAL_HOST` | collab | Internal API listener, default `127.0.0.1:3002`. It is never on the WebSocket port. |
 | `COLLAB_INTERNAL_URL` | web | Where web reaches the internal API, default `http://127.0.0.1:3002` |
 | `VITE_COLLAB_URL` | web (browser) | WebSocket URL the editor connects to, default `ws://localhost:3001` |
+| `STORAGE_DRIVER` | web, worker | `local` (default). `s3` is a stub and refuses to start. |
+| `ASSET_DIR` | web, worker | Uploaded images. Default `data/assets` under the repository root. |
+| `EXPORT_DIR` | web, worker | Finished exports. Default `data/exports` under the repository root. |
+| `CHROME_PATH` | worker | Chrome for PDF, PNG/JPG and PPTX diagrams. Empty uses Playwright's bundled Chromium. |
+| `EXPORT_CONCURRENCY` | worker | Export jobs at once, 1 to 32. Default 2. |
+| `EXPORT_TMP_DIR` | worker | Scratch folder for export work. Default: the OS temp directory. |
 
 ## Google OAuth client
 
@@ -76,7 +85,7 @@ Without these values the Google button will fail at sign-in. The server logs a w
 
 | Command | What it does |
 |---|---|
-| `pnpm dev` | Web (port 3000) and collab (port 3001) together |
+| `pnpm dev` | Web (port 3000), collab (port 3001) and the export worker together |
 | `pnpm build` | Build every workspace that has a build script (apps/web) |
 | `pnpm typecheck` | `tsc --noEmit` in every workspace |
 | `pnpm test` | Vitest across apps/* and packages/*. DB tests need Postgres on 127.0.0.1:5433 and skip with a message when it is down. |
@@ -84,6 +93,7 @@ Without these values the Google button will fail at sign-in. The server logs a w
 | `pnpm db:migrate` | Apply migrations using `DATABASE_URL` |
 | `pnpm --filter @sleid/web test:e2e` | Smoke test (single user, needs the dev servers) |
 | `pnpm --filter @sleid/web test:e2e:collab` | Two-browser co-editing check (needs the dev servers) |
+| `pnpm --filter @sleid/web test:e2e:export` | Export, publish and public page check (needs the dev servers and Chrome) |
 
 ## Browser checks
 
@@ -101,9 +111,31 @@ SCREENSHOT_DIR=./test-results/screenshots \
   pnpm --filter @sleid/web test:e2e:collab    # terminal 2: co-editing
 ```
 
+The export check (`test:e2e:export`) builds a deck with text, a chart, an uploaded image and a Mermaid diagram, exports PDF and PPTX from the menus, verifies both files, publishes the deck, opens the public page logged out, unpublishes it, and writes PNG renders of the outputs (macOS `sips`, and LibreOffice if `soffice` is installed). It needs the worker, so it runs under `pnpm dev`.
+
 The smoke test signs up, creates a deck, and checks the editor and the present view. The co-editing check uses three accounts. Owner A shares the deck with B by email and turns on "anyone with the link: viewer". B edits live with A. C opens the link and must stay read-only, including against a forced write with a valid viewer token. Screenshots go to `SCREENSHOT_DIR`.
 
 The test runs need `COLLAB_TOKEN_SECRET` and `COLLAB_INTERNAL_SECRET` in the environment, because the co-editing check signs a viewer token and reads the internal API.
+
+## Export
+
+File ▸ Download in the editor:
+
+| Item | Made by | Notes |
+|---|---|---|
+| PDF | worker (Chrome) | One page per visible slide, 1920 × 1080. Options: speaker notes (one extra page after each slide with notes), hidden slides. |
+| PowerPoint | worker (pptxgenjs) | 16:9. Text, shapes, tables and charts are native and editable. Hidden slides are kept and marked hidden. See the fidelity table in DESIGN.md. |
+| PNG / JPG | worker (Chrome) | All visible slides in a zip, or the current slide alone. Scale 0.5, 1 or 2. |
+| HTML (zip) | worker | Standalone `index.html` with reveal.js inlined and the images next to it. Works offline. |
+| Markdown, JSON | browser | Same as before M3. |
+
+A worker export appears in the progress tray at the bottom right. Its download link is only offered to the person who asked for it. Exports run in `apps/worker`, so `pnpm dev` must be running for them to finish. Exports read the live document from the collab service and fall back to the saved state when it is down.
+
+Exports never load anything from the open internet. The worker blocks every request except its own bundle server on 127.0.0.1 and `data:` URLs. Embeds and images that point at external URLs therefore come out blank in PDF and PNG, and are not fetched for PPTX.
+
+**Publish to web** (Share dialog, owner and editor): a link like `/p/<token>` shows the presentation read-only, with no sign-in and a "Made with Sleid" footer. Search engines are asked not to index it unless you tick the option. Turning publish off clears the link.
+
+**Images** are uploaded to `/api/decks/<deckId>/assets` (10 MB, PNG, JPEG, GIF, WebP or SVG) and stored under `ASSET_DIR`. SVG files with scripts or event handlers are refused, and SVG responses carry `Content-Security-Policy: sandbox`.
 
 ## Sharing
 
@@ -113,9 +145,10 @@ Commenters and viewers get a read-only editor with a "View only" badge. The serv
 
 ## Database
 
-- Schema: `packages/db/src/schema/` (Better Auth tables, `decks`, `deck_members` with per-user `starred`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`).
+- Schema: `packages/db/src/schema/` (Better Auth tables, `decks` with publish fields, `deck_members` with per-user `starred`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`, `assets`, `exports`).
 - Migrations: `apps/web/drizzle/`. The schema lives in `@sleid/db`, and drizzle-kit reads it from there. Regenerate with `pnpm db:generate` after schema changes and commit the SQL.
 - Migration `0001` moves `starred` from `decks` to `deck_members` and copies the value to every member. Its data copy is hand-written. Check it when you change the migration.
+- Migration `0002` adds `assets`, `exports`, and the publish columns on `decks`.
 - Migrations run as the compose user. There is no row-level security or separate app role yet.
 
 ## Notes

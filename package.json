@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm -r --parallel --filter ./apps/web --filter ./apps/collab dev",
+    "dev": "pnpm -r --parallel --filter ./apps/web --filter ./apps/collab --filter ./apps/worker dev",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",

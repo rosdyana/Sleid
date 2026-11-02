@@ -48,7 +48,13 @@ const ALIGN = new Set(['left', 'center', 'right', 'justify'])
 // Slides
 // ---------------------------------------------------------------------------
 
-export function renderSlideHtml(slide: Slide, deck: Deck): string {
+export interface SlideRenderOptions {
+  /** Animated elements become reveal fragments (default). Print output turns this off: one page per slide, all content visible. */
+  fragments?: boolean
+}
+
+export function renderSlideHtml(slide: Slide, deck: Deck, options: SlideRenderOptions = {}): string {
+  const fragments = options.fragments !== false
   const theme = deck.theme
   const attrs = [`class="sleid-slide layout-${safeClass(slide.layout)}"`, `data-slide-id="${escapeHtml(slide.id)}"`]
   const transition = TRANSITIONS.has(slide.transition) ? slide.transition : 'none'
@@ -59,7 +65,7 @@ export function renderSlideHtml(slide: Slide, deck: Deck): string {
 
   const elements = [...slide.elements]
     .sort((a, b) => a.z - b.z)
-    .map((el) => renderElement(el, theme))
+    .map((el) => renderElement(el, theme, fragments))
     .join('')
   const notes = slide.notes ? `<aside class="notes">${escapeHtml(slide.notes)}</aside>` : ''
   return `<section ${attrs.join(' ')}><div class="sleid-stage">${elements}</div>${notes}</section>`
@@ -91,33 +97,33 @@ function slideBackgroundCss(slide: Slide, theme: Theme): string {
 // Elements
 // ---------------------------------------------------------------------------
 
-export function renderElement(el: Element, theme: Theme): string {
+export function renderElement(el: Element, theme: Theme, fragments = true): string {
   switch (el.type) {
     case 'text':
-      return frame(el, renderText(el), 'sleid-text-el')
+      return frame(el, renderText(el), 'sleid-text-el', fragments)
     case 'shape':
-      return frame(el, renderShape(el, theme), 'sleid-shape')
+      return frame(el, renderShape(el, theme), 'sleid-shape', fragments)
     case 'image':
-      return frame(el, renderImage(el), 'sleid-image-el')
+      return frame(el, renderImage(el), 'sleid-image-el', fragments)
     case 'chart':
-      return frame(el, `<div class="sleid-chart">${renderChartSvg(el, theme)}</div>`, 'sleid-chart-el')
+      return frame(el, `<div class="sleid-chart">${renderChartSvg(el, theme)}</div>`, 'sleid-chart-el', fragments)
     case 'diagram':
-      return frame(el, renderDiagram(el), 'sleid-diagram-el')
+      return frame(el, renderDiagram(el), 'sleid-diagram-el', fragments)
     case 'table':
-      return frame(el, renderTable(el), 'sleid-table-el')
+      return frame(el, renderTable(el), 'sleid-table-el', fragments)
     case 'code':
-      return frame(el, renderCode(el), 'sleid-code-el')
+      return frame(el, renderCode(el), 'sleid-code-el', fragments)
     case 'embed':
-      return frame(el, renderEmbed(el), 'sleid-embed-el')
+      return frame(el, renderEmbed(el), 'sleid-embed-el', fragments)
   }
 }
 
 // Positioned wrapper. Fragment classes go on the wrapper so reveal can
 // animate it. Rotation and opacity go on the inner body.
-function frame(el: Element, inner: string, kind: string): string {
+function frame(el: Element, inner: string, kind: string, fragments = true): string {
   const classes = ['sleid-el', kind]
   let fragmentAttr = ''
-  if (el.animation) {
+  if (el.animation && fragments) {
     classes.push('fragment', EFFECT_CLASS[el.animation.effect] ?? 'fade-in')
     fragmentAttr = ` data-fragment-index="${num(el.animation.order)}"`
   }
@@ -238,19 +244,60 @@ function renderEmbed(el: EmbedElement): string {
 
 export type RenderMode = 'present' | 'standalone' | 'print'
 
-// Contents of reveal.js files, used to inline them into standalone output.
 export interface RevealAssets {
   revealCss: string
   revealJs: string
   notesJs: string
 }
 
+/**
+ * Where the mermaid library comes from. `module` loads an ES module (the default, from jsDelivr).
+ * A classic script (`module: false`) works from file:// too, so offline bundles use it.
+ */
+export interface MermaidScript {
+  src: string
+  module: boolean
+}
+
 export interface RenderDeckOptions {
   mode: RenderMode
-  // Where reveal.js is loaded from in present and print mode. Defaults to the pinned CDN.
+  /** Base URL of reveal.js when `assets` is not given. Defaults to jsDelivr. */
   assetBase?: string
-  // Required for standalone mode. Use renderStandaloneDeckHtml from @sleid/render/node.
+  /** Inline reveal.js. Required for standalone; used by print when given (so the page needs no network). */
   assets?: RevealAssets
+  /** Mermaid source. Default: the jsDelivr ES module. Used when the deck has diagrams and the mode is standalone or print. */
+  mermaid?: MermaidScript
+  /** Print mode only: speaker notes on a separate page after each slide (reveal showNotes 'separate-page'). */
+  showNotes?: boolean
+}
+
+export const DEFAULT_MERMAID_SCRIPT: MermaidScript = { src: MERMAID_MODULE_URL, module: true }
+
+/** Set on <html> when diagrams have been drawn (`done`) or failed (`error`). Exporters wait for it. */
+export const DIAGRAMS_STATE_ATTR = 'data-sleid-diagrams'
+
+function mermaidScriptTags(script: MermaidScript): string[] {
+  const src = JSON.stringify(script.src).replace(/</g, '\\u003c')
+  const run = `mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+    await mermaid.run({ querySelector: '.mermaid' });`
+  if (script.module) {
+    return [
+      `<script type="module">
+  import mermaid from ${src};
+  try { ${run}; document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'done'); }
+  catch (err) { console.error(err); document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error'); }
+</script>`,
+    ]
+  }
+  return [
+    `<script src="${escapeHtml(script.src)}"></script>`,
+    `<script>
+  (async () => {
+    try { ${run}; document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'done'); }
+    catch (err) { console.error(err); document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error'); }
+  })();
+</script>`,
+  ]
 }
 
 export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
@@ -259,7 +306,7 @@ export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
     throw new Error('standalone mode needs reveal.js assets; use renderStandaloneDeckHtml from @sleid/render/node')
   }
   const base = (options.assetBase ?? DEFAULT_ASSET_BASE).replace(/\/$/, '')
-  const slides = deck.slides.map((s) => renderSlideHtml(s, deck)).join('\n')
+  const slides = deck.slides.map((s) => renderSlideHtml(s, deck, { fragments: mode !== 'print' })).join('\n')
   const hasDiagrams = deck.slides.some((s) => s.elements.some((e) => e.type === 'diagram'))
 
   const head: string[] = [
@@ -268,9 +315,17 @@ export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
     `<title>${escapeHtml(deck.title)}</title>`,
     `<style>\n${themeCssVariables(deck.theme)}\n${BASE_CSS}\n</style>`,
   ]
+  if (mode === 'print' && options.showNotes) {
+    // The last notes page would end with a page break and print an empty trailing page.
+    head.push('<style>.reveal .slides > :last-child { page-break-after: auto !important; break-after: auto !important; }</style>')
+  }
+  if (hasDiagrams) {
+    // Mermaid appends a hover tooltip to <body>, outside the slide. It would add a page when printed.
+    head.push('<style>div.mermaidTooltip { display: none !important; }</style>')
+  }
   const scripts: string[] = []
 
-  if (mode === 'standalone' && options.assets) {
+  if (options.assets) {
     const a = options.assets
     head.push(`<style>\n${assertInlineSafe(a.revealCss, 'style', 'reveal.css')}\n</style>`)
     scripts.push(`<script>\n${assertInlineSafe(a.revealJs, 'script', 'reveal.js')}\n</script>`)
@@ -281,13 +336,12 @@ export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
     scripts.push(`<script src="${escapeHtml(`${base}/plugin/notes/notes.js`)}"></script>`)
   }
 
-  const controls = mode === 'print' ? ', controls: false, progress: false' : ''
-  scripts.push(`<script>\n  Reveal.initialize({ width: 1920, height: 1080, margin: 0, hash: true, plugins: [RevealNotes]${controls} });\n</script>`)
+  const printOptions = mode === 'print' ? ', controls: false, progress: false' : ''
+  const notesOption = mode === 'print' && options.showNotes ? ", showNotes: 'separate-page'" : ''
+  scripts.push(`<script>\n  Reveal.initialize({ width: 1920, height: 1080, margin: 0, hash: true, plugins: [RevealNotes]${printOptions}${notesOption} });\n</script>`)
 
-  if (mode === 'standalone' && hasDiagrams) {
-    scripts.push(
-      `<script type="module">\n  import mermaid from '${MERMAID_MODULE_URL}';\n  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });\n  await mermaid.run({ querySelector: '.mermaid' });\n</script>`,
-    )
+  if (hasDiagrams && (mode === 'standalone' || mode === 'print' || options.mermaid)) {
+    scripts.push(...mermaidScriptTags(options.mermaid ?? DEFAULT_MERMAID_SCRIPT))
   }
 
   return [

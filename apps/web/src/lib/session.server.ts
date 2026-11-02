@@ -17,3 +17,9 @@ export async function requireUser(): Promise<SessionUser> {
   if (!user) throw new Error('Not signed in')
   return user
 }
+
+/** The signed-in user id for a raw request (used by /api routes), or null. */
+export async function sessionUserIdFromRequest(request: Request): Promise<string | null> {
+  const result = await auth.api.getSession({ headers: request.headers })
+  return result?.user.id ?? null
+}

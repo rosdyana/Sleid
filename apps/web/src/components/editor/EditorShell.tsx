@@ -16,6 +16,8 @@ import { MenuBar, buildMenus } from './MenuBar.tsx'
 import { ContextMenu, PromptDialog, ShortcutsDialog, Toast, type MenuEntry } from './Overlays.tsx'
 import { FormulaBar, TitleBar, Toolbar } from './Chrome.tsx'
 import { ShareDialog } from './ShareDialog.tsx'
+import { ExportDialog, type DialogFormat } from './ExportDialog.tsx'
+import { ExportTray, useExportJobs } from './ExportTray.tsx'
 import { getCollabTokenFn } from '~/lib/collab.functions'
 import { setStarredFn } from '~/lib/decks.functions'
 
@@ -87,6 +89,8 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
   const [prompt, setPrompt] = useState<PromptRequest | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [exportDialog, setExportDialog] = useState<DialogFormat | null>(null)
+  const exportJobs = useExportJobs(meta.id)
   const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
   const [starred, setStarredState] = useState(meta.starred)
   const titleRef = useRef<HTMLInputElement>(null)
@@ -161,6 +165,12 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
       titleRef.current?.select()
     },
     pickImage: () => imageInput.current?.click(),
+    startExport: (format) => {
+      void exportJobs.start({ format, options: {}, label: format === 'pptx' ? 'PowerPoint' : 'HTML (zip)' }).catch((err: unknown) =>
+        toast(err instanceof Error ? err.message : 'Could not start the export'),
+      )
+    },
+    openExport: (format) => setExportDialog(format),
     prompt: setPrompt,
     openShortcuts: () => setShortcutsOpen(true),
     toast,
@@ -404,6 +414,19 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
       {prompt && <PromptDialog request={prompt} onClose={() => setPrompt(null)} />}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {shareOpen && <ShareDialog deckId={meta.id} onClose={() => setShareOpen(false)} />}
+      {exportDialog && (
+        <ExportDialog
+          format={exportDialog}
+          slides={deck.slides}
+          currentSlideId={slideId}
+          onClose={() => setExportDialog(null)}
+          onStart={(format, options, label) => {
+            setExportDialog(null)
+            exportJobs.start({ format, options, label }).catch((err: unknown) => toast(err instanceof Error ? err.message : 'Could not start the export'))
+          }}
+        />
+      )}
+      <ExportTray jobs={exportJobs.jobs} onDismiss={exportJobs.dismiss} />
       {context && context.items.length > 0 && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
       <Toast message={toastMessage} onDone={onToastDone} />
       <span className="sr-only" aria-live="polite">

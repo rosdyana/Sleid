@@ -82,3 +82,10 @@ export function getCollabInternalClient(): CollabInternalClient {
   const baseUrl = process.env.COLLAB_INTERNAL_URL ?? `http://127.0.0.1:${process.env.COLLAB_INTERNAL_PORT ?? '3002'}`
   return createCollabInternalClient({ baseUrl, secret })
 }
+
+/** The live-document source for exports and publishing, or undefined when the collab secret is not set (the database is then read). */
+export function liveDeckSourceFromEnv(): { baseUrl: string; secret: string } | undefined {
+  const secret = process.env.COLLAB_INTERNAL_SECRET
+  if (!secret) return undefined
+  return { baseUrl: process.env.COLLAB_INTERNAL_URL ?? `http://127.0.0.1:${process.env.COLLAB_INTERNAL_PORT ?? '3002'}`, secret }
+}
