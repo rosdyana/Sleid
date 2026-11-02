@@ -49,7 +49,12 @@ function Dashboard() {
           <span className="grid size-8 place-items-center rounded bg-accent text-white font-semibold">S</span>
           <span className="text-lg font-medium">Sleid</span>
         </div>
-        <SignOutButton />
+        <div className="flex items-center gap-1">
+          <Link to="/settings/ai" className="rounded px-3 py-1.5 text-ink-muted hover:bg-hover">
+            AI settings
+          </Link>
+          <SignOutButton />
+        </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-8">

@@ -3,7 +3,7 @@
 //
 // Every gesture reports one geometry change when it ends (onGeometry), so a drag
 // is one deck-op and one undo step, not one op per frame.
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import Moveable, { type OnDrag, type OnDragEnd, type OnDragStart, type OnResize, type OnResizeEnd, type OnRotate, type OnRotateEnd } from 'react-moveable'
 import type { Element, RichText, Slide, Theme } from '@sleid/model'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
@@ -30,13 +30,15 @@ export interface CanvasProps {
   onCommitText: (id: string, content: RichText) => void
   /** Pointer position in slide coordinates, or null when it leaves the canvas. */
   onCursor: (point: { x: number; y: number } | null) => void
+  /** Right-click on an element. The element is selected first. */
+  onElementContextMenu?: (x: number, y: number, el: Element) => void
 }
 
 // 100% zoom shows the stage 1280 px wide.
 const PERCENT_SCALE = 1280 / CANVAS_W / 100
 
 export function SlideCanvas(props: CanvasProps) {
-  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor } = props
+  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor, onElementContextMenu } = props
   const outerRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [available, setAvailable] = useState({ w: 900, h: 600 })
@@ -106,6 +108,16 @@ export function SlideCanvas(props: CanvasProps) {
       .filter((el) => el.x < right && el.x + el.w > left && el.y < bottom && el.y + el.h > top)
       .map((el) => el.id)
     onSelect(e.shiftKey ? [...new Set([...selection, ...hits])] : hits)
+  }
+
+  function onStageContextMenu(e: ReactMouseEvent<HTMLDivElement>) {
+    if (!onElementContextMenu || editingId) return
+    const node = (e.target as HTMLElement).closest<HTMLElement>('[data-el]')
+    const el = node ? slide.elements.find((x) => x.id === node.dataset.el) : undefined
+    if (!el) return
+    e.preventDefault()
+    if (!selection.includes(el.id)) onSelect([el.id])
+    onElementContextMenu(e.clientX, e.clientY, el)
   }
 
   function onElementPointerDown(el: Element, e: ReactPointerEvent<HTMLDivElement>) {
@@ -181,6 +193,7 @@ export function SlideCanvas(props: CanvasProps) {
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
         onPointerLeave={() => onCursor(null)}
+        onContextMenu={onStageContextMenu}
         data-testid="slide-canvas"
       >
         <SlideSurface

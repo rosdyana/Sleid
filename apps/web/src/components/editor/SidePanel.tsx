@@ -6,7 +6,6 @@ import type { Actions, UiState } from './actions.ts'
 import { CHART_LABELS, elementLabel, SHAPE_LABELS } from './commands.ts'
 
 const PLACEHOLDER_TABS = [
-  { label: 'AI', note: 'AI assistant arrives in milestone 4' },
   { label: 'Comments', note: 'Comments arrive in milestone 7' },
   { label: 'History', note: 'Version history arrives in milestone 7' },
 ] as const
@@ -19,6 +18,7 @@ export function SidePanel({
   setUi,
   actions,
   readOnly,
+  aiPanel,
 }: {
   deck: Deck
   slide: Slide
@@ -27,12 +27,15 @@ export function SidePanel({
   setUi: (patch: Partial<UiState>) => void
   actions: Actions
   readOnly: boolean
+  /** The assistant panel. Only passed for editors and owners. */
+  aiPanel?: ReactNode
 }) {
   const single = selected.length === 1 ? selected[0] : undefined
   const tabs: Array<{ id: UiState['sidePanel']; label: string }> = [
     { id: 'format', label: 'Format' },
     { id: 'slide', label: 'Slide' },
     { id: 'theme', label: 'Theme' },
+    ...(aiPanel ? [{ id: 'ai' as const, label: 'AI' }] : []),
   ]
   return (
     <aside aria-label="Side panel" className="flex w-72 shrink-0 flex-col border-l border-rule bg-white">
@@ -65,10 +68,11 @@ export function SidePanel({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3 text-[13px]">
         {/* Viewers and commenters see the values but cannot change them. */}
-        <fieldset disabled={readOnly} className="min-w-0 border-0 p-0">
+        <fieldset disabled={readOnly} className="flex min-h-0 min-w-0 flex-col border-0 p-0">
           {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
           {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
           {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
+          {ui.sidePanel === 'ai' && aiPanel}
         </fieldset>
       </div>
     </aside>

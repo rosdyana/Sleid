@@ -1,2 +1,25 @@
-// Placeholder: no implementation yet (see docs/DESIGN.md milestones).
-export {}
+// @sleid/llm: provider adapters, structured output, the assistant's abilities and their safety rules.
+// Server-side only. It carries provider keys in memory and sends deck content to a model.
+export * from './types.ts'
+export * from './errors.ts'
+export * from './retry.ts'
+export * from './json.ts'
+export * from './structured.ts'
+export * from './context.ts'
+export * from './ops-check.ts'
+export * from './contrast.ts'
+export * from './layout-guard.ts'
+export * from './mermaid.ts'
+export * from './secret-box.ts'
+export * from './factory.ts'
+export { createFoundryClaudeProvider, foundryEndpointOptions } from './adapters/foundry-claude.ts'
+export { createAzureOpenAIProvider, azureChatUrl, DEFAULT_AZURE_API_VERSION } from './adapters/azure-openai.ts'
+export { createOpenAICompatibleProvider, chatUrl } from './adapters/openai-compatible.ts'
+export type { StructuredMode } from './adapters/openai-chat.ts'
+export * from './abilities/common.ts'
+export * from './abilities/index.ts'
+export * from './abilities/chat.ts'
+export { explain, ExplainInput } from './abilities/explain.ts'
+export { REWRITE_MODES, type RewriteMode } from './abilities/rewrite-text.ts'
+export { FONT_STACKS } from './abilities/generate-theme.ts'
+export { NOTE_TONES, NOTE_LENGTHS } from './abilities/speaker-notes.ts'

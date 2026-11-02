@@ -1,6 +1,6 @@
 // Title bar, formatting toolbar and fx bar. The fx bar shows the selected
 // element like a cell reference, and its input edits whatever the element holds.
-import type { RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Image as ImageIcon, Italic, MousePointer2, Plus, Presentation, Redo2, Sparkles, Star, Strikethrough, Table2, Type, Underline, Undo2 } from 'lucide-react'
 import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
@@ -331,6 +331,8 @@ export function FormulaBar({
   actions,
   setUi,
   readOnly,
+  onAskAi,
+  askMenu,
 }: {
   deck: Deck
   slide: Slide
@@ -338,6 +340,10 @@ export function FormulaBar({
   actions: Actions
   setUi: (patch: Partial<UiState>) => void
   readOnly: boolean
+  /** Opens the Ask AI menu. Only passed for editors and owners. */
+  onAskAi?: () => void
+  /** The open Ask AI menu, positioned under the button. */
+  askMenu?: ReactNode
 }) {
   const n = deck.slides.findIndex((s) => s.id === slide.id) + 1
   const ref = single ? `Slide ${n} · ${elementLabel(single)}` : `Slide ${n}`
@@ -395,7 +401,7 @@ export function FormulaBar({
   }
 
   return (
-    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-rule bg-white px-2 text-ink-muted">
+    <div className="relative flex h-8 shrink-0 items-center gap-2 border-b border-rule bg-white px-2 text-ink-muted">
       <span className="w-56 truncate rounded border border-rule-soft px-2 py-0.5 text-center text-[12px] text-ink" title={ref}>
         {ref}
       </span>
@@ -422,14 +428,17 @@ export function FormulaBar({
           Open data
         </button>
       )}
-      <button
-        type="button"
-        disabled
-        title="AI assistant arrives in milestone 4"
-        className="flex items-center gap-1 rounded-full border border-rule px-3 py-0.5 text-[12px] text-ink-muted opacity-60"
-      >
-        <Sparkles size={13} aria-hidden /> Ask AI
-      </button>
+      {onAskAi && (
+        <button
+          type="button"
+          onClick={onAskAi}
+          aria-haspopup="menu"
+          className="flex items-center gap-1 rounded-full border border-rule px-3 py-0.5 text-[12px] text-ink hover:bg-hover"
+        >
+          <Sparkles size={13} aria-hidden /> Ask AI
+        </button>
+      )}
+      {askMenu && <div className="absolute right-2 top-full z-40 mt-1">{askMenu}</div>}
     </div>
   )
 }

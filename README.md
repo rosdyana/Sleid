@@ -1,8 +1,8 @@
 # Sleid
 
-A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), publish to web, and (planned) an AI assistant and MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
+A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 3** (export worker, asset storage, publish to web). See the status table in DESIGN.md.
+Status: **milestone 4** (AI assistant: pluggable providers, proposals you preview and apply). See the status table in DESIGN.md.
 
 ## Layout
 
@@ -16,7 +16,8 @@ packages/jobs   @sleid/jobs: pg-boss queue wrapper (export jobs)
 packages/pptx   @sleid/pptx: deck to PPTX (pptxgenjs, native text, shapes, tables, charts)
 packages/model  deck schema, Yjs binding, deck-ops
 packages/render deck to reveal.js HTML
-packages/*      placeholders: llm, ui
+packages/llm    @sleid/llm: provider adapters (Claude on Foundry, Azure OpenAI, local OpenAI-compatible), structured output, assistant abilities
+packages/*      placeholders: ui
 compose.yml     local Postgres 17 on 127.0.0.1:5433 (no collab container yet, see below)
 ```
 
@@ -69,6 +70,10 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 | `CHROME_PATH` | worker | Chrome for PDF, PNG/JPG and PPTX diagrams. Empty uses Playwright's bundled Chromium. |
 | `EXPORT_CONCURRENCY` | worker | Export jobs at once, 1 to 32. Default 2. |
 | `EXPORT_TMP_DIR` | worker | Scratch folder for export work. Default: the OS temp directory. |
+| `LLM_SECRET_KEY` | web | 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts saved provider keys (AES-256-GCM). Without it a key cannot be saved. |
+| `ADMIN_EMAILS` | web | Comma-separated administrator emails. Only they can add or change workspace providers. |
+| `SLEID_LLM_KIND`, `SLEID_LLM_ENDPOINT`, `SLEID_LLM_API_KEY`, `SLEID_LLM_MODEL`, `SLEID_LLM_API_VERSION`, `SLEID_LLM_STRUCTURED`, `SLEID_LLM_SUPPORTS_IMAGES`, `SLEID_LLM_NAME` | web | Optional server-wide default provider (see AI assistant below). |
+| `AI_RATE_LIMIT_MAX`, `AI_RATE_LIMIT_WINDOW_SECONDS` | web | Assistant requests per user in a sliding window. Default 30 per 600 seconds. |
 
 ## Google OAuth client
 
@@ -94,6 +99,7 @@ Without these values the Google button will fail at sign-in. The server logs a w
 | `pnpm --filter @sleid/web test:e2e` | Smoke test (single user, needs the dev servers) |
 | `pnpm --filter @sleid/web test:e2e:collab` | Two-browser co-editing check (needs the dev servers) |
 | `pnpm --filter @sleid/web test:e2e:export` | Export, publish and public page check (needs the dev servers and Chrome) |
+| `pnpm --filter @sleid/web test:e2e:ai` | Assistant check against a fake local model server (needs the dev servers, `LLM_SECRET_KEY` and Chrome) |
 
 ## Browser checks
 
@@ -117,6 +123,8 @@ The smoke test signs up, creates a deck, and checks the editor and the present v
 
 The test runs need `COLLAB_TOKEN_SECRET` and `COLLAB_INTERNAL_SECRET` in the environment, because the co-editing check signs a viewer token and reads the internal API.
 
+The assistant check (`test:e2e:ai`) needs `LLM_SECRET_KEY` as well. It starts a fake OpenAI-compatible server (`apps/web/tests/fake-openai-server.mjs`), adds it in Settings › AI, and runs the flows: generate a slide with Preview, Apply and Undo; shorten a text box; a chart from a prompt; a theme with a brand colour; a collaborator who sees the change live; and a viewer who sees no AI. It writes `ai-settings.png`, `ai-preview.png` and `ai-panel.png` to `SCREENSHOT_DIR`.
+
 ## Export
 
 File ▸ Download in the editor:
@@ -136,6 +144,69 @@ Exports never load anything from the open internet. The worker blocks every requ
 **Publish to web** (Share dialog, owner and editor): a link like `/p/<token>` shows the presentation read-only, with no sign-in and a "Made with Sleid" footer. Search engines are asked not to index it unless you tick the option. Turning publish off clears the link.
 
 **Images** are uploaded to `/api/decks/<deckId>/assets` (10 MB, PNG, JPEG, GIF, WebP or SVG) and stored under `ASSET_DIR`. SVG files with scripts or event handlers are refused, and SVG responses carry `Content-Security-Policy: sandbox`.
+
+## AI assistant
+
+Open the **AI** tab in the right panel, press **✨ Ask AI** in the formula bar, or use **Tools ▸ AI** items. Editors and owners can use it. Viewers and commenters do not see it.
+
+Every request sends the relevant part of the deck (the theme, the slide outline, the selection, and the text you asked about) to the provider you pick. Deck text is treated as data, not as instructions. The assistant never changes the deck itself. It proposes a change as a card:
+
+- **Preview** shows the deck with the change, on a throwaway copy, with a "Preview" ribbon. Nothing is saved.
+- **Apply** makes the change like any edit, through the live document. Undo (Ctrl+Z) reverts it, and collaborators see it.
+- **Discard** drops it.
+
+Each card shows the provider, the model, token counts and any warnings (for example, a colour adjusted for contrast, or alt text written without seeing the picture).
+
+### Set up a provider
+
+Open **Settings › AI** from the dashboard (the **AI settings** link). **Add provider** takes these fields. **Test connection** sends one short request and reports OK with the model and the latency, or the reason it failed. The key is stored encrypted and is never shown again; the page shows `••••• set`. To change it, type a new key. To keep it, leave the field empty.
+
+Set `LLM_SECRET_KEY` in `.env` before you add a key (`openssl rand -base64 32`). Restart `pnpm dev` after changing `.env`.
+
+**Claude on Microsoft Foundry** (the same deployment papereview uses)
+
+- In Settings › AI choose *Claude on Microsoft Foundry*. For **Resource name or endpoint URL** enter your resource name (for example `my-resource`), or the portal URL `https://my-resource.services.ai.azure.com/anthropic/`. For **Deployment name** enter `claude-opus-5-5` (or your deployment). Paste the resource's API key. Keep *Structured output* on Automatic.
+- Or set it for the whole deployment:
+
+  ```bash
+  SLEID_LLM_KIND=foundry-claude
+  SLEID_LLM_ENDPOINT=my-resource          # or https://my-resource.services.ai.azure.com/anthropic/
+  SLEID_LLM_API_KEY=...                   # the Foundry resource key
+  SLEID_LLM_MODEL=claude-opus-5-5         # your deployment name
+  SLEID_LLM_SUPPORTS_IMAGES=true          # alt text can look at pictures
+  ```
+
+**Azure OpenAI** (or any Foundry OpenAI-compatible deployment)
+
+- Choose *Azure OpenAI*. **Endpoint**: `https://<resource>.openai.azure.com`. **Deployment name**: the name you gave the model deployment. **API version** is optional (default `2024-10-21`). Paste the key from *Keys and Endpoint*.
+- Or set it for the whole deployment:
+
+  ```bash
+  SLEID_LLM_KIND=azure-openai
+  SLEID_LLM_ENDPOINT=https://<resource>.openai.azure.com
+  SLEID_LLM_API_KEY=...
+  SLEID_LLM_MODEL=<deployment-name>
+  SLEID_LLM_API_VERSION=2024-10-21
+  ```
+
+**Ollama** (local)
+
+1. Install Ollama and run `ollama pull qwen2.5:7b` (any chat model works). Ollama serves on port 11434.
+2. In Settings › AI choose *Local model*. **Base URL**: `http://127.0.0.1:11434/v1`. **Model name**: `qwen2.5:7b`. Leave the key empty.
+3. Or: `SLEID_LLM_KIND=openai-compatible`, `SLEID_LLM_ENDPOINT=http://127.0.0.1:11434/v1`, `SLEID_LLM_MODEL=qwen2.5:7b`.
+
+**LM Studio** (local)
+
+1. In LM Studio load a model, open the Developer tab and start the server. It serves on port 1234 by default.
+2. In Settings › AI choose *Local model*. **Base URL**: `http://127.0.0.1:1234/v1`. **Model name**: the identifier LM Studio shows for the loaded model. The key is optional (LM Studio's default is none).
+
+**llama.cpp** and **vLLM** use the same *Local model* choice with `http://127.0.0.1:8080/v1` (`llama-server -m model.gguf --port 8080`) or `http://<host>:8000/v1` (vLLM).
+
+Small local models sometimes ignore the JSON schema. If a proposal fails with "not the expected format", set *Structured output* to *JSON-only prompt*, or set `SLEID_LLM_STRUCTURED=prompt`. A model that does not accept pictures must leave *This model accepts pictures* off (or `SLEID_LLM_SUPPORTS_IMAGES=false`).
+
+Usage counts are kept per request. A user can make `AI_RATE_LIMIT_MAX` requests per `AI_RATE_LIMIT_WINDOW_SECONDS` (default 30 per 10 minutes). The limit is checked in the database, so it holds across processes.
+
+Status of the live runs: the adapters are tested against fake HTTP servers. A live run against Foundry or a local server has **not** been done for this milestone. See DESIGN.md (M4, unverified).
 
 ## Sharing
 

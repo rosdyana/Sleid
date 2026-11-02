@@ -3,7 +3,7 @@
 // selection, the keyboard map and the overlays. Everything the user can do is an action in
 // actions.ts, which builds deck-ops and applies them through the session.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ChartElement, Element as SlideElement, RichText } from '@sleid/model'
+import type { ChartElement, Deck, Element as SlideElement, RichText } from '@sleid/model'
 import { isReadOnlyRole, type DeckRole } from '@sleid/db/permissions'
 import { createActions, currentSlide, slideIndex, type PromptRequest, type UiState } from './actions.ts'
 import { CollabSession, deniedMessage, useDeck, usePeers, useReady, useSyncStatus, useUndoState } from './collab-session.ts'
@@ -13,7 +13,10 @@ import { SidePanel } from './SidePanel.tsx'
 import { DataGrid } from './DataGrid.tsx'
 import { BottomBar } from './BottomBar.tsx'
 import { MenuBar, buildMenus } from './MenuBar.tsx'
-import { ContextMenu, PromptDialog, ShortcutsDialog, Toast, type MenuEntry } from './Overlays.tsx'
+import { ContextMenu, MenuList, PromptDialog, ShortcutsDialog, Toast, type MenuEntry } from './Overlays.tsx'
+import { useAssistant, type ProposalCard } from './assistant.ts'
+import { AiPanel } from './AiPanel.tsx'
+import { askMenuEntries, rewriteEntries, ThemeDialog, type AskHandlers } from './AiMenus.tsx'
 import { FormulaBar, TitleBar, Toolbar } from './Chrome.tsx'
 import { ShareDialog } from './ShareDialog.tsx'
 import { ExportDialog, type DialogFormat } from './ExportDialog.tsx'
@@ -36,6 +39,23 @@ const DEFAULT_UI: UiState = {
 function isEditable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   return target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+}
+
+/** Slides the Tools actions work on: the current slide and up to seven after it. */
+function scopeSlideIds(deck: Deck, slideId: string): string[] {
+  const start = Math.max(0, deck.slides.findIndex((s) => s.id === slideId))
+  return deck.slides.slice(start, start + 8).map((s) => s.id)
+}
+
+/** Images, charts and diagrams on the scoped slides, for alt text. */
+function altTextIds(deck: Deck, slideIds: string[]): string[] {
+  const wanted = new Set(slideIds)
+  return deck.slides
+    .filter((s) => wanted.has(s.id))
+    .flatMap((s) => s.elements)
+    .filter((e) => e.type === 'image' || e.type === 'chart' || e.type === 'diagram')
+    .map((e) => e.id)
+    .slice(0, 30)
 }
 
 export function EditorShell({ deck: meta, user }: { deck: EditorDeck; user: EditorUser }) {
@@ -89,6 +109,8 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
   const [prompt, setPrompt] = useState<PromptRequest | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const [askOpen, setAskOpen] = useState(false)
+  const [themeOpen, setThemeOpen] = useState(false)
   const [exportDialog, setExportDialog] = useState<DialogFormat | null>(null)
   const exportJobs = useExportJobs(meta.id)
   const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
@@ -125,6 +147,18 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
   const toast = useCallback((message: string) => setToastMessage(message), [])
   const onToastDone = useCallback(() => setToastMessage(null), [])
 
+  const openPanel = useCallback(() => setUi({ sidePanel: 'ai' }), [setUi])
+  const assistant = useAssistant({ deckId: meta.id, session, onOpenPanel: openPanel, toast, enabled: !readOnly })
+  // While a proposal is previewed, the canvas and filmstrip show the preview's copy of the deck.
+  const preview = assistant.preview
+  const viewDeck = assistant.viewDeck(deck)
+  const viewSlide = preview ? currentSlide(viewDeck, preview.slideId) : slide
+  const previewCard = preview ? assistant.findCard(preview.cardId) : undefined
+  const applyFromCard = (card: ProposalCard) => {
+    assistant.applyCard(card)
+    if (card.focusSlideId) setSlideId(card.focusSlideId)
+  }
+
   const actions = createActions({
     session,
     readOnly,
@@ -147,7 +181,87 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
     navigate: async (href) => {
       window.location.assign(href)
     },
+    blockedReason: preview ? 'A preview is showing. Apply or discard the change first.' : undefined,
   })
+
+  // Ask AI, context menu and Tools actions. Each one starts a proposal in the AI panel.
+  const askHandlers: AskHandlers = {
+    rewrite: (elementId, mode, extra) => void assistant.run('Rewrite text', 'rewriteText', { elementId, mode, ...extra }),
+    askLanguage: (elementId) =>
+      setPrompt({
+        title: 'Translate text',
+        label: 'Target language, for example Indonesian',
+        initial: 'Indonesian',
+        submitLabel: 'Translate',
+        onSubmit: (value) => {
+          const language = value.trim()
+          if (language) void assistant.run('Translate text', 'rewriteText', { elementId, mode: 'translate', language })
+        },
+      }),
+    askInstruction: (elementId) =>
+      setPrompt({
+        title: 'Custom instruction',
+        label: 'What should happen to this text?',
+        submitLabel: 'Ask',
+        onSubmit: (value) => {
+          const instruction = value.trim()
+          if (instruction) void assistant.run('Rewrite text', 'rewriteText', { elementId, mode: 'custom', instruction })
+        },
+      }),
+    chartChange: (elementId, chartType) =>
+      void assistant.run('Change chart', 'generateChart', { elementId, chartType, prompt: `Show the same data as a ${chartType} chart.` }),
+    chartInstruction: (elementId) =>
+      setPrompt({
+        title: 'Change chart',
+        label: 'What should change? For example: add a series, change the title',
+        submitLabel: 'Ask',
+        onSubmit: (value) => {
+          const instruction = value.trim()
+          if (instruction) void assistant.run('Change chart', 'generateChart', { elementId, prompt: instruction })
+        },
+      }),
+    explainChart: (elementId) =>
+      void assistant.run('Explain chart', 'explain', { elementId, question: 'Explain what this chart shows, in three sentences at most.' }),
+    diagramInstruction: (elementId) =>
+      setPrompt({
+        title: 'Change diagram',
+        label: 'What should the diagram show?',
+        submitLabel: 'Ask',
+        onSubmit: (value) => {
+          const prompt = value.trim()
+          if (prompt) void assistant.run('Change diagram', 'generateDiagram', { elementId, prompt })
+        },
+      }),
+    slideFromPrompt: (empty) =>
+      setPrompt({
+        title: empty ? 'Fill this slide' : 'New slide',
+        label: 'Describe the slide',
+        submitLabel: 'Generate',
+        onSubmit: (value) => {
+          const prompt = value.trim()
+          if (!prompt) return
+          if (empty) void assistant.run('Fill slide', 'generateSlide', { prompt, slideId: slide.id })
+          else void assistant.run('New slide', 'generateSlide', { prompt, index: slideIndex(deck, slide.id) + 1, focusSlideId: slide.id })
+        },
+      }),
+    openPanel,
+  }
+  const askEntries = askMenuEntries({ single, slideEmpty: slide.elements.length === 0, slideIndex: slideIndex(deck, slide.id) }, askHandlers)
+  const scope = scopeSlideIds(deck, slide.id)
+  const aiTools = readOnly
+    ? undefined
+    : {
+        openPanel,
+        speakerNotes: () => void assistant.run('Speaker notes', 'speakerNotes', { slideIds: scope, tone: 'neutral', length: 'medium' }),
+        effects: () => void assistant.run('Transitions and animations', 'suggestEffects', { slideIds: scope }),
+        altText: () => {
+          const ids = altTextIds(deck, scope)
+          if (ids.length === 0) return toast('No images, charts or diagrams on these slides')
+          void assistant.run('Alt text', 'altText', { elementIds: ids })
+        },
+        theme: () => setThemeOpen(true),
+      }
+
 
   const menus = buildMenus({
     actions,
@@ -174,6 +288,7 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
     prompt: setPrompt,
     openShortcuts: () => setShortcutsOpen(true),
     toast,
+    ai: aiTools,
   })
 
   // Keyboard map. Editable fields (title, formula bar, notes, TipTap, grid cells)
@@ -343,14 +458,50 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
         undo={() => session.undo()}
         redo={() => session.redo()}
       />
-      <FormulaBar deck={deck} slide={slide} single={single} actions={actions} setUi={setUi} readOnly={readOnly} />
+      {preview && (
+        <div role="region" aria-label="Preview" className="flex shrink-0 items-center justify-between gap-3 bg-amber-100 px-3 py-1.5 text-[13px] text-amber-900">
+          <span>
+            <strong className="font-semibold">Preview.</strong> Nothing is saved yet{previewCard ? `: ${previewCard.title}` : ''}.
+          </span>
+          {previewCard && (
+            <span className="flex shrink-0 gap-2">
+              <button type="button" onClick={() => applyFromCard(previewCard)} className="rounded bg-accent px-3 py-1 font-medium text-white hover:brightness-95">
+                Apply
+              </button>
+              <button type="button" onClick={() => assistant.discardCard(previewCard)} className="rounded px-3 py-1 font-medium text-amber-900 hover:bg-amber-200">
+                Discard
+              </button>
+            </span>
+          )}
+        </div>
+      )}
+      <FormulaBar
+        deck={deck}
+        slide={slide}
+        single={single}
+        actions={actions}
+        setUi={setUi}
+        readOnly={readOnly}
+        onAskAi={readOnly ? undefined : () => setAskOpen((open) => !open)}
+        askMenu={
+          askOpen && !readOnly ? (
+            <>
+              <div className="fixed inset-0 z-0" aria-hidden onMouseDown={() => setAskOpen(false)} />
+              <div className="relative z-10">
+                <MenuList items={askEntries} onClose={() => setAskOpen(false)} />
+              </div>
+            </>
+          ) : undefined
+        }
+      />
       <div className="flex min-h-0 flex-1">
         <Filmstrip
-          deck={deck}
-          currentSlideId={slideId}
-          readOnly={readOnly}
+          deck={viewDeck}
+          currentSlideId={viewSlide.id}
+          readOnly={readOnly || !!preview}
           peers={peers}
           onSelect={(id) => {
+            if (preview) return assistant.setPreviewSlide(id)
             setSlideId(id)
             setSelection([])
             setEditing(null)
@@ -360,14 +511,18 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
           onContextMenu={(x, y, id) => setContext({ x, y, items: slideMenu(id) })}
         />
         <SlideCanvas
-          slide={slide}
-          theme={deck.theme}
+          slide={viewSlide}
+          theme={viewDeck.theme}
           zoom={ui.zoom}
           selection={validSelection}
           editingId={editingId}
           showGuides={ui.showGuides}
-          readOnly={readOnly}
+          readOnly={readOnly || !!preview}
           peers={peers}
+          onElementContextMenu={(x, y, el) => {
+            if (readOnly || el.type !== 'text') return
+            setContext({ x, y, items: [{ kind: 'group', label: 'Rewrite', items: rewriteEntries(el.id, askHandlers) }] })
+          }}
           onSelect={setSelection}
           onGeometry={(id, next) => actions.commitGeometry(id, next)}
           onStartEdit={(id) => {
@@ -379,7 +534,20 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
           }}
           onCursor={(point) => session.setCursor(point)}
         />
-        <SidePanel deck={deck} slide={slide} selected={selectedEls} ui={ui} setUi={setUi} actions={actions} readOnly={readOnly} />
+        <SidePanel
+          deck={deck}
+          slide={slide}
+          selected={selectedEls}
+          ui={ui}
+          setUi={setUi}
+          actions={actions}
+          readOnly={readOnly}
+          aiPanel={
+            readOnly ? undefined : (
+              <AiPanel assistant={assistant} selectionIds={validSelection} slideId={slideId} />
+            )
+          }
+        />
       </div>
       {dataChart && (
         <DataGrid
@@ -412,6 +580,7 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
         }}
       />
       {prompt && <PromptDialog request={prompt} onClose={() => setPrompt(null)} />}
+      {themeOpen && <ThemeDialog onClose={() => setThemeOpen(false)} onSubmit={(input) => void assistant.run('Generate theme', 'generateTheme', input)} />}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {shareOpen && <ShareDialog deckId={meta.id} onClose={() => setShareOpen(false)} />}
       {exportDialog && (

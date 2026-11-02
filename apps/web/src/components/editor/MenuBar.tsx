@@ -27,6 +27,14 @@ export interface MenuDeps {
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
+  /** The assistant's Tools items. Only passed for editors and owners; viewers get them disabled. */
+  ai?: {
+    openPanel: () => void
+    speakerNotes: () => void
+    effects: () => void
+    altText: () => void
+    theme: () => void
+  }
 }
 
 type AlignKind = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
@@ -245,7 +253,16 @@ function buildAllMenus(d: MenuDeps): Menu[] {
     },
     {
       label: 'Tools',
-      items: [{ kind: 'item', label: 'AI assistant', ...TODO('M4') }],
+      items: d.ai
+        ? [
+            item('AI assistant', d.ai.openPanel),
+            sep,
+            item('Generate speaker notes', d.ai.speakerNotes),
+            item('Suggest transitions & animations', d.ai.effects),
+            item('Write alt text for images', d.ai.altText),
+            item('Generate theme…', d.ai.theme),
+          ]
+        : [{ kind: 'item', label: 'AI assistant', ...TODO('M4') }],
     },
     {
       label: 'Extensions',

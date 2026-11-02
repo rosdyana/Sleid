@@ -28,7 +28,7 @@ export interface UiState {
   showNotes: boolean
   showGuides: boolean
   zoom: 'fit' | number
-  sidePanel: 'format' | 'slide' | 'theme'
+  sidePanel: 'format' | 'slide' | 'theme' | 'ai'
   dataElementId: string | null
   section: string | null
 }
@@ -45,6 +45,8 @@ export interface ActionContext {
   session: CollabSession
   /** Commenters and viewers: every change is refused here, and the session refuses too. */
   readOnly: boolean
+  /** Set while a proposal is previewed: edits wait until it is applied or discarded. */
+  blockedReason?: string
   deck: Deck
   deckId: string
   slideId: string
@@ -99,6 +101,10 @@ export function createActions(c: ActionContext) {
   function run(ops: unknown[]): boolean {
     if (c.readOnly) {
       c.toast('View only: you cannot change this deck')
+      return false
+    }
+    if (c.blockedReason) {
+      c.toast(c.blockedReason)
       return false
     }
     try {

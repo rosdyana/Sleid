@@ -12,12 +12,14 @@
     "db:migrate": "node --env-file-if-exists=../../.env scripts/migrate.mjs",
     "test:e2e": "node --env-file-if-exists=../../.env tests/smoke.mjs",
     "test:e2e:collab": "node --env-file-if-exists=../../.env tests/collab.mjs",
-    "test:e2e:export": "node --env-file-if-exists=../../.env tests/export.mjs"
+    "test:e2e:export": "node --env-file-if-exists=../../.env tests/export.mjs",
+    "test:e2e:ai": "node --env-file-if-exists=../../.env tests/ai.mjs"
   },
   "dependencies": {
     "@hocuspocus/provider": "^4.8.0",
     "@sleid/db": "workspace:^",
     "@sleid/jobs": "workspace:^",
+    "@sleid/llm": "workspace:^",
     "@sleid/model": "workspace:^",
     "@sleid/render": "workspace:^",
     "@sleid/storage": "workspace:^",
