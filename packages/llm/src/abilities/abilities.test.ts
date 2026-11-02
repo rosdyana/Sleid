@@ -179,6 +179,8 @@ describe('generateDiagram', () => {
     const after = applied(fixtureDeck(), out.ops)
     expect(after.slides.flatMap((s) => s.elements).some((e) => e.type === 'diagram' && e.source.startsWith('flowchart'))).toBe(true)
     expect(env.provider.requests).toHaveLength(1)
+    // The Mermaid rules are in the system prompt, before the task's other instructions.
+    expect(env.provider.requests[0]!.system).toMatch(/Node ids are single words[\s\S]*Edge labels go between pipes/)
   })
 
   it('retries once with the problem named when the first source is invalid, then succeeds', async () => {
@@ -186,7 +188,35 @@ describe('generateDiagram', () => {
     const out = await generateDiagram(env, { prompt: 'flow', slideId: SLIDE2 })
     expect(out.ops).toHaveLength(1)
     expect(env.provider.requests).toHaveLength(2)
-    expect(env.provider.requests[1]!.messages[0]!.content).toMatch(/rejected because the first line/)
+    expect(env.provider.requests[1]!.messages[0]!.content).toMatch(/rejected by the Mermaid parser: the first line must start with one of: graph/)
+  })
+
+  const LIVE_RUN_SAMPLE = 'flowchart LR\n  Sunlight --> Panels --> Inverter --> Shop appliances\n  Inverter -->|surplus| Battery'
+
+  it('retries with the parser error, the failing line and the rules, then applies the valid reply', async () => {
+    const valid = 'flowchart LR\n  Sunlight --> Panels --> Inverter --> ShopAppliances[Shop appliances]\n  Inverter -->|surplus| Battery'
+    const env = envFor(fixtureDeck(), [JSON.stringify({ title: 'Solar flow', source: LIVE_RUN_SAMPLE }), JSON.stringify({ title: 'Solar flow', source: valid })])
+    const out = await generateDiagram(env, { prompt: 'solar flow', slideId: SLIDE2 })
+    expect(env.provider.requests).toHaveLength(2)
+    const correction = env.provider.requests[1]!.messages[0]!.content
+    expect(correction).toMatch(/rejected by the Mermaid parser: Parse error on line 2: Expecting/)
+    expect(correction).toContain('The line that failed (line 2) is: Sunlight --> Panels --> Inverter --> Shop appliances')
+    expect(correction).toContain('Node ids are single words')
+    expect(correction).toContain('ShopAppliances[Shop appliances]')
+    const after = applied(fixtureDeck(), out.ops)
+    expect(after.slides.flatMap((s) => s.elements).some((e) => e.type === 'diagram' && e.source === valid)).toBe(true)
+  })
+
+  it('repairs a diagram that is still invalid after the retry, and applies the repaired source', async () => {
+    const env = envFor(fixtureDeck(), [JSON.stringify({ title: 'Solar flow', source: LIVE_RUN_SAMPLE }), JSON.stringify({ title: 'Solar flow', source: LIVE_RUN_SAMPLE })])
+    const out = await generateDiagram(env, { prompt: 'solar flow', slideId: SLIDE2 })
+    expect(env.provider.requests).toHaveLength(2)
+    expect(out.ops).toHaveLength(1)
+    const after = applied(fixtureDeck(), out.ops)
+    const diagrams = after.slides.flatMap((s) => s.elements).filter((e) => e.type === 'diagram')
+    expect(diagrams.map((d) => d.type === 'diagram' && d.source)).toContain(
+      'flowchart LR\n  Sunlight --> Panels --> Inverter --> ShopAppliances[Shop appliances]\n  Inverter -->|surplus| Battery',
+    )
   })
 
   it('fails with invalid-output when the retry is invalid too', async () => {

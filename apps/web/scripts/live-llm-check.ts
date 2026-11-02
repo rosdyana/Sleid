@@ -5,10 +5,11 @@
 // Requests go through the pinned fetch with private addresses refused (the user-scope policy),
 // so this also exercises the TLS path of the SSRF guard. Writes deck.json, report.json and,
 // when CHROME_PATH is set, slide-N.png renders of the resulting deck to outDir.
+// LIVE_LLM_STEPS=diagram (a comma list of step tags: diagram, chat, or an ability name) runs only those steps.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { applyOps, createDeck, deckToYDoc, yDocToDeck, type Deck } from '@sleid/model'
-import { createPinnedFetch, createProvider, runAbility, runChat, type AbilityName, type AbilityOutcome } from '@sleid/llm'
+import { createPinnedFetch, createProvider, runAbility, runChat, type AbilityName, type AbilityOutcome, type LlmProvider } from '@sleid/llm'
 
 const baseUrl = process.env.LIVE_LLM_BASE_URL
 const model = process.env.LIVE_LLM_MODEL
@@ -18,27 +19,44 @@ mkdirSync(outDir, { recursive: true })
 // LIVE_LLM_RENDER_ONLY=1 skips the model steps and only renders the deck.json already in the output directory.
 const renderOnly = process.env.LIVE_LLM_RENDER_ONLY === '1'
 
-const provider = createProvider(
+const base: LlmProvider = createProvider(
   { kind: 'openai-compatible', baseUrl, model, ...(process.env.LIVE_LLM_API_KEY ? { apiKey: process.env.LIVE_LLM_API_KEY } : {}), timeoutMs: 180_000 },
   { fetch: createPinnedFetch({ allowPrivate: false }) },
 )
+// Counts the model requests each step makes (the HTTP calls, including the retries inside a step).
+let modelCalls = 0
+const provider: LlmProvider = {
+  ...base,
+  generate: (request) => {
+    modelCalls++
+    return base.generate(request)
+  },
+  stream: (request) => {
+    modelCalls++
+    return base.stream(request)
+  },
+}
 
 const doc = deckToYDoc(renderOnly ? (JSON.parse(readFileSync(join(outDir, 'deck.json'), 'utf8')) as Deck) : createDeck('Solar energy for small businesses'))
 const deck = (): Deck => yDocToDeck(doc)
-const report: Array<{ step: string; ok: boolean; ms: number; summary?: string; warnings?: string[]; ops?: number; error?: string; usage?: unknown }> = []
+const report: Array<{ step: string; ok: boolean; ms: number; calls?: number; summary?: string; warnings?: string[]; ops?: number; error?: string; usage?: unknown }> = []
+const onlySteps = process.env.LIVE_LLM_STEPS ? new Set(process.env.LIVE_LLM_STEPS.split(',').map((s) => s.trim()).filter(Boolean)) : null
+const wanted = (tag: string) => onlySteps === null || onlySteps.has(tag)
 
-async function step(name: string, ability: AbilityName, input: (d: Deck) => unknown, apply = true): Promise<AbilityOutcome | null> {
+async function step(name: string, ability: AbilityName, input: (d: Deck) => unknown, apply = true, tag: string = ability): Promise<AbilityOutcome | null> {
+  if (!wanted(tag)) return null
   const t0 = Date.now()
+  const calls0 = modelCalls
   try {
     const out = await runAbility(ability as never, { provider, deck: deck(), compact: true }, input(deck()))
     if (apply && out.ops.length) applyOps(doc, out.ops, 'live-check')
-    report.push({ step: name, ok: true, ms: Date.now() - t0, summary: out.summary, warnings: out.warnings, ops: out.ops.length, usage: out.usage })
-    console.log(`ok   ${name} (${Date.now() - t0} ms) — ${out.summary}${out.warnings.length ? ` [warnings: ${out.warnings.join(' | ')}]` : ''}`)
+    report.push({ step: name, ok: true, ms: Date.now() - t0, calls: modelCalls - calls0, summary: out.summary, warnings: out.warnings, ops: out.ops.length, usage: out.usage })
+    console.log(`ok   ${name} (${Date.now() - t0} ms, ${modelCalls - calls0} model call(s)) — ${out.summary}${out.warnings.length ? ` [warnings: ${out.warnings.join(' | ')}]` : ''}`)
     return out
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    report.push({ step: name, ok: false, ms: Date.now() - t0, error: message })
-    console.log(`FAIL ${name} (${Date.now() - t0} ms) — ${message}`)
+    report.push({ step: name, ok: false, ms: Date.now() - t0, calls: modelCalls - calls0, error: message })
+    console.log(`FAIL ${name} (${Date.now() - t0} ms, ${modelCalls - calls0} model call(s)) — ${message}`)
     return null
   }
 }
@@ -55,7 +73,7 @@ if (!renderOnly) {
   await step('generate content slide', 'generateSlide', () => ({ prompt: 'Three key benefits of rooftop solar for a small bakery, short bullets', layoutHint: 'title-content' }))
   await step('generate chart', 'generateChart', (d) => ({ prompt: 'Monthly electricity cost in million IDR before and after solar for Jan–Jun, the after line lower', slideId: d.slides[1]?.id }))
   await step('generate diagram slide', 'generateSlide', () => ({ prompt: 'Section slide titled "How it works"', layoutHint: 'section' }))
-  await step('generate diagram', 'generateDiagram', (d) => ({ prompt: 'Flow: sunlight -> panels -> inverter -> shop appliances, with surplus -> battery', slideId: d.slides[d.slides.length - 1]!.id }))
+  await step('generate diagram', 'generateDiagram', (d) => ({ prompt: 'Flow: sunlight -> panels -> inverter -> shop appliances, with surplus -> battery', slideId: d.slides[d.slides.length - 1]!.id }), true, 'diagram')
   await step('rewrite shorten', 'rewriteText', (d) => ({ elementId: titleBody(d).id, mode: 'shorten' }))
   await step('rewrite translate', 'rewriteText', (d) => ({ elementId: titleBody(d).id, mode: 'translate', language: 'Indonesian' }), false)
   await step('generate theme', 'generateTheme', () => ({ prompt: 'Warm, sunny, trustworthy; for a solar installer', brandColors: ['#f59e0b'] }))
@@ -64,7 +82,7 @@ if (!renderOnly) {
   await step('explain', 'explain', (d) => ({ question: 'Is anything on this slide likely to confuse a shop owner?', slideId: d.slides[1]?.id }), false)
 
   // Chat with tools.
-  {
+  if (wanted('chat')) {
     const t0 = Date.now()
     let proposals = 0
     let text = ''

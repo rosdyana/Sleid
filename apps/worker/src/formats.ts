@@ -86,7 +86,9 @@ async function waitForRender(page: import('playwright-core').Page, diagrams: boo
   if (diagrams) {
     await page.waitForFunction(() => document.documentElement.hasAttribute('data-sleid-diagrams'), undefined, { timeout: 60_000 })
     const state = await page.evaluate(() => document.documentElement.getAttribute('data-sleid-diagrams'))
-    if (state === 'error') logger.warn('a diagram could not be drawn and is exported as its source text')
+    if (state === 'error') logger.warn('mermaid did not start, so the diagrams are exported as placeholders')
+    const failed = await page.evaluate(() => document.querySelectorAll('[data-sleid-diagrams="error"]').length)
+    if (failed > 0) logger.warn(`${failed} diagram(s) could not be drawn and are exported as a placeholder`)
   }
   await page.evaluate(() => document.fonts.ready)
 }

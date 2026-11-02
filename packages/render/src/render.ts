@@ -281,28 +281,53 @@ function mermaidScriptTags(script: MermaidScript): string[] {
   // mermaid.render lays each diagram out in a scratch node on <body>, outside reveal's scaled
   // slide stage. Running in place (mermaid.run) measured labels inside the transformed, possibly
   // hidden slide and produced ~2px-tall, blank labels.
+  // A diagram that fails gets a placeholder in its own place, with the attribute on that element only.
+  // The root attribute is 'done' once every diagram has been tried. 'error' means mermaid itself did not start.
+  const placeholder = `function sleidDiagramFallback() {
+    const box = document.createElement('div');
+    box.className = 'sleid-diagram-error';
+    box.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error');
+    box.textContent = 'Diagram could not be drawn';
+    return box;
+  }`
   const run = `mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
     const nodes = [...document.querySelectorAll('.mermaid')];
     for (let i = 0; i < nodes.length; i++) {
-      const out = await mermaid.render('sleid-mmd-' + i, nodes[i].textContent || '');
-      nodes[i].innerHTML = out.svg;
-      nodes[i].setAttribute('data-processed', 'true');
-    }`
+      const node = nodes[i];
+      try {
+        const out = await mermaid.render('sleid-mmd-' + i, node.textContent || '');
+        node.innerHTML = out.svg;
+        node.setAttribute('data-processed', 'true');
+      } catch (err) {
+        console.error(err);
+        node.replaceWith(sleidDiagramFallback());
+        document.getElementById('dsleid-mmd-' + i)?.remove();
+      }
+    }
+    document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'done');`
+  // mermaid itself did not start: no diagram is drawn, so every undrawn source gets the placeholder, never its text.
+  const failed = `console.error(err);
+    document.querySelectorAll('.mermaid:not([data-processed])').forEach((node) => node.replaceWith(sleidDiagramFallback()));
+    document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error');`
   if (script.module) {
     return [
       `<script type="module">
-  import mermaid from ${src};
-  try { ${run}; document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'done'); }
-  catch (err) { console.error(err); document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error'); }
+  ${placeholder}
+  try {
+    const { default: mermaid } = await import(${src});
+    ${run}
+  } catch (err) { ${failed} }
 </script>`,
     ]
   }
   return [
     `<script src="${escapeHtml(script.src)}"></script>`,
     `<script>
+  ${placeholder}
   (async () => {
-    try { ${run}; document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'done'); }
-    catch (err) { console.error(err); document.documentElement.setAttribute('${DIAGRAMS_STATE_ATTR}', 'error'); }
+    try {
+      ${run}
+    } catch (err) { ${failed} }
   })();
 </script>`,
   ]

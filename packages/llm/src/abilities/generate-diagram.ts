@@ -1,10 +1,8 @@
-// generateDiagram: Mermaid source for a new diagram element, or a new source for an existing one.
-// The source is checked cheaply (first keyword, size, no script). A failed check gets one
-// corrective request that names the problem. A second failure is an error for the user.
 import { z } from 'zod'
 import { describeDeck } from '../context.ts'
 import { LlmError } from '../errors.ts'
-import { cleanMermaid, MERMAID_KEYWORDS, MERMAID_MAX_CHARS, validateMermaid } from '../mermaid.ts'
+import { cleanMermaid, MERMAID_KEYWORDS, MERMAID_MAX_CHARS, validateMermaid, type MermaidCheck } from '../mermaid.ts'
+import { repairMermaid } from '../mermaid-repair.ts'
 import { structured } from '../structured.ts'
 import { allowlist, checkOps } from '../ops-check.ts'
 import { systemPrompt, untrustedBlock, locateElement, slideOf, type AbilityEnv, type AbilityOutcome } from './common.ts'
@@ -23,6 +21,15 @@ const Output = z.object({
   source: z.string().min(1).max(MERMAID_MAX_CHARS),
 })
 
+/** The rules the model must follow. They are in the system prompt, and repeated in the corrective request. */
+const MERMAID_RULES = [
+  'Mermaid rules (the diagram is checked by the real Mermaid parser):',
+  '- Node ids are single words made of letters, digits and underscores, for example ShopAppliances. Never put spaces in an id.',
+  '- Put a human label in brackets after the id: ShopAppliances[Shop appliances]. Use the id again, without brackets, in later edges.',
+  '- Edge labels go between pipes: A -->|surplus| B.',
+  '- No markdown code fences. No HTML tags. No click handlers, links or scripts.',
+]
+
 export async function generateDiagram(env: AbilityEnv, rawInput: GenerateDiagramInput): Promise<AbilityOutcome> {
   const input = GenerateDiagramInput.parse(rawInput)
   let slideId = input.slideId ?? env.deck.slides[0]?.id ?? ''
@@ -35,19 +42,24 @@ export async function generateDiagram(env: AbilityEnv, rawInput: GenerateDiagram
   }
 
   const system = systemPrompt(
-    `Task: write a Mermaid diagram for the request. The first statement must start with one of: ${MERMAID_KEYWORDS.join(', ')}. Use plain labels without HTML, no click handlers, no links. Keep it under 25 nodes.`,
+    [
+      `Task: write a Mermaid diagram for the request. The first statement must start with one of: ${MERMAID_KEYWORDS.join(', ')}.`,
+      ...MERMAID_RULES,
+      'Plain labels. Keep it under 25 nodes.',
+    ].join('\n'),
   )
   const user = `${describeDeck(env.deck, { focusSlideId: slideId, maxChars: 2500 }).text}\n\nRequest:\n${untrustedBlock('request', input.prompt)}`
   const options = { ...(env.compact !== undefined ? { compact: env.compact } : {}), ...(env.signal ? { signal: env.signal } : {}) }
 
   let result = await structured(env.provider, Output, { system, user, maxTokens: 1500, temperature: 0.3, name: 'diagram', ...options })
   let usage = result.usage
-  let check = validateMermaid(result.value.source)
+  let source = cleanMermaid(result.value.source)
+  let check = await validateMermaid(source)
   if (!check.ok) {
-    // One corrective request for the Mermaid problem only. A second failure is not retried again.
+    // One corrective request: the parser's message, the offending line, and the rules again.
     const again = await structured(env.provider, Output, {
       system,
-      user: `${user}\n\nYour previous diagram was rejected because ${check.reason}. Write it again, starting with a valid diagram keyword.`,
+      user: `${user}\n\n${correctionFor(check, source)}`,
       maxTokens: 1500,
       temperature: 0.2,
       name: 'diagram',
@@ -55,11 +67,22 @@ export async function generateDiagram(env: AbilityEnv, rawInput: GenerateDiagram
     })
     usage = { inputTokens: usage.inputTokens + again.usage.inputTokens, outputTokens: usage.outputTokens + again.usage.outputTokens }
     result = again
-    check = validateMermaid(again.value.source)
-    if (!check.ok) throw new LlmError('invalid-output', `The diagram was not valid Mermaid: ${check.reason}.`, { issues: [check.reason] })
+    source = cleanMermaid(again.value.source)
+    check = await validateMermaid(source)
   }
+  if (!check.ok) {
+    // Deterministic repair for bare multi-word node names, then the same check again.
+    const repaired = repairMermaid(source)
+    if (repaired !== source) {
+      const recheck = await validateMermaid(repaired)
+      if (recheck.ok) {
+        source = cleanMermaid(repaired)
+        check = recheck
+      }
+    }
+  }
+  if (!check.ok) throw new LlmError('invalid-output', `The diagram was not valid Mermaid: ${check.message}.`, { issues: [check.message] })
 
-  const source = cleanMermaid(result.value.source)
   const title = result.value.title
   let raw: unknown[]
   let warnings: string[] = []
@@ -81,4 +104,17 @@ export async function generateDiagram(env: AbilityEnv, rawInput: GenerateDiagram
     usage,
     model: result.model,
   }
+}
+
+/** The corrective request: what the parser said, the line it named, and the rules. */
+function correctionFor(check: Extract<MermaidCheck, { ok: false }>, source: string): string {
+  const lines = source.split('\n')
+  const offending = check.line !== undefined ? lines[check.line - 1]?.trim() : undefined
+  return [
+    `Your previous diagram was rejected by the Mermaid parser: ${check.message}.`,
+    ...(offending ? [`The line that failed (line ${check.line}) is: ${offending}`] : []),
+    'Write the whole diagram again and fix that problem. Follow these rules:',
+    ...MERMAID_RULES.slice(1),
+    'Reply with one JSON object only.',
+  ].join('\n')
 }

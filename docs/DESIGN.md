@@ -706,6 +706,50 @@ Live runs after the fixes were 11 of 12 (suggest effects failed on the in-stream
 - Environment-default switches for compact prompts and thinking (`SLEID_LLM_*`) were not added.
 - No fix for the diagram's labels in the deck renderer.
 
+### M4 Mermaid validation fix
+
+**Problem.** A live run of `generateDiagram` (qwen3.8-flash-next-q2_0) returned `Shop appliances` as a bare node id. The keyword check accepted it, so the slide held a diagram Mermaid could not parse. Present mode and exports then showed raw source or a failed box.
+
+**Decisions.**
+- **The real parser.** `validateMermaid(source)` (`packages/llm/src/mermaid.ts`) is async. It runs the size cap, the script check and the first-keyword check, then `mermaid.parse` (mermaid 12.2.0, now a dependency of `@sleid/llm`). It returns `{ ok: true }` or `{ ok: false, message, line? }`. The message is Mermaid's `Parse error on line N: Expecting …`, shortened.
+- **DOM shim: happy-dom 21.0.4.** Mermaid's DOMPurify needs `window` when mermaid is imported. Plain Node failed for pie and mindmap (`DOMPurify.addHook is not a function`) and passed for flowchart and sequence. happy-dom made all twelve keyword types parse. It was chosen over jsdom because it has 7 runtime dependencies, against 20 for jsdom 27. jsdom was not tried, since happy-dom worked. The shim is installed only around the one-time `import('mermaid')`, and its globals are then removed. Parsing still works without them (checked), so no global DOM is left in the server process. If the import fails, the keyword check is used alone, with one warning in the log.
+- **Timeout and size.** A parse that takes more than 5 s (`MERMAID_PARSE_TIMEOUT_MS`) is an error. The parser is synchronous, so the timeout stops the wait, not the parse; the 6000-character cap bounds the work.
+- **Retry.** The first invalid reply gets one corrective request. It carries the parser message, the text of the failing line, and the rules. The system prompt has the rules from the start (`MERMAID_RULES` in `generate-diagram.ts`): node ids are single words; labels go in brackets (`ShopAppliances[Shop appliances]`); edge labels use `-->|label|`; no fences; no HTML; no links or scripts.
+- **Auto-repair (`packages/llm/src/mermaid-repair.ts`).** If the retry is still invalid, `repairMermaid` runs once and the result is checked again. If that fails too, the ability throws `invalid-output` with the parser message, and no op is proposed.
+- **Fixer scope.** Flowcharts (`graph` and `flowchart`) only. It rewrites a node written as two or more bare words into an id and a label: `Shop appliances` becomes `ShopAppliances[Shop appliances]`, and `B C` in `A --> B C --> D` becomes `BC[B C]`. The same text gets the same id on every line, and an existing `Id[Label]` is reused. Generated ids avoid ids already in use and Mermaid's reserved words. Edge labels (`-->|surplus|`), brackets, quotes, `&`, and statements such as `style`, `classDef`, `click` and `subgraph` are left alone. A line with an inline edge label (`A -- text --> B`) is not touched. Source with nothing to fix comes back unchanged, so repeating the fix changes nothing.
+- **Renderer fallback (`packages/render/src/render.ts`).** Each diagram is drawn in its own `try`. When `mermaid.render` throws, that `<pre>` is replaced by `<div class="sleid-diagram-error" data-sleid-diagrams="error">Diagram could not be drawn</div>`, styled with `--sleid-muted`. The source is never shown. The other diagrams are still drawn. The root `data-sleid-diagrams` is `done` once every diagram has been tried, so exports do not wait on a failed one. It is `error` only when mermaid itself cannot load. In that case every undrawn source is replaced too. The module build now imports mermaid inside the `try`, so a failed CDN load also reaches the attribute. Before, the attribute was never set, and the exporter waited out its 60 s timeout. The worker (`apps/worker/src/formats.ts`) logs the number of placeholders.
+- **Packaging.** `packages/llm` has `mermaid@^12.2.0` and `happy-dom@^21.0.4`. Adding happy-dom also adds it as an optional peer of `vitest` in the lockfile, so each workspace's vitest entry changed. The runtime is unaffected. The web build bundles happy-dom and mermaid into the server output, and no client code imports `@sleid/llm` at runtime.
+
+**Not done.**
+- **PPTX.** `packages/pptx` still exports a failed diagram as its source text in monospace (`apps/worker/src/formats.ts`, `DiagramRasterizer`, then the fallback in `packages/pptx/src/index.ts`). The brief named the renderer and PDF/PNG, so this is unchanged. It is the one place a raw source can still reach a user.
+- The parser checks syntax only. A diagram that parses but draws badly is not caught.
+
+**Checks.**
+- `packages/llm/src/mermaid.test.ts` (19 cases): thirteen valid samples across the keyword types (flowchart, sequence, pie, mindmap and the rest), the comment and fence cases, script rejection, the length cap, and the live-run sample rejected at line 2 with `Expecting … NODE_STRING`.
+- `packages/llm/src/mermaid-repair.test.ts` (12 cases): the live-run sample is repaired and parses; `A --> B C --> D`; the same label on two lines; edge labels kept; existing bracket ids reused; id collisions; semicolon statements; non-node statements and inline edge labels untouched; valid input unchanged; idempotence; non-flowchart diagrams untouched; a fenced input; `Big Box-->Panel` not split.
+- `packages/llm/src/abilities/abilities.test.ts` (+2): a scripted model returns the invalid sample, then a valid one. The second request carries the parser message, the failing line and the rules. A scripted model returns the invalid sample twice, and the fixer repairs it. The system prompt carries the rules before the other instructions.
+- `apps/worker/src/mermaid-fallback.test.ts` (Chrome, `CHROME_PATH`, skipped without it): the bundled mermaid of the exports draws the good diagram, puts the placeholder where the bad one was, shows no source, marks only the bad element, sets the root to `done`, and uses the muted colour from the theme.
+- Live (`apps/web/scripts/live-llm-check.ts`, `LIVE_LLM_STEPS=diagram`): see the table in the M4 section below.
+
+### M4 Mermaid validation: live check
+
+Three runs of the diagram step against `https://gpt.knowhub.my.id/v1` with `qwen3.8-flash-next-q2_0`, from `createDeck` plus one `generateDiagram` call each. Three ability calls and three model requests in total, within the budget of ten. Each run's output was parsed by the new validator, and the renders were checked by eye.
+
+| Run | Model requests | Path | Diagram |
+|---|---|---|---|
+| 1 | 1 | first reply valid | Sunlight, Panels, Inverter, Shop appliances, Battery with `surplus`. Every label drawn. |
+| 2 | 1 | first reply valid | Sunlight, Solar panels, Inverter, Shop appliances, Battery with `surplus`. Every label drawn. |
+| 3 | 1 | first reply valid | Sunlight, Panels, Inverter, Shop appliances, Battery with `surplus`. Every label drawn. |
+
+Each reply used the id-and-label form that the new rules ask for. So the retry and the fixer did not run against the live model. Their behaviour is covered by the scripted tests above. The original bare-name failure was not reproduced live, because the rules now prevent it, and the old prompt was not run again to compare. The renders are in the session scratchpad (`live-llm-diagram/run1` to `run3`, `slide-1.png`).
+
+**Checks run.** `pnpm typecheck`: exit 0. `CHROME_PATH=… pnpm test`: **41 files, 481 tests, all passing, none skipped** (39 tracked files and the 2 new ones: `mermaid-repair.test.ts` and `apps/worker/src/mermaid-fallback.test.ts`). `pnpm --filter @sleid/web build`: exit 0; the TanStack `"use client"` warning is still printed, as before.
+
+**Unverified.**
+- The built server's validator was not run. The build bundles happy-dom into an SSR library chunk and mermaid into a lazy chunk, and the output was only inspected, not executed.
+- The retry and repair paths were not seen against the live model (see above).
+- The PPTX fallback is unchanged (see "Not done").
+
 ### Unverified in M4
 
 - **The endpoint policy against a live server.** The policy is tested with stubbed DNS and local fake servers. Connecting to a real public host through the pinned dispatcher, and a TLS (`https`) endpoint through it (SNI and certificate checks), were not run. The dev-server e2e ran with the flag on, so the refusal of `127.0.0.1:3002` by a running server was tested only at the settings level, not through the browser.

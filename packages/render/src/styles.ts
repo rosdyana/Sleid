@@ -59,6 +59,8 @@ export const BASE_CSS = `
 .sleid-diagram { margin: 0; width: 100%; height: 100%; overflow: hidden; color: var(--sleid-text); display: flex; align-items: center; justify-content: center; background: none; box-shadow: none; }
 /* Mermaid emits a fixed max-width; scale the SVG to fit its box like the editor does. */
 .sleid-diagram > svg { width: 100% !important; height: 100% !important; max-width: none !important; }
+/* Shown in place of a diagram that Mermaid could not draw. Muted, and never the diagram's source. */
+.sleid-diagram-error { box-sizing: border-box; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px; border: 3px dashed var(--sleid-muted); border-radius: 12px; color: var(--sleid-muted); font-family: var(--sleid-font-body); font-size: 32px; text-align: center; }
 .sleid-table { width: 100%; height: 100%; border-collapse: collapse; color: var(--sleid-text); font-size: var(--sleid-size-small); }
 .sleid-table th, .sleid-table td { border: 1px solid var(--sleid-border, var(--sleid-muted)); padding: 0.3em 0.5em; text-align: left; vertical-align: top; }
 .sleid-table th { background: var(--sleid-surface); font-weight: 600; }
