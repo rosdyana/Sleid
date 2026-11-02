@@ -8,7 +8,7 @@ Living document. Update it as decisions change.
 |---|---|
 | 0. Scaffold monorepo, compose, Better Auth Google login, Drizzle schema, DESIGN.md + README | **Done** (checks run, see below) |
 | 1a. Model (zod schema, Yjs binding, deck-ops, undo) + reveal.js renderer + Markdown | **Done** (checks run, see M1a below) |
-| 1b. Sheets-style editor UI, single user, reveal.js present | Pending |
+| 1b. Sheets-style editor UI, single user, reveal.js present, slide ordering fix | **Done** (checks run, see M1b below) |
 | 2. Hocuspocus live co-edit, presence, sharing and roles, link tokens | Pending |
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON | Pending |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | Pending |
@@ -48,7 +48,7 @@ Scope: `packages/model` and `packages/render` only. The editor UI is M1b.
 - **Patch semantics** (`updateElement`, `updateSlide`, `setTheme`). A patch is deep-partial. Nested plain objects merge key by key, arrays and primitives replace, `null` deletes an optional key, and `undefined` is ignored. The merged result is validated with zod before any write. A key that zod would strip (an unknown top-level field) is rejected rather than silently dropped. Patches cannot change `id` or `type`.
 - **Rich text is JSON for now.** Text `content`, `shape.text`, `chart.data` and `chart.echartsOverride` are stored as opaque JSON values and replaced whole on update. Every other element field is a Y.Map entry, so two users editing different keys of one element both survive a merge. M2 moves rich text to Y.XmlFragment for y-prosemirror. Callers use `yDocToDeck` and `applyOps`, so only `ydoc.ts` and `ops.ts` change then.
 - **Rich text schema.** A permissive ProseMirror/TipTap subset. Known marks are typed (`bold`, `italic`, `underline`, `strike`, `code`, `link`, `textStyle`). Unknown nodes and extra keys pass through (`looseObject`). Renderers drop unknown node wrappers and keep their text.
-- **Slide moves re-create the slide.** Yjs has no array move, so `moveSlide` deletes the slide's Y.Map and inserts a copy. Two known consequences, both noted in `ydoc.ts`. (a) An edit to the same slide made concurrently with a move can be lost. Replicas still converge, and the concurrency suite checks that case. (b) Two concurrent moves of one slide can leave a duplicate id, and `yDocToDeck` keeps the first occurrence. Case (b) is not tested yet. Revisit in M2: keep slide order as an array of ids over an id-keyed Y.Map, so a move never re-creates content.
+- **Slide order** (known limitation from M1a, fixed in M1b): slides are now an id-keyed Y.Map with a fractional `order` key. See the M1b section.
 - **Speaker notes are a plain string** (last writer wins). Y.Text can replace this later if concurrent note editing matters.
 - **Undo.** `createUndoManager(doc, origins, { captureTimeout })` tracks the `deck` root. Its default `captureTimeout` is 0, so each `applyOps` batch is one undo step. The UI can pass a larger value to merge typing. Yjs restores the value recorded when a change was made. So undo can overwrite an untracked remote edit to the same key. The test covers this with a remote change on a different key.
 - **Z-order** is a number per element. `front` and `back` go past the extremes, and `forward` and `backward` swap with the nearest neighbour. Two users reordering at once can produce ties. The renderer sorts by z, stable on array order.
@@ -74,6 +74,77 @@ Scope: `packages/model` and `packages/render` only. The editor UI is M1b.
 - The screenshots used the installed Google Chrome through `executablePath`, not Playwright's bundled Chromium.
 - Fonts are referenced by name with a generic fallback. Inter is not loaded from anywhere, so on a machine without it the text falls back to the system sans-serif.
 - Property-based tests were not written. Concurrency coverage is a fixed set of scenarios.
+
+### What M1b built, and decisions taken while building it
+
+Scope: slide ordering in `packages/model`, persistence API in `apps/web`, and the single-user editor and present route in `apps/web`.
+
+**Slide order (Part 1, fixes the M1a limitation).**
+- `slides` is a Y.Map keyed by slide id. Each slide Y.Map has an `order` string from `fractional-indexing` 4.0.0 (`generateKeyBetween`). `yDocToDeck` sorts by `order`, then by id, and removes `order`. The plain `Deck` still has an ordered array.
+- `moveSlide` writes only `order`. Two concurrent moves of one slide leave one value (last writer wins), so there is no duplicate. An edit made during a move is kept.
+- Two inserts between the same neighbours get equal keys and sort by id. If a later op needs a key between two equal keys, `orderAt` respaces all the others first.
+- Elements stay a Y.Array. `z` is already explicit, so converting them was not needed and was not done.
+- Tests: 5 new concurrency cases (concurrent moves of one slide, move plus edit, move plus delete, concurrent inserts, respacing).
+
+**Persistence (Part 2).** `apps/web/src/lib/deck-doc.server.ts`, `deck-doc.functions.ts`.
+- State = latest `deck_snapshots` row merged with every remaining `deck_updates` row (`Y.mergeUpdates`). Loads run in one REPEATABLE READ transaction, so a concurrent compaction cannot make them disagree.
+- Appends and compaction both update the `decks` row first. That row lock serialises writers per deck, so compaction sees every committed update, and nothing can be appended between its read and its delete.
+- Compaction runs when the update log passes 200 rows. It writes a new snapshot and deletes the updates it folded in. Old snapshots are kept, since M7 version history needs them. Storage grows with every compaction; pruning is not decided.
+- The first open of a deck with no snapshot creates one from `createDeck(decks.title)`, with the doc `id` set to the deck id.
+- `appendDeckUpdate(deckId, update, title)` takes a third argument, the doc title. It writes `decks.title` in the same transaction, so the list title follows the document. The plan's signature had no title argument; this is the one deviation in Part 2.
+- `pushDeckUpdateFn` (editor+) checks base64 and the 2 MB byte cap, applies the update to a copy of the state, and rejects it unless `yDocToDeck` still parses. `getDeckStateFn` (viewer+) returns the base64 state. `copyDeckFn` (viewer+) copies the state into a new deck owned by the caller.
+- `deck-doc.server.test.ts` runs against the compose Postgres (127.0.0.1:5433). It covers first snapshot, append plus title sync, compaction at the threshold (201 appends leave 0 update rows and one new snapshot), and copy. It skips with a message when the database is unreachable.
+
+**Editor client (Part 3).**
+- One Y.Doc per open deck (`doc-session.ts`). Every local change goes through `applyOps(doc, ops, 'local')`. Updates with origin `remote` are not pushed. Pending updates are merged and pushed 500 ms after the last change. A failed push keeps the batch and retries after 3 s. The title bar shows Saving… / All changes saved / the error.
+- `useDeck(doc)` uses `useSyncExternalStore` with a per-doc cache, invalidated before React's listener runs.
+- Undo uses `Y.UndoManager` tracking origin `local`, with `captureTimeout` 0, so each batch is one step.
+- StrictMode lesson: React StrictMode double-invokes `useMemo` and runs effect cleanups without a real unmount. The session is therefore not destroyed on unmount. Pending edits are flushed instead. An early version destroyed it, and the UI kept editing a dead doc.
+- The canvas scales by layout (`left = x * scale`), not by a CSS transform. react-moveable then works in real pixels and divides by the scale once. 100% zoom means a 1280 px wide stage.
+- Each gesture commits once when it ends. A click that moves nothing commits nothing.
+- Text is edited with TipTap only while the box is being edited (double-click). Commit is on blur or Escape. TipTap's own Underline and Link are turned off inside StarterKit, and the standalone extensions are used instead.
+- Text when not editing uses a small React rich-text renderer, not a read-only TipTap instance. This is a deviation from the plan, made to keep one TipTap instance per box out of the filmstrip.
+- Charts use ECharts in the browser through `chartToEchartsOption`. Diagrams use Mermaid, loaded on demand with `securityLevel: 'strict'`.
+- Filmstrip thumbnails use the same `SlideSurface` as the canvas, at a small scale, not iframes. Charts in thumbnails are small-scale ECharts, so their legends can crowd the plot.
+- Images from a file are stored as a data URL, up to 2 MB, in the doc. M3 adds asset storage.
+- Chart data grid: a drawer above the section tabs. Row 1 is the header and column A holds categories. A cell commit is one `updateElement`. Numeric-looking cells are stored as numbers. Paste TSV, and CSV or XLSX import through SheetJS.
+- SheetJS is installed from the SheetJS CDN tarball, `xlsx@0.20.3`. The npm copy, 0.18.5, predates fixes for published advisories.
+- Present (`/d/$deckId/present`, viewer+): reveal.js 5.2.1 bundled by Vite from npm, with the notes plugin. Slides come from `renderSlideHtml`. `?slide=N` starts there. No CDN is used on this route.
+- Download HTML uses `renderDeckHtml(deck, { mode: 'present' })`, which loads reveal from jsDelivr. Standalone mode needs Node-side assets, so the download is not offline.
+- Menus: every item is in one tree (`MenuBar.tsx`). Later-milestone items are listed and disabled with their milestone: PDF, PPTX and PNG (M3), AI assistant (M4), MCP access tokens (M5). Share is disabled until M2. The AI, Comments and History tabs are disabled until M4 and M7.
+- Keyboard map is in `EditorShell.tsx`. Editable fields keep their native keys. The grid keeps its own paste handling.
+
+**Known gaps (not done in M1b).**
+- Viewers and commenters can open the editor. Their edits are applied locally and fail on push with "Deck not found", which the status line shows. A read-only editor is M2 work, with roles.
+- Multi-select drag: react-moveable works on one selected element. Several elements move with arrow keys, align and distribute, not by dragging together.
+- Chart palette colours are not editable in the side panel. Theme fonts are typed names, not a font picker.
+- Grid and guides toggle only outlines elements. There is no ruler.
+- Cmd+Enter inside the presentation does not do anything. F5 opens present from slide 1.
+- Table cells are not edited in place (the table element is inserted and can be moved and deleted).
+
+### M1b verification
+
+- `pnpm typecheck` exits 0 in every workspace. `tsc --noUnusedLocals --noUnusedParameters` is clean for `packages/model` and `apps/web`.
+- `pnpm test` (root): 10 files, 111 tests, all passing. That is 65 in `packages/model`, 37 in `packages/render`, 4 for `deck-doc.server` against the local Postgres, and 5 for `apps/web` permissions.
+- `pnpm --filter @sleid/web build` succeeds. The build warns about chunk size (ECharts, TipTap and Moveable in the client bundle) and about TanStack's `"use client"` directives. Both are known and not fixed.
+- Editor e2e: `CHROME_PATH=... node apps/web/tests/smoke.mjs` against `SLEID_TEST_AUTH=1 pnpm dev`, using installed Google Chrome. It passed, with no page or console errors. Steps: sign in, create a deck, rename it, add a text box and type into it with TipTap, insert a bar chart, edit a data cell to 42, add a slide with Cmd+Enter, drag the new slide to the front, Undo, Redo, reload and check the title, the slide order, the text, and the chart data, then open present and check 2 reveal sections.
+- Scratch checks outside the repo (not committed): canvas drag persists, Delete, menu keyboard behaviour (Escape, focus return, ArrowDown), the shortcuts dialog, a theme change, slide duplicate from the context menu, Make a copy, copy and paste, Cmd+D, two undos, a section, an image from URL, JSON download, and the toast for an invalid colour. All passed.
+- Screenshots (session scratchpad): `editor-1.png` (new deck), `editor-2.png` (chart and grid open), `present-1.png` (present view).
+
+### Unverified in M1b
+
+- Diagram rendering (Mermaid) was not exercised in a browser.
+- Speaker view (the S key in present) was not exercised.
+- File upload of an image (only the URL path was exercised).
+- TSV paste and CSV/XLSX import in the data grid were not exercised.
+- Rotate and resize with react-moveable, and snapping to guides, were not exercised. Only a drag was.
+- Clicking a section tab scrolls the filmstrip. Not exercised.
+- `?slide=N` starts on slide N. The e2e checks the section count, not the start slide.
+- Real multi-user editing in a browser. Concurrency is tested in-process with Y.applyUpdate, and the browser run is single-user.
+- The viewer and commenter experience (see Known gaps).
+- Runs used Google Chrome through `CHROME_PATH`. Playwright's bundled Chromium was not used.
+- Production serving (`vite build` then `node .output/server/index.mjs`) was not run. Only the dev server was used.
+- Snapshot growth under sustained editing is not measured.
 
 ---
 

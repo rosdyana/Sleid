@@ -1,206 +1,352 @@
-// Placeholder editor chrome modeled on Google Sheets. No slide editing yet (milestone 1).
-import { useRef, useState } from 'react'
+// The editor: one open deck. Owns the doc session, UI state, selection, the
+// keyboard map and the overlays. Everything the user can do is an action in
+// actions.ts, which builds deck-ops and applies them through the session.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ChartElement, Element as SlideElement, RichText } from '@sleid/model'
+import { createActions, currentSlide, slideIndex, type PromptRequest, type UiState } from './actions.ts'
+import { DocSession, useDeck, useSaveState, useUndoState } from './doc-session.ts'
+import { Filmstrip } from './Filmstrip.tsx'
+import { SlideCanvas } from './Canvas.tsx'
+import { SidePanel } from './SidePanel.tsx'
+import { DataGrid } from './DataGrid.tsx'
+import { BottomBar } from './BottomBar.tsx'
+import { MenuBar, buildMenus } from './MenuBar.tsx'
+import { ContextMenu, PromptDialog, ShortcutsDialog, Toast, type MenuEntry } from './Overlays.tsx'
+import { FormulaBar, TitleBar, Toolbar } from './Chrome.tsx'
+import { bytesToBase64, base64ToBytes } from '~/lib/base64'
+import { pushDeckUpdateFn } from '~/lib/deck-doc.functions'
 import { updateDeckFn } from '~/lib/decks.functions'
 
 export type EditorDeck = { id: string; title: string; starred: boolean; role: string }
 export type EditorUser = { name: string; email: string }
 
-const MENUS = ['File', 'Edit', 'View', 'Insert', 'Format', 'Slide', 'Arrange', 'Tools', 'Extensions', 'Help']
-const TOOLBAR = ['Undo', 'Redo', 'Print', 'Zoom', '|', 'Text', 'Bold', 'Italic', 'Underline', '|', 'Fill', 'Border', 'Align', '|', 'Insert image', 'Add shape']
-const SECTION_TABS = ['Slides']
+const DEFAULT_UI: UiState = {
+  showNotes: false,
+  showGuides: false,
+  zoom: 'fit',
+  sidePanel: 'format',
+  dataElementId: null,
+  section: null,
+}
 
-export function EditorShell({ deck, user }: { deck: EditorDeck; user: EditorUser }) {
+function isEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
+}
+
+export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; user: EditorUser; state: string }) {
+  const session = useMemo(
+    () =>
+      new DocSession(base64ToBytes(state), async (update) => {
+        await pushDeckUpdateFn({ data: { deckId: meta.id, update: bytesToBase64(update) } })
+      }),
+    // A new deck id or a fresh load means a new doc.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [meta.id, state],
+  )
+  // Not destroyed on unmount: React StrictMode runs effect cleanups without a real
+  // unmount, and the session must survive that. Pending edits are pushed instead.
+  useEffect(() => () => void session.flush(), [session])
+
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (session.isDirty()) e.preventDefault()
+    }
+    const onPageHide = () => void session.flush()
+    window.addEventListener('beforeunload', onBeforeUnload)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+  }, [session])
+
+  const deck = useDeck(session.doc)
+  const save = useSaveState(session)
+  const { canUndo, canRedo } = useUndoState(session)
+
+  const [ui, setUiState] = useState<UiState>(DEFAULT_UI)
+  const setUi = useCallback((patch: Partial<UiState>) => setUiState((prev) => ({ ...prev, ...patch })), [])
+  const [slideIdState, setSlideId] = useState(() => deck.slides[0]?.id ?? '')
+  const [selection, setSelection] = useState<string[]>([])
+  const [editingId, setEditing] = useState<string | null>(null)
+  const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [prompt, setPrompt] = useState<PromptRequest | null>(null)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
+  const [starred, setStarred] = useState(meta.starred)
+  const titleRef = useRef<HTMLInputElement>(null)
+  const imageInput = useRef<HTMLInputElement>(null)
+
+  const slide = currentSlide(deck, slideIdState)
+  const slideId = slide.id
+  const validSelection = selection.filter((id) => slide.elements.some((e) => e.id === id))
+  const selectedEls = slide.elements.filter((e) => validSelection.includes(e.id))
+  const single: SlideElement | undefined = selectedEls.length === 1 ? selectedEls[0] : undefined
+  const dataChart = ui.dataElementId
+    ? (slide.elements.find((e): e is ChartElement => e.id === ui.dataElementId && e.type === 'chart') ?? undefined)
+    : undefined
+
+  const toast = useCallback((message: string) => setToastMessage(message), [])
+  const onToastDone = useCallback(() => setToastMessage(null), [])
+
+  const actions = createActions({
+    session,
+    deck,
+    deckId: meta.id,
+    slideId,
+    selection: validSelection,
+    ui,
+    setUi,
+    setSelection,
+    setSlideId,
+    setEditing,
+    toast,
+    prompt: setPrompt,
+    openShortcuts: () => setShortcutsOpen(true),
+    focusTitle: () => {
+      titleRef.current?.focus()
+      titleRef.current?.select()
+    },
+    navigate: async (href) => {
+      await session.flush()
+      window.location.assign(href)
+    },
+  })
+
+  const menus = buildMenus({
+    actions,
+    deck,
+    canUndo,
+    canRedo,
+    hasSelection: validSelection.length > 0,
+    ui,
+    setUi,
+    undo: () => session.undo(),
+    redo: () => session.redo(),
+    focusTitle: () => {
+      titleRef.current?.focus()
+      titleRef.current?.select()
+    },
+    pickImage: () => imageInput.current?.click(),
+    prompt: setPrompt,
+    openShortcuts: () => setShortcutsOpen(true),
+    toast,
+  })
+
+  // Keyboard map. Editable fields (title, formula bar, notes, TipTap, grid cells)
+  // keep their native keys. The grid also keeps its own paste handling.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey
+      const key = e.key.toLowerCase()
+      if (e.key === 'F5') {
+        e.preventDefault()
+        actions.present(true)
+        return
+      }
+      if (context && e.key === 'Escape') {
+        setContext(null)
+        return
+      }
+      const target = e.target
+      const inGrid = target instanceof HTMLElement && !!target.closest('[role=grid]')
+      if (isEditable(target) && !(mod && key === 'enter')) return
+      if (mod && key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        session.undo()
+        return
+      }
+      if (mod && ((key === 'z' && e.shiftKey) || key === 'y')) {
+        e.preventDefault()
+        session.redo()
+        return
+      }
+      if (inGrid) return
+      if (mod && key === '/') {
+        e.preventDefault()
+        setShortcutsOpen(true)
+        return
+      }
+      if (mod && key === 'enter') {
+        e.preventDefault()
+        actions.newSlide()
+        return
+      }
+      if (mod && key === 'c') return actions.copySelection(false)
+      if (mod && key === 'x') {
+        e.preventDefault()
+        return actions.copySelection(true)
+      }
+      if (mod && key === 'v') {
+        e.preventDefault()
+        void actions.pasteElements()
+        return
+      }
+      if (mod && key === 'a') {
+        e.preventDefault()
+        actions.selectAll()
+        return
+      }
+      if (mod && key === 'd') {
+        e.preventDefault()
+        if (validSelection.length > 0) actions.duplicateSelection()
+        else actions.duplicateSlide()
+        return
+      }
+      if (mod && key === '\\') {
+        e.preventDefault()
+        actions.clearFormatting()
+        return
+      }
+      if (mod && (key === 'b' || key === 'i' || key === 'u')) {
+        e.preventDefault()
+        actions.toggleMark(key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'underline')
+        return
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (validSelection.length > 0) {
+          e.preventDefault()
+          actions.deleteSelection()
+        }
+        return
+      }
+      if (e.key.startsWith('Arrow') && validSelection.length > 0) {
+        e.preventDefault()
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        actions.nudge(dx, dy)
+        return
+      }
+      if (e.key === 'Escape') {
+        if (editingId) setEditing(null)
+        else if (validSelection.length > 0) setSelection([])
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
+  const slideMenu = (id: string): MenuEntry[] => {
+    const s = deck.slides.find((x) => x.id === id)
+    return [
+      { kind: 'item', label: 'New slide after', onSelect: () => actions.newSlide('title-content', true) },
+      { kind: 'item', label: 'Duplicate', onSelect: () => actions.duplicateSlide(id) },
+      { kind: 'item', label: s?.hidden ? 'Show slide' : 'Hide slide', onSelect: () => actions.toggleHidden(id) },
+      { kind: 'sep' },
+      { kind: 'item', label: 'Move up', onSelect: () => actions.moveSlideBy(-1, id) },
+      { kind: 'item', label: 'Move down', onSelect: () => actions.moveSlideBy(1, id) },
+      { kind: 'sep' },
+      { kind: 'item', label: 'Delete', onSelect: () => actions.deleteSlide(id) },
+    ]
+  }
+
+  const sectionMenu = (sectionId: string): MenuEntry[] => [
+    { kind: 'item', label: 'Rename section', onSelect: () => actions.renameSection(sectionId) },
+    { kind: 'item', label: 'Delete section', onSelect: () => actions.deleteSection(sectionId) },
+  ]
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app-bg">
-      <TitleBar deck={deck} user={user} />
-      <MenuBar />
-      <Toolbar />
-      <FormulaBar />
+      <TitleBar
+        deck={deck}
+        starred={starred}
+        deckId={meta.id}
+        userEmail={user.email}
+        userName={user.name}
+        save={save}
+        titleRef={titleRef}
+        onRename={(title) => actions.renameDeck(title)}
+        onStar={() => {
+          const next = !starred
+          setStarred(next)
+          updateDeckFn({ data: { deckId: meta.id, starred: next } }).catch((err: unknown) => {
+            setStarred(!next)
+            toast(err instanceof Error ? err.message : 'Could not update star')
+          })
+        }}
+        onPresent={() => actions.present(false)}
+      />
+      <MenuBar menus={menus} />
+      <Toolbar
+        deck={deck}
+        slide={slide}
+        single={single}
+        ui={ui}
+        setUi={setUi}
+        actions={actions}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        undo={() => session.undo()}
+        redo={() => session.redo()}
+      />
+      <FormulaBar deck={deck} slide={slide} single={single} actions={actions} setUi={setUi} />
       <div className="flex min-h-0 flex-1">
-        <Filmstrip />
-        <CanvasArea />
-        <SidePanel />
+        <Filmstrip
+          deck={deck}
+          currentSlideId={slideId}
+          onSelect={(id) => {
+            setSlideId(id)
+            setSelection([])
+            setEditing(null)
+          }}
+          onMove={(id, to) => actions.moveSlideTo(id, to)}
+          onNew={() => actions.newSlide()}
+          onContextMenu={(x, y, id) => setContext({ x, y, items: slideMenu(id) })}
+        />
+        <SlideCanvas
+          slide={slide}
+          theme={deck.theme}
+          zoom={ui.zoom}
+          selection={validSelection}
+          editingId={editingId}
+          showGuides={ui.showGuides}
+          onSelect={setSelection}
+          onGeometry={(id, next) => actions.commitGeometry(id, next)}
+          onStartEdit={(id) => setEditing(id)}
+          onCommitText={(id, content: RichText) => {
+            actions.commitText(id, content)
+            setEditing(null)
+          }}
+        />
+        <SidePanel deck={deck} slide={slide} selected={selectedEls} ui={ui} setUi={setUi} actions={actions} />
       </div>
-      <SectionTabs />
-    </div>
-  )
-}
-
-function TitleBar({ deck, user }: { deck: EditorDeck; user: EditorUser }) {
-  const [title, setTitle] = useState(deck.title)
-  const savedTitle = useRef(deck.title)
-  const [starred, setStarred] = useState(deck.starred)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
-  async function saveTitle() {
-    const next = title.trim() || 'Untitled presentation'
-    setTitle(next)
-    if (next === savedTitle.current) return
-    try {
-      setSaveError(null)
-      await updateDeckFn({ data: { deckId: deck.id, title: next } })
-      savedTitle.current = next
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Save failed')
-    }
-  }
-
-  async function toggleStar() {
-    const next = !starred
-    setStarred(next)
-    try {
-      setSaveError(null)
-      await updateDeckFn({ data: { deckId: deck.id, starred: next } })
-    } catch (e) {
-      setStarred(!next)
-      setSaveError(e instanceof Error ? e.message : 'Save failed')
-    }
-  }
-
-  return (
-    <header className="flex h-12 shrink-0 items-center gap-3 bg-white px-3">
-      <a href="/" aria-label="Back to decks" className="grid size-9 place-items-center rounded bg-accent text-base font-semibold text-white">
-        S
-      </a>
-      <div className="flex min-w-0 flex-col">
-        <div className="flex items-center gap-1">
-          <input
-            aria-label="Deck title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            onBlur={saveTitle}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur()
-            }}
-            className="w-72 rounded px-1 text-lg text-ink outline-none hover:shadow-[inset_0_0_0_1px_var(--color-rule)] focus:shadow-[inset_0_0_0_2px_var(--color-accent)]"
-          />
-          <button
-            type="button"
-            aria-label={starred ? 'Unstar deck' : 'Star deck'}
-            aria-pressed={starred}
-            onClick={toggleStar}
-            className={`rounded px-1.5 text-base hover:bg-hover ${starred ? 'text-amber-500' : 'text-ink-muted'}`}
-          >
-            {starred ? '★' : '☆'}
-          </button>
-        </div>
-        <div className="px-1 text-[11px] text-ink-muted">
-          {saveError ? <span className="text-red-700">{saveError}</span> : 'All changes saved in Sleid'}
-        </div>
-      </div>
-      <div className="ml-auto flex items-center gap-3">
-        <button
-          type="button"
-          disabled
-          title="Sharing arrives in milestone 2"
-          className="rounded-full bg-accent-soft px-4 py-1.5 font-medium text-[#001d35] opacity-70"
-        >
-          Share
-        </button>
-        <div
-          aria-label={`Signed in as ${user.email}`}
-          title={user.email}
-          className="grid size-8 place-items-center rounded-full bg-[#7c4dff] text-sm font-medium text-white"
-        >
-          {(user.name.trim().charAt(0) || '?').toUpperCase()}
-        </div>
-      </div>
-    </header>
-  )
-}
-
-function MenuBar() {
-  return (
-    <nav aria-label="Menu" className="flex h-7 shrink-0 items-center gap-0.5 px-2">
-      <ul role="menubar" className="flex items-center gap-0.5">
-        {MENUS.map((m) => (
-          <li key={m} role="none">
-            <button type="button" role="menuitem" className="rounded px-2 py-0.5 hover:bg-hover">
-              {m}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </nav>
-  )
-}
-
-function Toolbar() {
-  return (
-    <div role="toolbar" aria-label="Formatting" className="flex h-9 shrink-0 items-center gap-1 border-y border-rule bg-white px-2">
-      {TOOLBAR.map((item, i) =>
-        item === '|' ? (
-          <span key={`sep-${i}`} className="mx-1 h-5 w-px bg-rule" aria-hidden />
-        ) : (
-          <button key={item} type="button" aria-label={item} className="rounded px-2 py-1 text-ink hover:bg-hover">
-            {item}
-          </button>
-        ),
+      {dataChart && (
+        <DataGrid
+          key={dataChart.id}
+          chart={dataChart}
+          onCommit={(data) => actions.updateEl(dataChart.id, { data })}
+          onClose={() => setUi({ dataElementId: null })}
+          onToast={toast}
+        />
       )}
-    </div>
-  )
-}
-
-function FormulaBar() {
-  return (
-    <div className="flex h-7 shrink-0 items-center gap-2 border-b border-rule bg-white px-2 text-ink-muted">
-      <span className="w-16 rounded border border-rule-soft px-2 text-center text-[12px]">Slide 1</span>
-      <span className="font-medium italic text-ink-muted">fx</span>
-      <span className="h-4 w-px bg-rule" aria-hidden />
-      <span className="truncate text-ink-muted">Select an element to edit its content</span>
-    </div>
-  )
-}
-
-function Filmstrip() {
-  return (
-    <aside aria-label="Slides" className="flex w-44 shrink-0 flex-col gap-3 overflow-y-auto border-r border-rule bg-[#f1f3f4] p-3">
-      <div className="flex gap-2">
-        <span className="w-4 pt-1 text-right text-[11px] text-ink-muted">1</span>
-        <div className="aspect-video w-full rounded-sm border-2 border-accent bg-white" />
-      </div>
-    </aside>
-  )
-}
-
-function CanvasArea() {
-  return (
-    <main className="flex min-w-0 flex-1 items-center justify-center overflow-auto bg-canvas-gutter p-8">
-      <div
-        aria-label="Slide canvas"
-        className="flex aspect-video w-full max-w-4xl items-center justify-center rounded-sm bg-white shadow-md"
-      >
-        <span className="text-ink-muted">Slide canvas (milestone 1)</span>
-      </div>
-    </main>
-  )
-}
-
-function SidePanel() {
-  return (
-    <aside aria-label="Side panel" className="flex w-72 shrink-0 flex-col border-l border-rule bg-white">
-      <div className="flex h-9 items-center border-b border-rule px-4 font-medium">Properties</div>
-      <div className="p-4 text-ink-muted">Select an element to see its properties.</div>
-    </aside>
-  )
-}
-
-function SectionTabs() {
-  return (
-    <div className="flex h-8 shrink-0 items-end gap-1 border-t border-rule bg-[#f1f3f4] px-2">
-      <button type="button" aria-label="Add slide" className="mb-1 rounded px-2 text-lg leading-none text-ink-muted hover:bg-hover">
-        +
-      </button>
-      {SECTION_TABS.map((tab) => (
-        <button
-          key={tab}
-          type="button"
-          aria-current="page"
-          className="h-7 rounded-t border border-b-0 border-rule bg-white px-4 font-medium text-accent"
-        >
-          {tab}
-        </button>
-      ))}
+      <BottomBar
+        deck={deck}
+        slide={slide}
+        ui={ui}
+        setUi={setUi}
+        actions={actions}
+        onSectionMenu={(x, y, id) => setContext({ x, y, items: sectionMenu(id) })}
+      />
+      <input
+        ref={imageInput}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          if (file) actions.insertImageFile(file)
+        }}
+      />
+      {prompt && <PromptDialog request={prompt} onClose={() => setPrompt(null)} />}
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      {context && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
+      <Toast message={toastMessage} onDone={onToastDone} />
+      <span className="sr-only" aria-live="polite">
+        {`Slide ${slideIndex(deck, slideId) + 1} of ${deck.slides.length}`}
+      </span>
     </div>
   )
 }

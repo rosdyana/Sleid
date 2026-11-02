@@ -34,9 +34,10 @@ describe('yjs binding', () => {
   })
 
   it('stores nested element fields as Y.Maps and rich text as JSON', () => {
-    const doc = deckToYDoc(fullDeck())
-    const slides = getDeckMap(doc).get('slides') as Y.Array<Y.Map<unknown>>
-    const elements = slides.get(1)?.get('elements') as Y.Array<Y.Map<unknown>>
+    const deck = fullDeck()
+    const doc = deckToYDoc(deck)
+    const slides = getDeckMap(doc).get('slides') as Y.Map<Y.Map<unknown>>
+    const elements = slides.get(deck.slides[1]!.id)?.get('elements') as Y.Array<Y.Map<unknown>>
     const text = elements.get(0)
     expect(text?.get('style')).toBeInstanceOf(Y.Map)
     expect(text?.get('content')).not.toBeInstanceOf(Y.Map)

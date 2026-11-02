@@ -96,16 +96,79 @@ describe('concurrent edits converge', () => {
     expect(deck.slides[0]).toMatchObject({ transition: 'fade', notes: 'B notes' })
   })
 
-  it('a move and a concurrent edit to the same slide still converge (edit may be lost, see DESIGN.md)', () => {
+  it('a move and a concurrent element insert on the same slide both survive', () => {
     const { a, b } = twoReplicas()
-    const s1 = yDocToDeck(a).slides[0]!.id
     applyOps(a, [{ op: 'addSlide', layout: 'blank', slide: { id: 's2' } }])
     sync(a, b)
     applyOps(a, [{ op: 'moveSlide', slideId: 's2', toIndex: 0 }])
     applyOps(b, [{ op: 'addElement', slideId: 's2', element: rect('late', 0) }])
     sync(a, b)
-    expect(yDocToDeck(b)).toEqual(yDocToDeck(a))
-    expect(yDocToDeck(a).slides.map((s) => s.id)).toContain('s2')
-    void s1
+    const deck = yDocToDeck(a)
+    expect(yDocToDeck(b)).toEqual(deck)
+    expect(deck.slides[0]!.id).toBe('s2')
+    expect(deck.slides[0]!.elements.map((e) => e.id)).toContain('late')
+  })
+
+  it('a move and a concurrent updateSlide on the same slide both survive', () => {
+    const { a, b } = twoReplicas()
+    applyOps(a, [{ op: 'addSlide', layout: 'blank', slide: { id: 's2' } }])
+    sync(a, b)
+    applyOps(a, [{ op: 'moveSlide', slideId: 's2', toIndex: 0 }])
+    applyOps(b, [{ op: 'updateSlide', slideId: 's2', patch: { transition: 'fade' } }])
+    sync(a, b)
+    const deck = yDocToDeck(a)
+    expect(yDocToDeck(b)).toEqual(deck)
+    expect(deck.slides[0]).toMatchObject({ id: 's2', transition: 'fade' })
+  })
+
+  it('two concurrent moves of the same slide leave one copy of it and converge', () => {
+    const { a, b } = twoReplicas()
+    applyOps(a, [
+      { op: 'addSlide', layout: 'blank', slide: { id: 's2' } },
+      { op: 'addSlide', layout: 'blank', slide: { id: 's3' } },
+    ])
+    sync(a, b)
+    applyOps(a, [{ op: 'moveSlide', slideId: 's3', toIndex: 0 }])
+    applyOps(b, [{ op: 'moveSlide', slideId: 's3', toIndex: 1 }])
+    sync(a, b)
+    const deck = yDocToDeck(a)
+    expect(yDocToDeck(b)).toEqual(deck)
+    const ids = deck.slides.map((s) => s.id)
+    expect(ids).toHaveLength(3)
+    expect(new Set(ids).size).toBe(3)
+    expect(ids).toEqual(expect.arrayContaining([yDocToDeck(a).slides[0]!.id, 's2', 's3']))
+  })
+
+  it('concurrent inserts at the same position both survive, in a stable order', () => {
+    const { a, b } = twoReplicas()
+    const s1 = yDocToDeck(a).slides[0]!.id
+    applyOps(a, [{ op: 'addSlide', layout: 'blank', index: 1, slide: { id: 'x' } }])
+    applyOps(b, [{ op: 'addSlide', layout: 'blank', index: 1, slide: { id: 'y' } }])
+    sync(a, b)
+    const deck = yDocToDeck(a)
+    expect(yDocToDeck(b)).toEqual(deck)
+    expect(deck.slides.map((s) => s.id)).toEqual([s1, 'x', 'y'])
+  })
+
+  it('a move placed between two equal-key neighbours still works (keys are respaced)', () => {
+    const { a, b } = twoReplicas()
+    const s1 = yDocToDeck(a).slides[0]!.id
+    applyOps(a, [{ op: 'addSlide', layout: 'blank', index: 1, slide: { id: 'x' } }])
+    applyOps(b, [{ op: 'addSlide', layout: 'blank', index: 1, slide: { id: 'y' } }])
+    sync(a, b)
+    applyOps(a, [{ op: 'moveSlide', slideId: s1, toIndex: 1 }])
+    expect(yDocToDeck(a).slides.map((s) => s.id)).toEqual(['x', s1, 'y'])
+  })
+
+  it('a concurrent move and delete of the same slide converge with the slide gone', () => {
+    const { a, b } = twoReplicas()
+    applyOps(a, [{ op: 'addSlide', layout: 'blank', slide: { id: 's2' } }])
+    sync(a, b)
+    applyOps(a, [{ op: 'moveSlide', slideId: 's2', toIndex: 0 }])
+    applyOps(b, [{ op: 'deleteSlide', slideId: 's2' }])
+    sync(a, b)
+    const deck = yDocToDeck(a)
+    expect(yDocToDeck(b)).toEqual(deck)
+    expect(deck.slides.map((s) => s.id)).not.toContain('s2')
   })
 })

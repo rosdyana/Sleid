@@ -17,6 +17,7 @@
 import * as Y from 'yjs'
 import { nanoid } from 'nanoid'
 import { z } from 'zod'
+import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { layoutElements } from './defaults.ts'
 import { mergePatch, writeFields, type PlainObject } from './patch.ts'
 import {
@@ -35,7 +36,9 @@ import {
   appendElement,
   getDeckMap,
   opaqueElementKeys,
+  slideEntriesInOrder,
   writeSlideInto,
+  type SlideEntry,
   type YElements,
   type YSections,
   type YSlides,
@@ -176,7 +179,7 @@ export function parseOps(input: readonly unknown[]): Op[] {
 
 function slidesOf(doc: Y.Doc): YSlides {
   const slides = getDeckMap(doc).get('slides')
-  if (!(slides instanceof Y.Array)) fail('deck is not initialised')
+  if (!(slides instanceof Y.Map)) fail('deck is not initialised')
   return slides as YSlides
 }
 
@@ -196,16 +199,34 @@ function readTheme(doc: Y.Doc): Theme {
   return ThemeSchema.parse(themeOf(doc).toJSON())
 }
 
-function indexOfSlide(slides: YSlides, slideId: string): number {
-  const index = slides.toArray().findIndex((m) => m.get('id') === slideId)
-  if (index < 0) fail(`slide not found: ${slideId}`)
-  return index
+function slideAt(doc: Y.Doc, slideId: string): { slides: YSlides; map: Y.Map<unknown> } {
+  const slides = slidesOf(doc)
+  const map = slides.get(slideId)
+  if (!(map instanceof Y.Map)) fail(`slide not found: ${slideId}`)
+  return { slides, map: map as Y.Map<unknown> }
 }
 
-function slideAt(doc: Y.Doc, slideId: string): { slides: YSlides; index: number; map: Y.Map<unknown> } {
-  const slides = slidesOf(doc)
-  const index = indexOfSlide(slides, slideId)
-  return { slides, index, map: slides.get(index) as Y.Map<unknown> }
+// A slide's plain fields, without the storage-only order key.
+function slideJson(map: Y.Map<unknown>): PlainObject {
+  const { order: _order, ...rest } = map.toJSON() as PlainObject
+  return rest
+}
+
+// Order key for a slide placed at `index` among `others` (every other slide, in
+// order). Equal neighbour keys can happen after concurrent inserts, so in that
+// case the others are respaced first, so that a key fits between them.
+function orderAt(others: SlideEntry[], index: number): string {
+  const prev = others[index - 1]
+  const next = others[index]
+  if (prev && next && prev.order >= next.order) {
+    const keys = generateNKeysBetween(null, null, others.length)
+    others.forEach((entry, i) => {
+      entry.map.set('order', keys[i]!)
+      entry.order = keys[i]!
+    })
+    return generateKeyBetween(others[index - 1]?.order ?? null, others[index]?.order ?? null)
+  }
+  return generateKeyBetween(prev?.order ?? null, next?.order ?? null)
 }
 
 function elementsOf(slideMap: Y.Map<unknown>): YElements {
@@ -260,7 +281,7 @@ function addSlide(doc: Y.Doc, op: Extract<Op, { op: 'addSlide' }>): OpResult {
   const slides = slidesOf(doc)
   const slideIn = op.slide ?? {}
   const id = slideIn.id ?? fail('internal: slide id missing')
-  if (slides.toArray().some((m) => m.get('id') === id)) fail(`slide id already exists: ${id}`)
+  if (slides.has(id)) fail(`slide id already exists: ${id}`)
   if (slideIn.sectionId !== undefined) requireSection(doc, slideIn.sectionId)
 
   const theme = readTheme(doc)
@@ -280,10 +301,12 @@ function addSlide(doc: Y.Doc, op: Extract<Op, { op: 'addSlide' }>): OpResult {
   })
   assertUniqueElementIds(slide.elements)
 
-  const index = clamp(op.index ?? slides.length, 0, slides.length)
+  const others = slideEntriesInOrder(slides)
+  const index = clamp(op.index ?? others.length, 0, others.length)
+  const order = orderAt(others, index)
   const m = new Y.Map<unknown>()
-  slides.insert(index, [m])
-  writeSlideInto(m, slide)
+  slides.set(id, m)
+  writeSlideInto(m, slide, order)
   return ok(id)
 }
 
@@ -296,45 +319,48 @@ function assertUniqueElementIds(elements: Element[]): void {
 }
 
 function deleteSlide(doc: Y.Doc, op: Extract<Op, { op: 'deleteSlide' }>): OpResult {
-  const slides = slidesOf(doc)
-  slides.delete(indexOfSlide(slides, op.slideId), 1)
+  const { slides } = slideAt(doc, op.slideId)
+  slides.delete(op.slideId)
   return ok()
 }
 
 function duplicateSlide(doc: Y.Doc, op: Extract<Op, { op: 'duplicateSlide' }>): OpResult {
-  const { slides, index, map } = slideAt(doc, op.slideId)
+  const { slides, map } = slideAt(doc, op.slideId)
   const newId = op.newSlideId ?? fail('internal: new slide id missing')
-  if (slides.toArray().some((m) => m.get('id') === newId)) fail(`slide id already exists: ${newId}`)
+  if (slides.has(newId)) fail(`slide id already exists: ${newId}`)
 
-  const source = SlideSchema.parse(map.toJSON())
+  const source = SlideSchema.parse(slideJson(map))
   const copy = SlideSchema.parse({
     ...source,
     id: newId,
     elements: source.elements.map((el) => ({ ...el, id: nanoid() })),
   })
+  const others = slideEntriesInOrder(slides)
+  const sourceIndex = others.findIndex((e) => e.id === op.slideId)
+  const order = orderAt(others, sourceIndex + 1)
   const m = new Y.Map<unknown>()
-  slides.insert(index + 1, [m])
-  writeSlideInto(m, copy)
+  slides.set(newId, m)
+  writeSlideInto(m, copy, order)
   return ok(newId)
 }
 
-// toIndex is the final position of the slide, clamped to the list.
+// toIndex is the final position of the slide, clamped to the list. Only the
+// `order` key is written, so the slide's content is never re-created.
 function moveSlide(doc: Y.Doc, op: Extract<Op, { op: 'moveSlide' }>): OpResult {
-  const { slides, index: from, map } = slideAt(doc, op.slideId)
-  const target = clamp(op.toIndex, 0, slides.length - 1)
+  const { slides, map } = slideAt(doc, op.slideId)
+  const entries = slideEntriesInOrder(slides)
+  const from = entries.findIndex((e) => e.id === op.slideId)
+  const target = clamp(op.toIndex, 0, entries.length - 1)
   if (from === target) return ok()
 
-  const source = SlideSchema.parse(map.toJSON())
-  slides.delete(from, 1)
-  const m = new Y.Map<unknown>()
-  slides.insert(target, [m])
-  writeSlideInto(m, source)
+  const others = entries.filter((e) => e.id !== op.slideId)
+  map.set('order', orderAt(others, target))
   return ok()
 }
 
 function updateSlide(doc: Y.Doc, op: Extract<Op, { op: 'updateSlide' }>): OpResult {
   const { map } = slideAt(doc, op.slideId)
-  const { id: _id, elements: _elements, ...meta } = map.toJSON() as PlainObject
+  const { id: _id, elements: _elements, ...meta } = slideJson(map)
   const patch = op.patch as PlainObject
   if (typeof patch.sectionId === 'string') requireSection(doc, patch.sectionId)
 
@@ -455,7 +481,7 @@ function deleteSection(doc: Y.Doc, op: Extract<Op, { op: 'deleteSection' }>): Op
   const index = indexOfSection(sections, op.sectionId)
   if (index < 0) fail(`section not found: ${op.sectionId}`)
   sections.delete(index, 1)
-  for (const slide of slidesOf(doc).toArray()) {
+  for (const slide of slidesOf(doc).values()) {
     if (slide.get('sectionId') === op.sectionId) slide.delete('sectionId')
   }
   return ok()
