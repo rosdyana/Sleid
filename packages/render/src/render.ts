@@ -278,8 +278,16 @@ export const DIAGRAMS_STATE_ATTR = 'data-sleid-diagrams'
 
 function mermaidScriptTags(script: MermaidScript): string[] {
   const src = JSON.stringify(script.src).replace(/</g, '\\u003c')
+  // mermaid.render lays each diagram out in a scratch node on <body>, outside reveal's scaled
+  // slide stage. Running in place (mermaid.run) measured labels inside the transformed, possibly
+  // hidden slide and produced ~2px-tall, blank labels.
   const run = `mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
-    await mermaid.run({ querySelector: '.mermaid' });`
+    const nodes = [...document.querySelectorAll('.mermaid')];
+    for (let i = 0; i < nodes.length; i++) {
+      const out = await mermaid.render('sleid-mmd-' + i, nodes[i].textContent || '');
+      nodes[i].innerHTML = out.svg;
+      nodes[i].setAttribute('data-processed', 'true');
+    }`
   if (script.module) {
     return [
       `<script type="module">

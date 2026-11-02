@@ -43,7 +43,9 @@ function expectSafePlacement(elements: Element[], placed: NonNullable<ReturnType
   expect(b.y + b.h).toBeLessThanOrEqual(SAFE.y + SAFE.h)
   expect(b.w).toBeGreaterThanOrEqual(MIN_WIDTH)
   expect(b.h).toBeGreaterThanOrEqual(MIN_HEIGHT)
-  expect(Math.abs(b.w / b.h - aspect)).toBeLessThan(0.02)
+  // The aspect ratio only seeds the search; the box then grows into the free space, so it is never
+  // smaller than the minimum box of that aspect.
+  expect(b.w).toBeGreaterThanOrEqual(Math.min(SAFE.w, Math.max(MIN_WIDTH, MIN_HEIGHT * aspect)))
   for (const el of elements) {
     if (isEmptyTextBox(el)) {
       // Covered empty placeholders are listed for deletion; uncovered ones stay.
@@ -65,7 +67,7 @@ describe('isEmptyTextBox', () => {
 })
 
 describe('findPlacement', () => {
-  it('empty slide: the largest box of the aspect ratio, from the top of the safe area', () => {
+  it('empty slide: the whole safe area, from the top', () => {
     const placed = findPlacement([], DIAGRAM_ASPECT)!
     expect(placed.placeholderIds).toEqual([])
     expect(placed.box.y).toBe(SAFE.y)
@@ -74,9 +76,18 @@ describe('findPlacement', () => {
     expectSafePlacement([], placed, DIAGRAM_ASPECT)
   })
 
-  it('empty slide with a chart: the chart aspect ratio is kept', () => {
+  it('empty slide with a chart: the chart fills the whole safe area', () => {
     const placed = findPlacement([], CHART_ASPECT)!
+    expect(placed.box).toEqual(SAFE)
     expectSafePlacement([], placed, CHART_ASPECT)
+  })
+
+  it('section slide with an empty subtitle: a diagram spans the full safe width below the title (live-run regression)', () => {
+    const elements = layoutWith('section', ['title'])
+    const placed = findPlacement(elements, DIAGRAM_ASPECT)!
+    expect(placed.box.x).toBe(SAFE.x)
+    expect(placed.box.w).toBe(SAFE.w)
+    expect(placed.box.y + placed.box.h).toBe(SAFE.y + SAFE.h)
   })
 
   it('section slide with a title and subtitle (both filled): no room, so null (the caller adds a new slide)', () => {

@@ -112,7 +112,24 @@ export function findPlacement(elements: readonly Element[], aspect: number): Pla
   }
 
   if (!chosen) return null
-  const target = chosen
+  // The aspect ratio only seeds the search. Charts and diagrams scale to fit any box, so grow the
+  // chosen box to the full free width (re-centred) and then down to the free height. A wide flowchart
+  // under a title otherwise came out at the 2:1 minimum with tiny labels.
+  const grow = (b: Box): Box => {
+    const full = { ...b, x: area.x, w: area.w }
+    let out = fits(full) ? full : b
+    let lo = out.h
+    let hi = bottom - out.y
+    if (fits({ ...out, h: hi })) return { ...out, h: hi }
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2)
+      if (fits({ ...out, h: mid })) lo = mid
+      else hi = mid
+    }
+    out = { ...out, h: lo }
+    return out
+  }
+  const target = grow(chosen)
   const placeholderIds = elements.filter((e) => isEmptyTextBox(e) && overlapsBox(target, boxOf(e))).map((e) => e.id)
   return { box: target, placeholderIds }
 }
