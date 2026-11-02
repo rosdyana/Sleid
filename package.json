@@ -1,0 +1,22 @@
+{
+  "name": "sleid",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @sleid/web dev",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "vitest run",
+    "test:e2e": "pnpm --filter @sleid/web test:e2e",
+    "db:generate": "pnpm --filter @sleid/web db:generate",
+    "db:migrate": "pnpm --filter @sleid/web db:migrate"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "packageManager": "pnpm@10.4.1",
+  "engines": {
+    "node": ">=24"
+  }
+}

@@ -1,0 +1,27 @@
+name: sleid
+
+# Local dev services. Host port 5433 avoids clashing with untumu's Postgres on 5432.
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sleid
+      POSTGRES_USER: sleid
+      POSTGRES_PASSWORD: sleid
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - 127.0.0.1:5433:5432
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U sleid -d sleid]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # TODO(M2): collab service (Hocuspocus, Yjs WebSocket server, port 1234).
+  # TODO(M3): worker service (pg-boss jobs: export, import, wizard).
+  # TODO: app service (production build of apps/web) once deployment is planned.
+
+volumes:
+  pgdata:

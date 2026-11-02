@@ -1,0 +1,13 @@
+node_modules
+.env
+.env.*
+!.env.example
+.output
+.nitro
+.tanstack
+.vitest
+dist
+test-results
+playwright-report
+routeTree.gen.ts
+drizzle-debug.log
