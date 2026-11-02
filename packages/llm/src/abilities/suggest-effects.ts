@@ -1,15 +1,21 @@
 // suggestEffects: transitions, auto-animate and element animation orders for the given slides.
 // Tasteful defaults: fade or slide transitions, at most MAX_ANIMATIONS animated elements per slide,
 // orders renumbered from 0. Only elements that exist on the slide are animated.
+//
+// The model sees a compact listing only (slide id, layout, element ids and types), never the text, so a
+// call stays small. The slides are sent in batches of SUGGEST_BATCH, one request each, and the results
+// are merged. Smaller requests finish well inside a proxy's time limit.
 import { z } from 'zod'
-import { ANIMATION_EFFECTS } from '@sleid/model'
-import { describeDeck } from '../context.ts'
+import { ANIMATION_EFFECTS, type Slide } from '@sleid/model'
 import { LlmError } from '../errors.ts'
 import { structured } from '../structured.ts'
 import { allowlist, checkOps } from '../ops-check.ts'
-import { systemPrompt, MAX_IDS, slideOf, type AbilityEnv, type AbilityOutcome } from './common.ts'
+import { systemPrompt, MAX_IDS, slideOf, sumUsage, type AbilityEnv, type AbilityOutcome } from './common.ts'
+import type { Usage } from '../types.ts'
 
 export const MAX_ANIMATIONS = 4
+/** Slides per model request. */
+export const SUGGEST_BATCH = 6
 const TRANSITIONS = ['none', 'fade', 'slide', 'convex'] as const
 
 export const SuggestEffectsInput = z.object({
@@ -30,28 +36,50 @@ const Output = z.object({
   ),
 })
 
+/** One line per slide: its id, layout, and each element's id and type. No text. */
+function listingOf(slides: readonly Slide[]): string {
+  return slides
+    .map((s) => `slide ${s.id} layout=${s.layout}: ${s.elements.map((e) => `${e.id} (${e.type})`).join(', ') || 'no elements'}`)
+    .join('\n')
+}
+
+function batches<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
 export async function suggestEffects(env: AbilityEnv, rawInput: SuggestEffectsInput): Promise<AbilityOutcome> {
   const input = SuggestEffectsInput.parse(rawInput)
   const slides = input.slideIds.map((id) => slideOf(env.deck, id))
-  const listing = slides
-    .map((s) => `slide ${s.id}: ${s.elements.map((e) => `${e.id} (${e.type})`).join(', ') || 'no elements'}`)
-    .join('\n')
-  const result = await structured(env.provider, Output, {
-    system: systemPrompt(
-      `Task: suggest a transition and animations for each listed slide. Use "fade" or "slide" transitions and "none" for a title or section slide. Animate at most ${MAX_ANIMATIONS} elements per slide, the key points, in reading order. Use "fade-up" or "fade-in" for text, "grow" or "zoom-in" for charts and images. Only use element ids from the listing.`,
-    ),
-    user: `${describeDeck(env.deck, { maxChars: 4000, selectionIds: input.slideIds }).text}\n\nSlides to work on:\n${listing}`,
-    maxTokens: 1500,
-    temperature: 0.4,
-    name: 'effects',
-    ...(env.compact !== undefined ? { compact: env.compact } : {}),
-    ...(env.signal ? { signal: env.signal } : {}),
-  })
+  const system = systemPrompt(
+    `Task: suggest a transition and animations for each listed slide. Use "fade" or "slide" transitions and "none" for a title or section slide. Animate at most ${MAX_ANIMATIONS} elements per slide, the key points, in reading order. Use "fade-up" or "fade-in" for text, "grow" or "zoom-in" for charts and images. Only use element ids from the listing.`,
+  )
+
+  const suggestions: z.infer<typeof Output>['slides'] = []
+  const usages: Usage[] = []
+  let model = env.provider.model
+  for (const batch of batches(slides, SUGGEST_BATCH)) {
+    const result = await structured(env.provider, Output, {
+      system,
+      user: `Slides to work on:\n${listingOf(batch)}`,
+      // Reasoning models spend part of this on thinking. 1500 ran out on six slides in the live check.
+      maxTokens: 3000,
+      temperature: 0.4,
+      name: 'effects',
+      ...(env.compact !== undefined ? { compact: env.compact } : {}),
+      ...(env.signal ? { signal: env.signal } : {}),
+    })
+    suggestions.push(...result.value.slides)
+    usages.push(result.usage)
+    model = result.model
+  }
+  const usage = sumUsage(...usages)
 
   const allowedSlides = new Set(input.slideIds)
   const warnings: string[] = []
   const raw: unknown[] = []
-  for (const suggestion of result.value.slides) {
+  for (const suggestion of suggestions) {
     if (!allowedSlides.has(suggestion.slideId)) {
       warnings.push(`Ignored a suggestion for slide ${suggestion.slideId}, which was not requested.`)
       continue
@@ -85,7 +113,7 @@ export async function suggestEffects(env: AbilityEnv, rawInput: SuggestEffectsIn
     summary: `Suggest transitions and animations for ${slides.length} slide${slides.length === 1 ? '' : 's'}`,
     ops,
     warnings,
-    usage: result.usage,
-    model: result.model,
+    usage,
+    model,
   }
 }

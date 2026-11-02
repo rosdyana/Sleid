@@ -1,7 +1,7 @@
 // A fake OpenAI-compatible server for the browser checks (tests/ai.mjs). No model is involved:
 // every reply is canned, chosen from the request. It handles:
 //   - the connection test ("Reply with the single word OK")
-//   - structured calls, by response_format name: slide, rewrite, chart, theme
+//   - structured calls, by response_format name: slide, rewrite, chart, theme (plain, or streamed as content)
 //   - streamed chat turns: a tool call for "slide" or "chart" requests, then a closing reply
 // Usage from another script: const fake = await startFakeOpenAI(); fake.url, await fake.close()
 // Run alone for a manual check: node tests/fake-openai-server.mjs 4011
@@ -106,6 +106,8 @@ export function respond(body) {
     if (name) return { kind: 'json', value: structuredReply(name, system, userText) }
     return { kind: 'text', text: 'OK' }
   }
+  // Structured output streamed as content (the openai-compatible adapter streams json_schema calls by default).
+  if (name) return { kind: 'stream', text: JSON.stringify(structuredReply(name, system, userText)) }
   if (sawToolResult) {
     return { kind: 'stream', text: 'Here is the proposal. Review it in the card below, then Preview or Apply it.' }
   }

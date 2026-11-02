@@ -212,6 +212,13 @@ Set `LLM_SECRET_KEY` in `.env` before you add a key (`openssl rand -base64 32`).
 
 Small local models sometimes ignore the JSON schema. If a proposal fails with "not the expected format", set *Structured output* to *JSON-only prompt*, or set `SLEID_LLM_STRUCTURED=prompt`. A model that does not accept pictures must leave *This model accepts pictures* off (or `SLEID_LLM_SUPPORTS_IMAGES=false`).
 
+**Provider options** (Settings › AI, per provider)
+
+- **Compact prompts** sends smaller schemas (no descriptions) and is on by default for *Local model* providers and off for Claude on Foundry and Azure OpenAI. Turn it off for a large local model that follows the full schema better. The server default (`SLEID_LLM_*`) follows the same kind default, and has no switch of its own.
+- **Turn off thinking** (*Local model* only) sends `chat_template_kwargs: {"enable_thinking": false}`, for reasoning models such as Qwen3 served with thinking on. **Reasoning effort** (*Local model* only) sends `reasoning_effort` (low, medium or high). Each one is tried on the first request; if the server rejects the parameter, it is dropped for that provider and the request is sent again without it. Both are off by default.
+- Reasoning models send their thinking separately from the answer, and the thinking uses the same token budget. If a reply runs out of budget with no answer, the assistant retries once with a bigger budget. If that is still empty, the message says to raise the budget or to turn thinking off for this provider.
+- Structured requests to a *Local model* server stream the reply and collect it before it is checked. This keeps a proxy in front of a slow server from closing the connection. If the server refuses streaming, the assistant sends a plain request instead.
+
 Usage counts are kept per request. A user can make `AI_RATE_LIMIT_MAX` requests per `AI_RATE_LIMIT_WINDOW_SECONDS` (default 30 per 10 minutes). The limit is checked in the database, so it holds across processes.
 
 Status of the live runs: the adapters are tested against fake HTTP servers. A live run against Foundry or a local server has **not** been done for this milestone. See DESIGN.md (M4, unverified).

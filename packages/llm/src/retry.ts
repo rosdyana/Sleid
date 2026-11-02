@@ -1,6 +1,10 @@
 // Retries with backoff on rate limits (429) and server errors (5xx). Other errors
 // (auth, bad request, network, timeout, abort, invalid output) are not retried.
+// Gateway errors (502, 504) are retried once only: a proxy that times out on a slow model
+// answers the same way again, so a second retry only adds minutes.
 import { isLlmError, LlmError } from './errors.ts'
+
+const GATEWAY_STATUSES = new Set([502, 504])
 
 export interface RetryOptions {
   /** Retries after the first attempt. Default 2, so at most three requests. */
@@ -37,11 +41,13 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions &
   const base = options.baseDelayMs ?? 500
   const cap = options.maxDelayMs ?? 8000
   const sleep = options.sleep ?? sleepMs
+  let gatewayRetries = 0
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn()
     } catch (err) {
       if (!isRetryable(err) || attempt >= maxRetries || options.signal?.aborted) throw err
+      if (isLlmError(err) && err.status !== undefined && GATEWAY_STATUSES.has(err.status) && ++gatewayRetries > 1) throw err
       const wanted = isLlmError(err) && err.retryAfterMs !== undefined ? err.retryAfterMs : base * 2 ** attempt + Math.random() * base
       await sleep(Math.min(wanted, cap), options.signal)
     }

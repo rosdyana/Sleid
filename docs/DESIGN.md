@@ -522,7 +522,8 @@ Scope: `packages/llm` (was a placeholder), the `llm_providers` and `llm_usage` t
 - **Azure OpenAI** is plain fetch to `{endpoint}/openai/deployments/{deployment}/chat/completions?api-version=…`, with the `api-key` header.
 - **Local models** (`openai-compatible`) take a base URL that ends in `/v1` and an optional bearer key. Ollama, LM Studio, llama.cpp and vLLM all use this path.
 - Structured output has three modes: `json_schema` (`response_format`), `tools` (one forced function call) and `prompt` (JSON-only, in the system prompt). `auto` tries `json_schema` first, then the fallback (`prompt` for local servers, `tools` for Azure). A 400 that says the mode is unsupported moves to the next mode, and the choice is kept for that provider instance. Foundry uses one forced tool whose `input_schema` is the schema.
-- Every adapter applies a timeout, honours the caller's `AbortSignal`, retries 429 and 5xx at most twice (honouring `Retry-After`), and maps failures to `auth`, `rate-limit`, `bad-request`, `network`, `timeout`, `server`, `invalid-output` or `aborted`. Messages run through `redact`/`scrubError` with the request's secrets, and nothing in `packages/llm` logs.
+- **Local reasoning models** (M4 live fixes): see "Reasoning models and streamed structured output" below. Structured calls to `openai-compatible` servers stream by default (`streamStructured`); Azure keeps plain calls.
+- Every adapter applies a timeout, honours the caller's `AbortSignal`, retries 429 and 5xx at most twice (502 and 504 once only, M4 live fixes; honouring `Retry-After`), and maps failures to `auth`, `rate-limit`, `bad-request`, `network`, `timeout`, `server`, `invalid-output` or `aborted`. Messages run through `redact`/`scrubError` with the request's secrets, and nothing in `packages/llm` logs.
 
 **Structured output (`structured.ts`).** One call. The reply is parsed after repair: the literal text, then the text without fences, then the first balanced `{...}`, each also without trailing commas. A reply that fails validation gets one corrective request that includes the zod issues. A second failure is `LlmError('invalid-output')`. Compact mode strips `description`, `title`, `examples` and `default` from the JSON Schema, which is what small local models need. Abilities keep their schemas; "fewer optional fields" is not automated.
 
@@ -532,10 +533,10 @@ Scope: `packages/llm` (was a placeholder), the `llm_providers` and `llm_usage` t
 |---|---|---|---|
 | `rewriteText` (improve, shorten, expand, formal, casual, translate, fix-grammar, bulletize, custom) | `updateElement` | `{ paragraphs[] }` | Rich text from paragraphs (bullet list for bulletize). The model never writes rich-text JSON. |
 | `generateSlide` | `addSlide`, `addElement` (to fill an empty slide) | layout, title, subtitle, bullets, notes | Placeholders from the model package, then `layoutGuard` (96 px margins, stacking, shortening). Image layouts are not offered. |
-| `generateChart` | `addElement`, `updateElement` (to change an existing chart) | chart type, title, legend, and data only when none was given | The data always comes from the input (selection or pasted), so the model cannot change it. Numeric strings become numbers. |
-| `generateDiagram` | `addElement`, `updateElement` | title, Mermaid source | `validateMermaid` (first keyword from the allowlist, size, no script). One corrective retry for the Mermaid problem only. |
+| `generateChart` | `addElement`, `updateElement` (to change an existing chart), `addSlide` and `deleteElement` (placement, below) | chart type, title, legend, and data only when none was given | The data always comes from the input (selection or pasted), so the model cannot change it. Numeric strings become numbers. Placed by `placement.ts` (below). |
+| `generateDiagram` | `addElement`, `updateElement`, `addSlide` and `deleteElement` (placement, below) | title, Mermaid source | `validateMermaid` (first keyword from the allowlist, size, no script). One corrective retry for the Mermaid problem only. Placed by `placement.ts` (below). |
 | `generateTheme` | `setTheme` | colours and two fonts from a fixed list | `enforceThemeContrast`: text and muted text 4.5:1, accents 3:1 on the background. Each adjustment is listed on the card. |
-| `suggestEffects` | `updateSlide` (transition, auto-animate), `updateElement` (animation) | per slide: transition, auto-animate, animations | At most 4 animations per slide, orders renumbered from 0, unknown element ids dropped. Only requested slides. |
+| `suggestEffects` | `updateSlide` (transition, auto-animate), `updateElement` (animation) | per slide: transition, auto-animate, animations | At most 4 animations per slide, orders renumbered from 0, unknown element ids dropped. Only requested slides. Sent as a compact listing (slide id, layout, element ids and types, no text), six slides per request, results merged (M4 live fixes). |
 | `speakerNotes` | `setNotes` | notes per slide id | Only requested slides. Tone and length are fixed by the user. |
 | `altText` | `updateElement` (`alt`) | alt text per element id | Pictures are sent (up to 4) only when the provider accepts them and the bytes exist. Other items are written from context and reported as "auto (no vision)". |
 | `explain` | none | text | No ops. |
@@ -628,13 +629,90 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
   - `apps/web/tests/ai.mjs` (new): **passed**, 32 checks, no page or console errors. It covers: add the fake local model in Settings › AI; Test connection → "OK · fake-local · N ms"; the key is not in the page; the fx-bar Ask AI makes a slide proposal; Preview shows the slide with the ribbon and the filmstrip shows it; Apply adds it; Undo removes it; Redo brings it back; Ask AI ▸ Shorten replaces the text with the shorter text; a chart from a prompt in the panel; Apply adds the chart; Tools ▸ Generate theme with a brand colour gives "Brand Calm" with the contrast adjustment listed; Apply changes the theme; a second browser (editor) sees the new slide within 143 ms of A's Apply click and sees the theme; a viewer has no AI tab, no Ask AI button and no composer; the chat route answers 403 to the viewer; the fake server received the key only as the bearer token and never in a body; the slide ability used a JSON schema request; the chat used a streamed request.
 - Screenshots (under `SCREENSHOT_DIR`, which was the session scratchpad): `ai-settings.png` (the provider list with Test connection OK), `ai-preview.png` (the Preview ribbon, the previewed slide in the canvas and filmstrip, and the card), and `ai-panel.png` (the panel with the applied shorten card, the chart request and its card). I looked at all three.
 
+### M4 live verification and fixes
+
+Run against a real local model: `https://gpt.knowhub.my.id/v1` with `qwen3.8-flash-next-q2_0` (262k context, a reasoning model: each reply has `content` and `reasoning_content`, and `response_format: json_schema` is accepted). The endpoint is behind Cloudflare. The check is `apps/web/scripts/live-llm-check.ts`: the twelve steps (eleven abilities and one chat turn with a tool call), applied to one deck, rendered to `slide-N.png` with Chrome. About 55 live requests were made in total, including the diagnosis (an estimate: the script does not count requests). The first live run (before these fixes) passed 10 of 12.
+
+**What the first live run found.**
+- **Placement.** A 1400×700 diagram at (260, 260) covered the title and subtitle of a section slide.
+- **Empty answer.** `explain` returned "The assistant returned an empty answer." once. The cause was not confirmed: the same prompt, replayed twice later, returned answers with `finish_reason` `stop`. The fix covers the case where the budget is spent on thinking (see below), but it was not reproduced, so the cause is open.
+- **Gateway timeout.** `suggestEffects` (five slides, one request) failed with Cloudflare HTTP 502 after about 61 seconds. It reproduced on a second call.
+- **Structured budget.** With streaming on, the server reports a spent budget as an in-stream error frame, not as `finish_reason` `length`: `{"error": {"code": "structured_output_failed", "message": "structured output was incomplete (finish_reason=length); increase the output budget"}}`. It sends `: keep-alive` comment lines while it reasons. The first streamed `suggestEffects` (six slides, 1500 tokens) failed on this twice. Both are handled now.
+
+**Placement (`packages/llm/src/placement.ts`, `abilities/place-element.ts`).** `generateChart` and `generateDiagram` only. (`generateSlide` fills an empty slide, so there is nothing to place around.)
+- Obstacles are the non-empty elements, each grown by the 24 px stacking gap. An empty text box (a placeholder with no text) is not an obstacle.
+- The safe area is the 96 px margin (1728 × 888). Charts keep 1600:720, diagrams 1400:700. The minimum is 640 × 360.
+- First choice: the space below the lowest non-empty element, centred, when the largest box of the aspect ratio that fits there is at least the minimum.
+- Second choice: the largest free box anywhere in the safe area, from candidate corners (the safe area's corner and the edges of the obstacles plus the gap). Ties go to the higher, then the more left, box.
+- No room: the element goes on a **new slide after the target**, with the `title-content` layout, the ability's title, and the element placed below that title. The warning names both slides ("Slide 4 had no free space for the diagram, so it is on a new slide (slide 5).").
+- Empty placeholder text boxes that the new element covers are deleted in the same batch (`deleteElement`). The code deletes only empty text boxes, and a test checks that a non-empty element is never listed.
+- **Allowlists.** `generateChart` and `generateDiagram` gained `addSlide` (for the new-slide case) and `deleteElement` (for placeholders only). The brief named `deleteElement`; `addSlide` is needed as well for the new-slide case. A test pins that only these two abilities and `chat` may delete.
+
+**Reasoning models and streamed structured output (`adapters/openai-chat.ts`).**
+- `reasoning_content` is never output. When the server reports no usage, the estimate counts it, because it was generated.
+- A reply with no content and no tool call that stopped at the length limit (`finish_reason` `length`, or the in-stream error frame above) is retried once at `min(3 × max_tokens, 8192)`, and only if that is larger. Still empty: `LlmError('bad-request', "The model used its whole budget thinking and returned no answer. Raise max tokens or turn off thinking for this provider.")`. It has no status, so it is shown to the user as written, including for user providers.
+- The rule applies to the json_schema, tools and prompt modes (through `generate`), and to the plain stream (retried before anything is shown, so the user never sees the first attempt).
+- **Thinking controls** are provider options for `openai-compatible` only: `disableThinking` (sends `chat_template_kwargs: {"enable_thinking": false}`) and `reasoningEffort` (sends `reasoning_effort`). Both are off by default and set in Settings › AI. They are sent on the first request. A 400 that names one of them turns them off for that adapter instance, and the request is sent again without them. Not tested against the live endpoint; the live runs used the defaults. The unit tests use a fake server that refuses the parameter.
+- **Streamed structured output** (`streamStructured`, default on for `openai-compatible`). A json_schema call sends `stream: true`, collects the content and the error frames, and then parses and validates as before. Keep-alive comments are ignored. An error frame that says the budget ran out is treated as `finish_reason` `length`. Any other error frame is `LlmError('server')` with the key removed. A 400 that mentions streaming turns streaming off for that instance and the call is sent plain. A JSON reply to a streamed request is read as JSON. Azure and Foundry keep plain calls.
+- **502 and 504** are retried once. Other 5xx are still retried twice.
+
+**Compact prompts (provider option).** Compact (schemas without descriptions) is `compactPrompts` in the provider config. It is on by default for `openai-compatible` and off for Claude on Foundry and Azure OpenAI, and the settings page shows it. Before this change the same default came from the kind in `ai.server.ts` with no switch. The environment default (`SLEID_LLM_*`) follows the kind default and has no switch of its own. `live-llm-check.ts` passes `compact: true`, which is the openai-compatible default.
+
+**Latency (one live call each, same deck).**
+
+| Step | Before | After |
+|---|---|---|
+| suggest effects, single call | 61 s, HTTP 502 (failed) | 24 s, ok, 17 ops |
+| suggest effects, inside the full runs | 60 s, HTTP 502 (failed) | 56 s (run 2), 41 s (final run), both ok |
+
+**Final live run, 12 of 12 steps ok** (`report.json` in the scratchpad, the same run that produced the renders).
+
+| Step | ms | Result |
+|---|---|---|
+| generate title slide | 4390 | ok |
+| generate content slide | 4834 | ok |
+| generate chart | 5172 | ok (warning: the data was proposed by the assistant) |
+| generate diagram slide | 4556 | ok |
+| generate diagram | 6008 | ok (below the section title, no warning) |
+| rewrite shorten | 3942 | ok |
+| rewrite translate | 3612 | ok |
+| generate theme | 19015 | ok (two colours adjusted for contrast, listed) |
+| speaker notes | 12814 | ok |
+| suggest effects | 41249 | ok (5 slides, batch of 5) |
+| explain | 6460 | ok |
+| chat with tools | 11160 | ok (1 proposal) |
+
+Live runs after the fixes were 11 of 12 (suggest effects failed on the in-stream budget error, fixed since), then 12 of 12 (suggest effects 56 s), then the final 12 of 12. In the run before the final one the section slide had a subtitle, so the diagram went to a new slide (slide 5), as designed. In the final run the section slide had no subtitle, so the diagram went below the title.
+
+**Renders (`slide-N.png`, final run).** Each slide was rendered in its own page (the capture was changed for this: a shared page measured Mermaid diagrams on hidden slides as 16 px boxes, and a hash change did not wait for reveal's transitions). I looked at all five slides.
+- No element overlaps text. The chart (96, 96, 1728 × 778) and the diagram (580, 604, 760 × 380) are fully on the slide and inside the safe area.
+- The chart landed on the deck's default blank slide, which had no content, so it fills the safe area.
+
+**Quality notes (honest).**
+- The bakery slide asked for three benefits and came back as one sentence in the body, not bullets. The text is plausible, but a single line does not match the request.
+- The diagram is a five-node left-to-right flow with a branch. Mermaid draws it at 980 px natural width, scaled into 760 px, so it is small. Its node labels are in the DOM but do not paint in the Chrome screenshot (empty boxes). This is in the deck renderer (`packages/render`), not in the assistant, and it was not investigated further.
+- The chart data is model-proposed (the warning says so). The numbers are plausible; nobody has checked them.
+- Theme colours changed between runs, and each change is listed on the card.
+- `explain` produced a good answer in both replays. The one empty answer in the first run is not explained.
+- The `suggestEffects` latency varies: 24 to 56 seconds for the same kind of call. The cause (a retry at a bigger budget, or long reasoning) is not logged.
+
+**Dev stack (`apps/web/tests/ai.mjs`).** Passed, 32 checks, with the dev server started with `LLM_USER_ALLOW_PRIVATE_URLS=1 SLEID_TEST_AUTH=1`, a scratch `LLM_SECRET_KEY`, and the collab secrets from the environment. The fake server (`apps/web/tests/fake-openai-server.mjs`) now answers a streamed json_schema request with the JSON as content, as the real server does. Before, it answered with a tool call, which the streamed path (correctly) rejected. The servers were stopped afterwards.
+
+**Unit tests.** `packages/llm`: 230 tests in 14 files, including `placement.test.ts` (empty slide, title and subtitle section, title-content with a full body, a slide with only empty placeholders, no deletion of a non-empty element, below-first preference, the beside search, and the minimum size), the placement cases in `abilities.test.ts`, `openai-chat.test.ts` (the length retry, the budget error, the thinking params with fallback, streamed structured output, the stream fallback, the JSON-reply fallback, error frames, 502 once, budget arithmetic), and the suggest batching. `apps/web` settings tests cover the compact default, the saved choice, and the thinking params reaching the server.
+
+**Not done.**
+- The thinking controls were not tested live (see above). The live server's support for `chat_template_kwargs` and `reasoning_effort` is unknown.
+- The placement applies to `generateChart` and `generateDiagram` only. Chat proposals (`apply_ops`) can still place an element over existing content.
+- Environment-default switches for compact prompts and thinking (`SLEID_LLM_*`) were not added.
+- No fix for the diagram's labels in the deck renderer.
+
 ### Unverified in M4
 
 - **The endpoint policy against a live server.** The policy is tested with stubbed DNS and local fake servers. Connecting to a real public host through the pinned dispatcher, and a TLS (`https`) endpoint through it (SNI and certificate checks), were not run. The dev-server e2e ran with the flag on, so the refusal of `127.0.0.1:3002` by a running server was tested only at the settings level, not through the browser.
 
 - **Live Claude on Foundry.** No Foundry credentials were available. The request shape, headers, tool use, errors and retries are tested against a fake Anthropic-Messages endpoint only. The SDK versions are pinned, but the live response was not seen.
 - **Live Azure OpenAI.** Same position: the URL, headers and both structured modes are tested against a fake endpoint only.
-- **Live local servers** (Ollama, LM Studio, llama.cpp, vLLM). No server was run. The fake endpoint covers `json_schema`, forced tools, the JSON-only fallback, and SSE. Real refusals of `response_format`, and whether each model follows the schema, were not seen. The LM Studio steps in the README (the Developer tab) are from the app's UI, not checked on a machine.
+- **Live local servers** (Ollama, LM Studio, llama.cpp, vLLM). Only one server was run (`qwen3.8-flash-next-q2_0` behind Cloudflare, see "M4 live verification and fixes"). Ollama, LM Studio, llama.cpp and vLLM were not run. The fake endpoint covers `json_schema`, forced tools, the JSON-only fallback, SSE and the thinking-parameter refusal. The LM Studio steps in the README (the Developer tab) are from the app's UI, not checked on a machine.
 - **Output quality.** Every reply in the tests and the browser checks is scripted. No real model wrote a slide, a chart, a theme or a note, so the usefulness of the prompts is unverified.
 - **Pictures for alt text** with a real vision model. The bytes path is tested with a fake provider only.
 - **Rate limit under concurrency** across processes, and the Stop button's server-side abort (the signal is wired and read, but not tested).

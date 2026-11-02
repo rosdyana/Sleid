@@ -2,12 +2,14 @@
 // The data always comes from the input (the selection or pasted data), never from the model.
 // The model chooses the chart type and title. Without input data it may propose the data.
 import { z } from 'zod'
-import { CHART_TYPES, ChartDataSchema, type ChartData, type Element, type ChartElement } from '@sleid/model'
+import { CHART_TYPES, ChartDataSchema, type ChartData, type ChartElement } from '@sleid/model'
 import { describeDeck } from '../context.ts'
 import { LlmError } from '../errors.ts'
 import { structured } from '../structured.ts'
 import { allowlist, checkOps } from '../ops-check.ts'
 import { systemPrompt, untrustedBlock, locateElement, slideOf, type AbilityEnv, type AbilityOutcome } from './common.ts'
+import { placeNewElement } from './place-element.ts'
+import { CHART_ASPECT } from '../placement.ts'
 
 const Cell = z.union([z.string().max(60), z.number(), z.null()])
 
@@ -79,36 +81,23 @@ export async function generateChart(env: AbilityEnv, rawInput: GenerateChartInpu
   const data = numericCells(sourceData ?? { columns: result.value.columns, rows: result.value.rows })
   const title = result.value.title
   const options = { title, legend: result.value.legend }
-  const id = crypto.randomUUID()
-  const raw: unknown[] = existing
-    ? [{ op: 'updateElement', slideId, elementId: existing.id, patch: { chartType, data, options } }]
-    : [
-        {
-          op: 'addElement',
-          slideId,
-          element: {
-            id,
-            type: 'chart',
-            chartType,
-            data,
-            options,
-            x: 160,
-            y: 260,
-            w: 1600,
-            h: 720,
-            rotation: 0,
-            locked: false,
-            opacity: 1,
-            alt: title,
-          } satisfies Partial<Element>,
-        },
-      ]
-  const ops = checkOps(env.deck, raw, allowlist('addElement', 'updateElement'), 'generateChart')
+  let raw: unknown[]
+  let placementWarnings: string[] = []
+  if (existing) {
+    raw = [{ op: 'updateElement', slideId, elementId: existing.id, patch: { chartType, data, options } }]
+  } else {
+    const placed = placeNewElement(env.deck, slideId, { type: 'chart', chartType, data, options, rotation: 0, locked: false, opacity: 1, alt: title }, CHART_ASPECT, title)
+    raw = placed.raw
+    if (placed.onNewSlide) {
+      placementWarnings = [`Slide ${placed.targetNumber} had no free space for the chart, so it is on a new slide (slide ${placed.slideNumber}).`]
+    }
+  }
+  const ops = checkOps(env.deck, raw, allowlist('addSlide', 'addElement', 'updateElement', 'deleteElement'), 'generateChart')
   return {
     ability: 'generateChart',
     summary: existing ? `Change chart to ${chartType}: "${title.slice(0, 60)}"` : `Add ${chartType} chart "${title.slice(0, 60)}"`,
     ops,
-    warnings: sourceData ? [] : ['The chart data was proposed by the assistant. Check the numbers.'],
+    warnings: [...(sourceData ? [] : ['The chart data was proposed by the assistant. Check the numbers.']), ...placementWarnings],
     usage: result.usage,
     model: result.model,
   }

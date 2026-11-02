@@ -3,7 +3,7 @@ import { LlmError, publicMessage } from './errors.ts'
 import { createFoundryClaudeProvider, type FoundryClaudeConfig } from './adapters/foundry-claude.ts'
 import { createAzureOpenAIProvider } from './adapters/azure-openai.ts'
 import { createOpenAICompatibleProvider } from './adapters/openai-compatible.ts'
-import type { StructuredMode } from './adapters/openai-chat.ts'
+import type { ReasoningOptions, StructuredMode } from './adapters/openai-chat.ts'
 import type { LlmProvider, ProviderKind } from './types.ts'
 import type { RetryOptions } from './retry.ts'
 
@@ -27,6 +27,10 @@ export type ProviderSpec =
       structured?: StructuredMode | 'auto'
       supportsImages?: boolean
       timeoutMs?: number
+      /** Reasoning models: turn their thinking off (chat_template_kwargs.enable_thinking = false). Off by default. */
+      disableThinking?: boolean
+      /** Reasoning models: send reasoning_effort. Unset by default. */
+      reasoningEffort?: 'low' | 'medium' | 'high'
     }
 
 export interface FactoryOptions {
@@ -58,7 +62,20 @@ export function createProvider(spec: ProviderSpec, options: FactoryOptions = {})
     }
     case 'openai-compatible': {
       if (!spec.baseUrl || !spec.model) throw new LlmError('not-configured', 'A local model server needs a base URL and a model name.')
-      return createOpenAICompatibleProvider({ ...spec, ...common })
+      const reasoning: ReasoningOptions = {
+        ...(spec.disableThinking ? { disableThinking: true } : {}),
+        ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
+      }
+      return createOpenAICompatibleProvider({
+        baseUrl: spec.baseUrl,
+        model: spec.model,
+        ...(spec.apiKey ? { apiKey: spec.apiKey } : {}),
+        ...(spec.structured ? { structured: spec.structured } : {}),
+        ...(spec.supportsImages !== undefined ? { supportsImages: spec.supportsImages } : {}),
+        ...(spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : {}),
+        ...(Object.keys(reasoning).length > 0 ? { reasoning } : {}),
+        ...common,
+      })
     }
   }
 }

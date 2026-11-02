@@ -49,6 +49,9 @@ interface FormState {
   apiVersion: string
   structured: 'auto' | 'json_schema' | 'tools' | 'prompt'
   supportsImages: boolean
+  compactPrompts: boolean
+  disableThinking: boolean
+  reasoningEffort: '' | 'low' | 'medium' | 'high'
   apiKey: string
   makeDefault: boolean
   hasSecret: boolean
@@ -63,6 +66,9 @@ const EMPTY: FormState = {
   apiVersion: '',
   structured: 'auto',
   supportsImages: false,
+  compactPrompts: false,
+  disableThinking: false,
+  reasoningEffort: '',
   apiKey: '',
   makeDefault: false,
   hasSecret: false,
@@ -127,6 +133,9 @@ function AiSettings() {
       apiVersion: p.apiVersion ?? '',
       structured: (p.structured as FormState['structured'] | null) ?? 'auto',
       supportsImages: p.supportsImages,
+      compactPrompts: p.compactPrompts,
+      disableThinking: p.disableThinking,
+      reasoningEffort: p.reasoningEffort ?? '',
       apiKey: '',
       makeDefault: p.isDefault,
       hasSecret: p.hasSecret,
@@ -151,6 +160,9 @@ function AiSettings() {
           ...(form.kind === 'azure-openai' && form.apiVersion ? { apiVersion: form.apiVersion } : {}),
           structured: form.structured,
           supportsImages: form.supportsImages,
+          compactPrompts: form.compactPrompts,
+          ...(form.kind === 'openai-compatible' ? { disableThinking: form.disableThinking } : {}),
+          ...(form.kind === 'openai-compatible' && form.reasoningEffort ? { reasoningEffort: form.reasoningEffort } : {}),
           ...(form.apiKey ? { apiKey: form.apiKey } : {}),
           makeDefault: form.makeDefault,
         },
@@ -283,7 +295,11 @@ function AiSettings() {
                 className={inputClass}
                 value={form.kind}
                 disabled={!!form.id}
-                onChange={(e) => setForm({ ...form, kind: e.target.value as Kind, endpoint: '', defaultModel: '', apiVersion: '' })}
+                onChange={(e) => {
+                  const kind = e.target.value as Kind
+                  // Compact prompts follow the kind's default, until the user sets it.
+                  setForm({ ...form, kind, endpoint: '', defaultModel: '', apiVersion: '', compactPrompts: kind === 'openai-compatible' })
+                }}
               >
                 {(Object.keys(KIND_LABEL) as Kind[]).map((k) => (
                   <option key={k} value={k}>
@@ -324,6 +340,26 @@ function AiSettings() {
               <input type="checkbox" checked={form.supportsImages} onChange={(e) => setForm({ ...form, supportsImages: e.target.checked })} />
               <span>This model accepts pictures (used for alt text)</span>
             </label>
+            <label className="flex items-center gap-2">
+              <input id="ai-compact" type="checkbox" checked={form.compactPrompts} onChange={(e) => setForm({ ...form, compactPrompts: e.target.checked })} />
+              <span>Compact prompts: smaller schemas, for small models (on by default for local servers)</span>
+            </label>
+            {form.kind === 'openai-compatible' && (
+              <>
+                <label className="flex items-center gap-2">
+                  <input id="ai-thinking" type="checkbox" checked={form.disableThinking} onChange={(e) => setForm({ ...form, disableThinking: e.target.checked })} />
+                  <span>Turn off thinking (reasoning models: sends enable_thinking = false; the server must accept it, otherwise it is ignored)</span>
+                </label>
+                <Field id="ai-effort" label="Reasoning effort (optional)">
+                  <select id="ai-effort" className={inputClass} value={form.reasoningEffort} onChange={(e) => setForm({ ...form, reasoningEffort: e.target.value as FormState['reasoningEffort'] })}>
+                    <option value="">Server default</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                </Field>
+              </>
+            )}
             <Field id="ai-key" label={form.hasSecret ? 'API key (leave empty to keep the stored key)' : 'API key (optional for local servers)'}>
               <input
                 id="ai-key"

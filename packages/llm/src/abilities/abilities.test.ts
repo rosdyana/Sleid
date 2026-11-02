@@ -5,6 +5,8 @@ import { applyOps, ChartDataSchema, deckToYDoc, OpSchema, yDocToDeck, type Deck,
 import { scriptedProvider } from '../testing.ts'
 import { LlmError } from '../errors.ts'
 import { checkOps, allowlist, assertAllowed } from '../ops-check.ts'
+import { richFromParagraphs } from '../context.ts'
+import { overlapsBox } from '../placement.ts'
 import { describeDeck, escapeDelimiters, plainText, SAFETY_RULES, UNTRUSTED_OPEN, UNTRUSTED_CLOSE } from '../context.ts'
 import { contrastRatio, contrastViolations } from '../contrast.ts'
 import { isLaidOut } from '../layout-guard.ts'
@@ -145,9 +147,13 @@ describe('generateChart', () => {
     const deck = fixtureDeck()
     const env = envFor(deck, ['{"chartType":"line","title":"Trend","legend":false,"columns":["x","y"],"rows":[["ignored",1]]}'])
     const out = await generateChart(env, { prompt: 'trend', slideId: SLIDE2, data })
-    const added = applied(deck, out.ops).slides[1]!.elements.find((e) => e.type === 'chart' && e.options.title === 'Trend')
+    // The fixture slide is full, so the chart goes on a new slide after it.
+    const after = applied(deck, out.ops)
+    const added = after.slides.flatMap((s) => s.elements).find((e) => e.type === 'chart' && e.options.title === 'Trend')
     expect(added).toMatchObject({ type: 'chart', chartType: 'line', data: { columns: ['Quarter', 'Sales'], rows: [['Q1', 10], ['Q2', 14]] } })
     expect(ChartDataSchema.safeParse(added && 'data' in added ? added.data : undefined).success).toBe(true)
+    expect(after.slides[2]!.elements.some((e) => e.type === 'chart')).toBe(true)
+    expect(out.warnings.join(' ')).toMatch(/Slide 2 had no free space for the chart, so it is on a new slide \(slide 3\)/)
   })
 
   it('edits an existing chart with updateElement and keeps the chart colours', async () => {
@@ -170,7 +176,8 @@ describe('generateDiagram', () => {
   it('accepts valid Mermaid on the first try', async () => {
     const env = envFor(fixtureDeck(), ['{"title":"Flow","source":"flowchart LR\\n  A --> B"}'])
     const out = await generateDiagram(env, { prompt: 'flow', slideId: SLIDE2 })
-    expect(out.ops[0]).toMatchObject({ op: 'addElement', element: { type: 'diagram' } })
+    const after = applied(fixtureDeck(), out.ops)
+    expect(after.slides.flatMap((s) => s.elements).some((e) => e.type === 'diagram' && e.source.startsWith('flowchart'))).toBe(true)
     expect(env.provider.requests).toHaveLength(1)
   })
 
@@ -186,6 +193,84 @@ describe('generateDiagram', () => {
     const env = envFor(fixtureDeck(), ['{"title":"x","source":"nope"}', '{"title":"x","source":"still nope"}'])
     await expect(generateDiagram(env, { prompt: 'x', slideId: SLIDE2 })).rejects.toMatchObject({ kind: 'invalid-output' })
     expect(env.provider.requests).toHaveLength(2)
+  })
+})
+
+/** A deck with the fixture slides plus: an empty slide, a section slide with title and subtitle, and a slide with only empty placeholders. */
+function placementDeck(): Deck {
+  const deck = fixtureDeck()
+  const doc = deckToYDoc(deck)
+  applyOps(doc, [
+    { op: 'addSlide', layout: 'blank', slide: { id: 'empty' } },
+    { op: 'addSlide', layout: 'section', slide: { id: 'section' } },
+    { op: 'updateElement', slideId: 'section', elementId: 'section-0', patch: { content: richFromParagraphs(['How it works']) } },
+    { op: 'updateElement', slideId: 'section', elementId: 'section-1', patch: { content: richFromParagraphs(['Sun to shop']) } },
+    { op: 'addSlide', layout: 'title-content', slide: { id: 'placeholders' } },
+  ])
+  return yDocToDeck(doc)
+}
+
+describe('placement of new charts and diagrams', () => {
+  it('an empty slide gets the chart in free space, with no new slide and no deletes', async () => {
+    const deck = placementDeck()
+    const env = envFor(deck, ['{"chartType":"bar","title":"Empty slide chart","legend":false,"columns":["a","b"],"rows":[["a",1]]}'])
+    const out = await generateChart(env, { prompt: 'x', slideId: 'empty' })
+    expect(out.ops.map((o) => o.op)).toEqual(['addElement'])
+    expect(out.warnings).toEqual(['The chart data was proposed by the assistant. Check the numbers.'])
+    const after = applied(deck, out.ops).slides.find((s) => s.id === 'empty')!
+    expect(after.elements).toHaveLength(1)
+    expect(isLaidOut(after.elements)).toBe(true)
+  })
+
+  it('a section slide with a title and subtitle: the diagram goes on a new slide after it, and the title is untouched', async () => {
+    const deck = placementDeck()
+    const env = envFor(deck, ['{"title":"Flow","source":"flowchart LR\\n  A --> B"}'])
+    const out = await generateDiagram(env, { prompt: 'flow', slideId: 'section' })
+    expect(out.ops.map((o) => o.op)).toEqual(['addSlide'])
+    expect(out.warnings.join(' ')).toMatch(/Slide 4 had no free space for the diagram, so it is on a new slide \(slide 5\)/)
+    const after = applied(deck, out.ops)
+    const index = after.slides.findIndex((s) => s.id === 'section')
+    expect(after.slides[index + 1]!.elements.find((e) => e.type === 'text')).toBeTruthy()
+    const section = after.slides[index]!
+    expect(JSON.stringify(section.elements)).toBe(JSON.stringify(deck.slides[index]!.elements))
+    const newSlide = after.slides[index + 1]!
+    const diagram = newSlide.elements.find((e) => e.type === 'diagram')!
+    const title = newSlide.elements.find((e) => e.type === 'text')!
+    expect(overlapsBox(diagram, title)).toBe(false)
+    // The title placeholder is the model's own layout (it starts at y 72). The diagram itself stays in the safe area.
+    expect(diagram.x).toBeGreaterThanOrEqual(96)
+    expect(diagram.y).toBeGreaterThanOrEqual(96)
+    expect(diagram.x + diagram.w).toBeLessThanOrEqual(1824)
+    expect(diagram.y + diagram.h).toBeLessThanOrEqual(984)
+  })
+
+  it('a slide with only empty placeholders: the chart covers them, and those placeholders are deleted in the same batch', async () => {
+    const deck = placementDeck()
+    const before = deck.slides.find((s) => s.id === 'placeholders')!
+    expect(before.elements.every((e) => e.type === 'text')).toBe(true)
+    const env = envFor(deck, ['{"chartType":"line","title":"Over placeholders","legend":false,"columns":["a","b"],"rows":[["a",1]]}'])
+    const out = await generateChart(env, { prompt: 'x', slideId: 'placeholders' })
+    expect(out.ops.map((o) => o.op)).toEqual(['deleteElement', 'deleteElement', 'addElement'])
+    const after = applied(deck, out.ops).slides.find((s) => s.id === 'placeholders')!
+    expect(after.elements.map((e) => e.type)).toEqual(['chart'])
+    expect(isLaidOut(after.elements)).toBe(true)
+  })
+
+  it('never deletes a non-empty element, even when the target slide is full', async () => {
+    const deck = placementDeck()
+    const env = envFor(deck, ['{"title":"Flow","source":"flowchart LR\\n  A --> B"}'])
+    const out = await generateDiagram(env, { prompt: 'flow', slideId: SLIDE2 })
+    const deletes = out.ops.filter((o) => o.op === 'deleteElement')
+    expect(deletes).toEqual([])
+    const kept = applied(deck, out.ops).slides[1]!.elements.map((e) => e.id)
+    expect(kept).toEqual(deck.slides[1]!.elements.map((e) => e.id))
+  })
+
+  it('deleteElement is allowed only for the chart and diagram abilities, and only for placeholders by code', () => {
+    const withDelete = Object.entries(ABILITY_OPS)
+      .filter(([, ops]) => ops.includes('deleteElement'))
+      .map(([name]) => name)
+    expect(withDelete).toEqual(['generateChart', 'generateDiagram', 'chat'])
   })
 })
 
@@ -248,6 +333,28 @@ describe('suggestEffects', () => {
     expect(animated.length).toBeLessThanOrEqual(MAX_ANIMATIONS)
     expect(animated.map((e) => e.animation!.order).sort()).toEqual([0, 1, 2, 3])
     expect(out.warnings.join(' ')).toMatch(/not on slide/)
+  })
+
+  it('sends at most six slides per request, as a compact listing with no text, and merges the results', async () => {
+    const deck = applied(fixtureDeck(), Array.from({ length: 6 }, (_, i) => ({ op: 'addSlide', layout: 'blank', slide: { id: `blank-${i}` } })) as Op[])
+    const ids = deck.slides.map((s) => s.id)
+    expect(ids).toHaveLength(8)
+    const env = envFor(deck, [
+      JSON.stringify({ slides: [{ slideId: SLIDE2, transition: 'fade', autoAnimate: false, animations: [{ elementId: 'body-1', effect: 'fade-up', order: 0 }] }] }),
+      JSON.stringify({ slides: [{ slideId: 'blank-5', transition: 'none', autoAnimate: false, animations: [] }] }),
+    ])
+    const out = await suggestEffects(env, { slideIds: ids })
+    expect(env.provider.requests).toHaveLength(2)
+    const first = env.provider.requests[0]!.messages[0]!.content
+    const second = env.provider.requests[1]!.messages[0]!.content
+    expect(first.split('\n').filter((l) => l.startsWith('slide ')).length).toBe(6)
+    expect(second.split('\n').filter((l) => l.startsWith('slide ')).length).toBe(2)
+    expect(first).toContain('body-1 (text)')
+    expect(first).not.toContain('Revenue grew')
+    expect(first).not.toContain('Quarterly review')
+    expect(env.provider.requests[0]!.system).toContain('Only use element ids from the listing')
+    expect(applied(deck, out.ops).slides[1]!.transition).toBe('fade')
+    expect(out.usage.inputTokens).toBeGreaterThan(0)
   })
 
   it('ignores suggestions for slides that were not requested', async () => {

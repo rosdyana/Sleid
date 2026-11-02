@@ -8,6 +8,7 @@ import { createOpenAICompatibleProvider, chatUrl } from './openai-compatible.ts'
 import { structured } from '../structured.ts'
 import { LlmError } from '../errors.ts'
 import { scriptedServer, type FakeServer } from './fake-servers.ts'
+import { BUDGET_MESSAGE, MAX_TOKENS_CAP, retryBudget } from './openai-chat.ts'
 
 const KEY = 'az-key-0123456789abcdef'
 const chatReply = (content: string | null, extra: Record<string, unknown> = {}) => ({
@@ -188,5 +189,211 @@ describe('openai-compatible adapter (local servers)', () => {
     const noVision = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'm', retry: noWait })
     await noVision.generate({ system: 's', messages: [{ role: 'user', content: 'describe', images: [img] }], maxTokens: 5, temperature: 0 })
     expect(server.requests[1]!.body.messages[1].content).toBe('describe')
+  })
+})
+
+// ---- Reasoning models, the length retry, thinking controls, streaming structured output (M4 live fixes) ----
+
+const sseOf = (frames: unknown[]) => frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('') + 'data: [DONE]\n\n'
+/** A reply that spent its whole budget thinking: no content, finish_reason length. */
+const thinkingCut = () => ({
+  body: {
+    model: 'qwen-test',
+    choices: [{ index: 0, message: { role: 'assistant', content: '', reasoning_content: 'Let me think about this at length...' }, finish_reason: 'length' }],
+    usage: { prompt_tokens: 40, completion_tokens: 800 },
+  },
+})
+
+describe('reasoning models', () => {
+  it('answers from content only, ignoring reasoning_content, and counts the reported usage', async () => {
+    server = await scriptedServer([chatReply('Rooftop solar pays off.', { reasoning_content: 'Reasoning text that is not the answer.' })])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const reply = await provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 800, temperature: 0 })
+    expect(reply.text).toBe('Rooftop solar pays off.')
+    expect(reply.usage).toEqual({ inputTokens: 50, outputTokens: 12 })
+    expect(reply.usage.estimated).toBeUndefined()
+  })
+
+  it('retries once with three times the budget when the content is empty and the reply stopped at the length limit', async () => {
+    server = await scriptedServer([thinkingCut(), chatReply('The answer.')])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const reply = await provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 800, temperature: 0 })
+    expect(reply.text).toBe('The answer.')
+    expect(server.requests.map((r) => r.body.max_tokens)).toEqual([800, 2400])
+  })
+
+  it('gives a clear error when the retry is empty too, and does not retry a third time', async () => {
+    server = await scriptedServer([thinkingCut(), thinkingCut(), thinkingCut()])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const err = (await provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 800, temperature: 0 }).catch((e: unknown) => e)) as LlmError
+    expect(err).toBeInstanceOf(LlmError)
+    expect(err.message).toBe(BUDGET_MESSAGE)
+    expect(err.message).toMatch(/Raise max tokens or turn off thinking/)
+    expect(server.requests).toHaveLength(2)
+  })
+
+  it('applies the same retry on the structured (json_schema) path, streamed', async () => {
+    const frames = (content: string[], finish: string) => [
+      ...content.map((c) => ({ choices: [{ index: 0, delta: { content: c } }] })),
+      { choices: [{ index: 0, delta: {}, finish_reason: finish }] },
+    ]
+    server = await scriptedServer([
+      { raw: sseOf([{ choices: [{ index: 0, delta: { reasoning_content: 'hmm' } }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'length' }] }]) },
+      { raw: sseOf(frames(['{"n":', ' 3}'], 'stop')) },
+    ])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const result = await structured(provider, z.object({ n: z.number() }), { system: 's', user: 'u', maxTokens: 600, compact: true })
+    expect(result.value).toEqual({ n: 3 })
+    expect(server.requests.map((r) => r.body.max_tokens)).toEqual([600, 1800])
+    expect(server.requests.every((r) => r.body.stream === true)).toBe(true)
+  })
+
+  it('retries the streamed plain reply (the chat path) once, before anything is shown', async () => {
+    server = await scriptedServer([
+      { raw: sseOf([{ choices: [{ index: 0, delta: { reasoning_content: 'thinking' } }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'length' }] }]) },
+      { raw: sseOf([{ choices: [{ index: 0, delta: { content: 'Hi ' } }] }, { choices: [{ index: 0, delta: { content: 'there' } }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]) },
+    ])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const events = []
+    for await (const ev of provider.stream({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 100, temperature: 0 })) events.push(ev)
+    expect(events.filter((e) => e.type === 'text').map((e) => (e as { delta: string }).delta).join('')).toBe('Hi there')
+    expect(events.at(-1)).toMatchObject({ type: 'done', stopReason: 'end' })
+    expect(server.requests.map((r) => r.body.max_tokens)).toEqual([100, 300])
+  })
+
+  it('sends the thinking controls when set, and turns them off for the instance when the server refuses the parameter', async () => {
+    server = await scriptedServer([
+      { status: 400, body: { error: { message: 'Unrecognized request argument supplied: reasoning_effort' } } },
+      chatReply('first'),
+      chatReply('second'),
+    ])
+    const provider = createOpenAICompatibleProvider({
+      baseUrl: `${server.url}/v1`,
+      model: 'qwen',
+      retry: noWait,
+      reasoning: { disableThinking: true, reasoningEffort: 'low' },
+    })
+    const call = () => provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 100, temperature: 0 })
+    expect((await call()).text).toBe('first')
+    expect(server.requests[0]!.body.reasoning_effort).toBe('low')
+    expect(server.requests[0]!.body.chat_template_kwargs).toEqual({ enable_thinking: false })
+    expect(server.requests[1]!.body.reasoning_effort).toBeUndefined()
+    expect(server.requests[1]!.body.chat_template_kwargs).toBeUndefined()
+    expect((await call()).text).toBe('second')
+    expect(server.requests[2]!.body.reasoning_effort).toBeUndefined()
+  })
+
+  it('sends no thinking controls by default', async () => {
+    server = await scriptedServer([chatReply('plain')])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    await provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 100, temperature: 0 })
+    expect(server.requests[0]!.body.chat_template_kwargs).toBeUndefined()
+    expect(server.requests[0]!.body.reasoning_effort).toBeUndefined()
+  })
+})
+
+describe('streamed structured output (openai-compatible)', () => {
+  it('streams structured calls by default, accumulates the content and parses it', async () => {
+    server = await scriptedServer([
+      {
+        raw: sseOf([
+          { model: 'qwen-test', choices: [{ index: 0, delta: { content: '{"title":"Ti' } }] },
+          { choices: [{ index: 0, delta: { content: 'tle"}' } }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+        ]),
+      },
+    ])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const result = await structured(provider, z.object({ title: z.string() }), { system: 's', user: 'u', maxTokens: 200, name: 't' })
+    expect(result.value).toEqual({ title: 'Title' })
+    expect(result.model).toBe('qwen-test')
+    expect(server.requests[0]!.body.stream).toBe(true)
+    expect(server.requests[0]!.body.response_format.type).toBe('json_schema')
+  })
+
+  it('can be turned off, so the structured call is a plain request', async () => {
+    server = await scriptedServer([chatReply('{"title":"Plain"}')])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait, streamStructured: false })
+    const result = await structured(provider, z.object({ title: z.string() }), { system: 's', user: 'u', maxTokens: 200 })
+    expect(result.value).toEqual({ title: 'Plain' })
+    expect(server.requests[0]!.body.stream).toBeUndefined()
+  })
+
+  it('falls back to a plain request when the server refuses streaming, and stays plain afterwards', async () => {
+    server = await scriptedServer([
+      { status: 400, body: { error: { message: 'streaming is not supported with response_format' } } },
+      chatReply('{"n":5}'),
+      chatReply('{"n":6}'),
+    ])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const schema = z.object({ n: z.number() })
+    expect((await structured(provider, schema, { system: 's', user: 'u', maxTokens: 50 })).value).toEqual({ n: 5 })
+    expect(server.requests[0]!.body.stream).toBe(true)
+    expect(server.requests[1]!.body.stream).toBeUndefined()
+    expect(server.requests[1]!.body.response_format.type).toBe('json_schema')
+    expect((await structured(provider, schema, { system: 's', user: 'u', maxTokens: 50 })).value).toEqual({ n: 6 })
+    expect(server.requests[2]!.body.stream).toBeUndefined()
+  })
+
+  it('reads a whole JSON reply when a server ignores stream', async () => {
+    server = await scriptedServer([chatReply('{"n":7}')])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    expect((await structured(provider, z.object({ n: z.number() }), { system: 's', user: 'u', maxTokens: 50 })).value).toEqual({ n: 7 })
+  })
+
+  it('Azure keeps plain structured calls (streaming is off for it by default)', async () => {
+    server = await scriptedServer([chatReply('{"n":8}')])
+    const provider = createAzureOpenAIProvider({ endpoint: server.url, apiKey: KEY, deployment: 'd', retry: noWait })
+    await structured(provider, z.object({ n: z.number() }), { system: 's', user: 'u', maxTokens: 50 })
+    expect(server.requests[0]!.body.stream).toBeUndefined()
+  })
+})
+
+describe('gateway errors', () => {
+  it('retries a 502 once, and no more', async () => {
+    server = await scriptedServer([{ status: 502, body: { title: 'Error 502: Bad gateway' } }])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    await expect(provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 5, temperature: 0 })).rejects.toMatchObject({ kind: 'server', status: 502 })
+    expect(server.requests).toHaveLength(2)
+  })
+
+  it('still retries other 5xx errors twice', async () => {
+    server = await scriptedServer([{ status: 503, body: { error: 'busy' } }])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    await expect(provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], maxTokens: 5, temperature: 0 })).rejects.toMatchObject({ kind: 'server' })
+    expect(server.requests).toHaveLength(3)
+  })
+
+  it('the budget for the retry is three times the first, capped, and never smaller', () => {
+    expect(retryBudget(800)).toBe(2400)
+    expect(retryBudget(4000)).toBe(MAX_TOKENS_CAP)
+    expect(retryBudget(9000)).toBe(9000)
+  })
+})
+
+describe('error frames inside a stream', () => {
+  it('a length-limited error frame (after keep-alive comments) is retried with a bigger budget, as finish_reason length is', async () => {
+    const keepAlive = ': keep-alive\n\n'
+    const lengthFrame = `data: ${JSON.stringify({ error: { type: 'structured_output_failed', code: 'structured_output_failed', message: 'structured output was incomplete (finish_reason=length); increase the output budget' } })}\n\n`
+    server = await scriptedServer([
+      { raw: keepAlive + keepAlive + lengthFrame + 'data: [DONE]\n\n' },
+      { raw: keepAlive + sseOf([{ choices: [{ index: 0, delta: { content: '{"n":9}' } }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]) },
+    ])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', retry: noWait })
+    const result = await structured(provider, z.object({ n: z.number() }), { system: 's', user: 'u', maxTokens: 500, compact: true })
+    expect(result.value).toEqual({ n: 9 })
+    expect(server.requests.map((r) => r.body.max_tokens)).toEqual([500, 1500])
+  })
+
+  it('any other error frame is a server failure, with the key removed and the provider named', async () => {
+    const KEY_IN_ERROR = 'sk-stream-secret-0123'
+    server = await scriptedServer([{ raw: `data: ${JSON.stringify({ error: { message: `upstream refused ${KEY_IN_ERROR}` } })}\n\ndata: [DONE]\n\n` }])
+    const provider = createOpenAICompatibleProvider({ baseUrl: `${server.url}/v1`, model: 'qwen', apiKey: KEY_IN_ERROR, retry: noWait })
+    const err = (await provider.generate({ system: 's', messages: [{ role: 'user', content: 'x' }], jsonSchema: { name: 'x', schema: { type: 'object' } }, maxTokens: 50, temperature: 0 }).catch((e: unknown) => e)) as LlmError
+    expect(err).toBeInstanceOf(LlmError)
+    expect(err.kind).toBe('server')
+    expect(err.message).toContain('The local model server reported an error')
+    expect(err.message).not.toContain(KEY_IN_ERROR)
+    expect(server.requests).toHaveLength(1)
   })
 })

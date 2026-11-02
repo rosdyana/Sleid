@@ -8,6 +8,8 @@ import { cleanMermaid, MERMAID_KEYWORDS, MERMAID_MAX_CHARS, validateMermaid } fr
 import { structured } from '../structured.ts'
 import { allowlist, checkOps } from '../ops-check.ts'
 import { systemPrompt, untrustedBlock, locateElement, slideOf, type AbilityEnv, type AbilityOutcome } from './common.ts'
+import { placeNewElement } from './place-element.ts'
+import { DIAGRAM_ASPECT } from '../placement.ts'
 
 export const GenerateDiagramInput = z.object({
   prompt: z.string().min(1).max(1000),
@@ -59,33 +61,23 @@ export async function generateDiagram(env: AbilityEnv, rawInput: GenerateDiagram
 
   const source = cleanMermaid(result.value.source)
   const title = result.value.title
-  const raw: unknown[] = input.elementId
-    ? [{ op: 'updateElement', slideId, elementId: input.elementId, patch: { source } }]
-    : [
-        {
-          op: 'addElement',
-          slideId,
-          element: {
-            id: crypto.randomUUID(),
-            type: 'diagram',
-            source,
-            x: 260,
-            y: 260,
-            w: 1400,
-            h: 700,
-            rotation: 0,
-            locked: false,
-            opacity: 1,
-            alt: title,
-          },
-        },
-      ]
-  const ops = checkOps(env.deck, raw, allowlist('addElement', 'updateElement'), 'generateDiagram')
+  let raw: unknown[]
+  let warnings: string[] = []
+  if (input.elementId) {
+    raw = [{ op: 'updateElement', slideId, elementId: input.elementId, patch: { source } }]
+  } else {
+    const placed = placeNewElement(env.deck, slideId, { type: 'diagram', source, rotation: 0, locked: false, opacity: 1, alt: title }, DIAGRAM_ASPECT, title)
+    raw = placed.raw
+    if (placed.onNewSlide) {
+      warnings = [`Slide ${placed.targetNumber} had no free space for the diagram, so it is on a new slide (slide ${placed.slideNumber}).`]
+    }
+  }
+  const ops = checkOps(env.deck, raw, allowlist('addSlide', 'addElement', 'updateElement', 'deleteElement'), 'generateDiagram')
   return {
     ability: 'generateDiagram',
     summary: `${input.elementId ? 'Update diagram' : 'Add diagram'}: ${title.slice(0, 60)}`,
     ops,
-    warnings: [],
+    warnings,
     usage,
     model: result.model,
   }

@@ -96,14 +96,14 @@ export async function recordUsage(
 }
 
 /**
- * The environment an ability runs in. Local model servers get the compact schemas. Failures of a user-owned
- * provider show only the status; the detail goes to the server log.
+ * The environment an ability runs in. Compact prompts follow the provider's setting (on by default for local servers).
+ * Failures of a user-owned provider show only the status; the detail goes to the server log.
  */
 export function abilityEnv(provider: ResolvedProvider, deck: Deck, signal?: AbortSignal): AbilityEnv {
   return {
     provider: provider.provider,
     deck,
-    compact: provider.info.kind === 'openai-compatible',
+    compact: provider.compact,
     hideDetails: provider.scope === 'user',
     onFailure: (err) => logProviderFailure(err, provider),
     ...(signal ? { signal } : {}),

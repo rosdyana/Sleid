@@ -4,8 +4,9 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { decryptSecret, LlmError, type LookupFn } from '@sleid/llm'
 import { getLlmProviderFor, grantMembership, recordLlmUsage, type Db } from '@sleid/db'
+import { createDeck } from '@sleid/model'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
-import { checkRateLimit, requireEditorOn } from './ai.server.ts'
+import { abilityEnv, checkRateLimit, requireEditorOn } from './ai.server.ts'
 import { listProviderViews, makeDefaultProvider, removeProvider, resolveProvider, saveProvider, testProvider, type AiUser, type SettingsDeps } from './llm-settings.server.ts'
 import { startLlmTestServer, type LlmTestServer } from './llm-test-server.ts'
 
@@ -292,5 +293,60 @@ describe('request rules (database)', () => {
     if (!db) return
     await expect(resolveProvider(deps({ SLEID_LLM_KIND: undefined }), alice, null)).rejects.toMatchObject({ kind: 'not-configured' })
     await expect(resolveProvider(deps(), alice, 'env')).rejects.toBeInstanceOf(LlmError)
+  })
+})
+
+describe('provider options: compact prompts and thinking controls', () => {
+  it('compact prompts default to on for a local server and off for the hosted kinds, and a saved choice wins', async () => {
+    if (!db) return
+    const local = await saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Local compact', endpoint: 'http://127.0.0.1:9/v1', defaultModel: 'm' })
+    const azure = await saveProvider(deps(), alice, { kind: 'azure-openai', name: 'Azure compact', endpoint: 'https://example.openai.azure.com', defaultModel: 'd', apiKey: SECRET })
+    const foundry = await saveProvider(deps(), alice, { kind: 'foundry-claude', name: 'Foundry compact', endpoint: 'my-res', defaultModel: 'claude', apiKey: SECRET })
+    expect(local.compactPrompts).toBe(true)
+    expect(azure.compactPrompts).toBe(false)
+    expect(foundry.compactPrompts).toBe(false)
+    const off = await saveProvider(deps(), alice, { kind: 'openai-compatible', name: 'Local full', endpoint: 'http://127.0.0.1:9/v1', defaultModel: 'm', compactPrompts: false })
+    expect(off.compactPrompts).toBe(false)
+    expect((await resolveProvider(deps(), alice, off.id)).compact).toBe(false)
+    expect((await resolveProvider(deps(), alice, local.id)).compact).toBe(true)
+    expect((await resolveProvider(deps(), alice, azure.id)).compact).toBe(false)
+    for (const id of [local.id, azure.id, foundry.id, off.id]) await removeProvider(deps(), alice, id)
+  })
+
+  it('sends the thinking controls for a local provider that has them set, and drops them for the hosted kinds', async () => {
+    if (!db) return
+    server = await startLlmTestServer([{ text: 'OK' }])
+    const thinking = await saveProvider(deps(), alice, {
+      kind: 'openai-compatible',
+      name: 'Thinking off',
+      endpoint: server.url,
+      defaultModel: 'qwen',
+      disableThinking: true,
+      reasoningEffort: 'low',
+    })
+    expect(thinking).toMatchObject({ disableThinking: true, reasoningEffort: 'low' })
+    const resolved = await resolveProvider(deps(), alice, thinking.id)
+    await resolved.provider.generate({ system: 's', messages: [{ role: 'user', content: 'hi' }], maxTokens: 20, temperature: 0 })
+    expect(server.seen.at(-1)!.body.chat_template_kwargs).toEqual({ enable_thinking: false })
+    expect(server.seen.at(-1)!.body.reasoning_effort).toBe('low')
+
+    const hosted = await saveProvider(deps(), alice, {
+      kind: 'azure-openai',
+      name: 'No thinking controls',
+      endpoint: 'https://example.openai.azure.com',
+      defaultModel: 'd',
+      apiKey: SECRET,
+      disableThinking: true,
+      reasoningEffort: 'high',
+    })
+    expect(hosted).toMatchObject({ disableThinking: false, reasoningEffort: null })
+    for (const id of [thinking.id, hosted.id]) await removeProvider(deps(), alice, id)
+  })
+
+  it('the assistant run takes compact prompts from the provider, not from the kind', () => {
+    const deck = createDeck('Compact check')
+    const provider = { provider: {} as never, info: { id: 'x', name: 'x', kind: 'openai-compatible' as const, model: 'm' }, secrets: [], scope: 'user' as const }
+    expect(abilityEnv({ ...provider, compact: false }, deck).compact).toBe(false)
+    expect(abilityEnv({ ...provider, compact: true }, deck).compact).toBe(true)
   })
 })

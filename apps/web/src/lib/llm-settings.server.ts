@@ -50,6 +50,12 @@ export interface ProviderView {
   apiVersion: string | null
   structured: string | null
   supportsImages: boolean
+  /** Short prompts and schemas (the effective value: the stored one, or the kind's default). */
+  compactPrompts: boolean
+  /** Local servers: turn the model's thinking off. Only meaningful for openai-compatible. */
+  disableThinking: boolean
+  /** Local servers: reasoning_effort, or null for the server's default. */
+  reasoningEffort: ReasoningEffort | null
   defaultModel: string
   isDefault: boolean
   /** True when a key is stored (or set in the environment). The key itself is never returned. */
@@ -59,6 +65,16 @@ export interface ProviderView {
 }
 
 export const STRUCTURED_MODES = ['auto', 'json_schema', 'tools', 'prompt'] as const
+export const REASONING_EFFORTS = ['low', 'medium', 'high'] as const
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+
+/**
+ * Compact prompts (smaller schemas, no descriptions) are on by default for local servers, whose models are small,
+ * and off for Claude on Foundry and Azure OpenAI. A provider can change it.
+ */
+export function compactDefault(kind: LlmProviderKind): boolean {
+  return kind === 'openai-compatible'
+}
 
 export const ProviderInput = z.object({
   id: z.uuid().optional(),
@@ -70,6 +86,9 @@ export const ProviderInput = z.object({
   apiVersion: z.string().trim().max(40).optional(),
   structured: z.enum(STRUCTURED_MODES).optional(),
   supportsImages: z.boolean().optional(),
+  compactPrompts: z.boolean().optional(),
+  disableThinking: z.boolean().optional(),
+  reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
   /** Write-only. Empty or missing keeps the stored key when editing, and stores none when creating. */
   apiKey: z.string().max(500).optional(),
   makeDefault: z.boolean().optional(),
@@ -88,19 +107,40 @@ export interface SettingsDeps {
 export interface ResolvedProvider {
   provider: LlmProvider
   info: { id: string; name: string; kind: LlmProviderKind; model: string }
+  /** The provider's compact-prompts setting, passed to every ability run through it. */
+  compact: boolean
   /** Every secret this provider holds, for redaction. */
   secrets: string[]
   scope: ProviderScope
 }
 
-function configOf(row: LlmProviderRow): { endpoint: string; apiVersion?: string; structured?: string; supportsImages?: boolean } {
+interface StoredConfig {
+  endpoint: string
+  apiVersion?: string
+  structured?: string
+  supportsImages?: boolean
+  compactPrompts?: boolean
+  disableThinking?: boolean
+  reasoningEffort?: ReasoningEffort
+}
+
+function configOf(row: LlmProviderRow): StoredConfig {
   const c = row.config as Record<string, unknown>
+  const effort = REASONING_EFFORTS.find((e) => e === c.reasoningEffort)
   return {
     endpoint: typeof c.endpoint === 'string' ? c.endpoint : '',
     ...(typeof c.apiVersion === 'string' ? { apiVersion: c.apiVersion } : {}),
     ...(typeof c.structured === 'string' ? { structured: c.structured } : {}),
     ...(typeof c.supportsImages === 'boolean' ? { supportsImages: c.supportsImages } : {}),
+    ...(typeof c.compactPrompts === 'boolean' ? { compactPrompts: c.compactPrompts } : {}),
+    ...(c.disableThinking === true ? { disableThinking: true } : {}),
+    ...(effort ? { reasoningEffort: effort } : {}),
   }
+}
+
+/** The effective compact setting of a stored provider. */
+function compactOf(kind: LlmProviderKind, config: StoredConfig): boolean {
+  return config.compactPrompts ?? compactDefault(kind)
 }
 
 export function canManage(row: Pick<LlmProviderRow, 'scope' | 'ownerId'>, user: AiUser, env: NodeJS.ProcessEnv): boolean {
@@ -119,6 +159,9 @@ function viewOf(row: LlmProviderRow, user: AiUser, env: NodeJS.ProcessEnv): Prov
     apiVersion: config.apiVersion ?? null,
     structured: config.structured ?? null,
     supportsImages: config.supportsImages ?? false,
+    compactPrompts: compactOf(row.kind, config),
+    disableThinking: row.kind === 'openai-compatible' && !!config.disableThinking,
+    reasoningEffort: row.kind === 'openai-compatible' ? (config.reasoningEffort ?? null) : null,
     defaultModel: row.defaultModel,
     isDefault: row.isDefault,
     hasSecret: !!row.secretCiphertext,
@@ -137,6 +180,9 @@ function envView(env: EnvProvider, isDefault: boolean): ProviderView {
     apiVersion: null,
     structured: null,
     supportsImages: env.supportsImages,
+    compactPrompts: compactDefault(env.kind),
+    disableThinking: false,
+    reasoningEffort: null,
     defaultModel: env.model,
     isDefault,
     hasSecret: env.hasKey,
@@ -191,11 +237,16 @@ export async function saveProvider(deps: SettingsDeps, user: AiUser, rawInput: u
   checkEndpoint(input.kind, input.endpoint, input.defaultModel)
   await checkNetworkPolicy(deps, input.scope, input.kind, input.endpoint, input.defaultModel)
   const key = input.apiKey?.trim() || undefined
+  const local = input.kind === 'openai-compatible'
   const config = {
     endpoint: input.endpoint,
     ...(input.kind === 'azure-openai' && input.apiVersion ? { apiVersion: input.apiVersion } : {}),
     ...(input.structured ? { structured: input.structured } : {}),
     ...(input.supportsImages !== undefined ? { supportsImages: input.supportsImages } : {}),
+    compactPrompts: input.compactPrompts ?? compactDefault(input.kind),
+    // The thinking controls are for local reasoning models only. They are dropped for other kinds.
+    ...(local && input.disableThinking ? { disableThinking: true } : {}),
+    ...(local && input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
   }
 
   let row: LlmProviderRow
@@ -268,6 +319,8 @@ function specFrom(row: LlmProviderRow, apiKey: string | undefined): ProviderSpec
         ...(apiKey ? { apiKey } : {}),
         ...(structured ? { structured } : {}),
         supportsImages: config.supportsImages ?? false,
+        ...(config.disableThinking ? { disableThinking: true } : {}),
+        ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
       }
   }
 }
@@ -297,6 +350,7 @@ function envResolved(deps: SettingsDeps, fromEnv: EnvProvider): ResolvedProvider
   return {
     provider: createProvider(fromEnv.spec, providerOptions(deps, 'environment')),
     info: { id: ENV_PROVIDER_ID, name: fromEnv.name, kind: fromEnv.kind, model: fromEnv.model },
+    compact: compactDefault(fromEnv.kind),
     secrets: envSecrets(fromEnv),
     scope: 'environment',
   }
@@ -333,6 +387,7 @@ export async function resolveProvider(deps: SettingsDeps, user: AiUser, provider
   return {
     provider: createProvider(spec, providerOptions(deps, row.scope)),
     info: { id: row.id, name: row.name, kind: row.kind, model: row.defaultModel },
+    compact: compactOf(row.kind, configOf(row)),
     secrets: apiKey ? [apiKey] : [],
     scope: row.scope,
   }

@@ -17,8 +17,10 @@ import { explain, ExplainInput } from './explain.ts'
 export const ABILITY_OPS: Record<string, readonly OpName[]> = {
   rewriteText: ['updateElement'],
   generateSlide: ['addSlide', 'addElement'],
-  generateChart: ['addElement', 'updateElement'],
-  generateDiagram: ['addElement', 'updateElement'],
+  // addSlide: the new slide when there is no room on the target. deleteElement: only empty placeholder text boxes
+  // that a new element covers (see place-element.ts). Neither can delete or change a non-empty element.
+  generateChart: ['addElement', 'updateElement', 'addSlide', 'deleteElement'],
+  generateDiagram: ['addElement', 'updateElement', 'addSlide', 'deleteElement'],
   generateTheme: ['setTheme'],
   suggestEffects: ['updateSlide', 'updateElement'],
   speakerNotes: ['setNotes'],
