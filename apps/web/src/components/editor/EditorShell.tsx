@@ -1,10 +1,12 @@
-// The editor: one open deck. Owns the doc session, UI state, selection, the
-// keyboard map and the overlays. Everything the user can do is an action in
+// The editor: one open deck. EditorShell creates the collab session (one Y.Doc synced
+// through the collab service) and waits for the first sync. EditorWorkspace owns the UI state,
+// selection, the keyboard map and the overlays. Everything the user can do is an action in
 // actions.ts, which builds deck-ops and applies them through the session.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChartElement, Element as SlideElement, RichText } from '@sleid/model'
+import { isReadOnlyRole, type DeckRole } from '@sleid/db/permissions'
 import { createActions, currentSlide, slideIndex, type PromptRequest, type UiState } from './actions.ts'
-import { DocSession, useDeck, useSaveState, useUndoState } from './doc-session.ts'
+import { CollabSession, deniedMessage, useDeck, usePeers, useReady, useSyncStatus, useUndoState } from './collab-session.ts'
 import { Filmstrip } from './Filmstrip.tsx'
 import { SlideCanvas } from './Canvas.tsx'
 import { SidePanel } from './SidePanel.tsx'
@@ -13,12 +15,12 @@ import { BottomBar } from './BottomBar.tsx'
 import { MenuBar, buildMenus } from './MenuBar.tsx'
 import { ContextMenu, PromptDialog, ShortcutsDialog, Toast, type MenuEntry } from './Overlays.tsx'
 import { FormulaBar, TitleBar, Toolbar } from './Chrome.tsx'
-import { bytesToBase64, base64ToBytes } from '~/lib/base64'
-import { pushDeckUpdateFn } from '~/lib/deck-doc.functions'
-import { updateDeckFn } from '~/lib/decks.functions'
+import { ShareDialog } from './ShareDialog.tsx'
+import { getCollabTokenFn } from '~/lib/collab.functions'
+import { setStarredFn } from '~/lib/decks.functions'
 
 export type EditorDeck = { id: string; title: string; starred: boolean; role: string }
-export type EditorUser = { name: string; email: string }
+export type EditorUser = { id: string; name: string; email: string; image: string | null }
 
 const DEFAULT_UI: UiState = {
   showNotes: false,
@@ -34,35 +36,46 @@ function isEditable(target: EventTarget | null): boolean {
   return target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)
 }
 
-export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; user: EditorUser; state: string }) {
-  const session = useMemo(
-    () =>
-      new DocSession(base64ToBytes(state), async (update) => {
-        await pushDeckUpdateFn({ data: { deckId: meta.id, update: bytesToBase64(update) } })
-      }),
-    // A new deck id or a fresh load means a new doc.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [meta.id, state],
-  )
-  // Not destroyed on unmount: React StrictMode runs effect cleanups without a real
-  // unmount, and the session must survive that. Pending edits are pushed instead.
-  useEffect(() => () => void session.flush(), [session])
+export function EditorShell({ deck: meta, user }: { deck: EditorDeck; user: EditorUser }) {
+  const readOnly = isReadOnlyRole(meta.role as DeckRole)
+  const [session, setSession] = useState<CollabSession | null>(null)
 
+  // One session per open deck. StrictMode runs this effect twice in development, so the
+  // cleanup destroys the first session and the second one replaces it before anything renders.
   useEffect(() => {
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (session.isDirty()) e.preventDefault()
-    }
-    const onPageHide = () => void session.flush()
-    window.addEventListener('beforeunload', onBeforeUnload)
-    window.addEventListener('pagehide', onPageHide)
-    return () => {
-      window.removeEventListener('beforeunload', onBeforeUnload)
-      window.removeEventListener('pagehide', onPageHide)
-    }
-  }, [session])
+    const next = new CollabSession({
+      deckId: meta.id,
+      user: { id: user.id, name: user.name, image: user.image },
+      readOnly,
+      fetchToken: async () => (await getCollabTokenFn({ data: { deckId: meta.id } })).token,
+    })
+    setSession(next)
+    return () => next.destroy()
+  }, [meta.id, readOnly, user.id, user.name, user.image])
 
+  if (!session) return <Opening />
+  return <SessionGate session={session} meta={meta} user={user} readOnly={readOnly} />
+}
+
+function Opening({ text = 'Opening deck…' }: { text?: string }) {
+  return <div className="grid h-screen place-items-center text-ink-muted">{text}</div>
+}
+
+/** Renders the workspace only after the first sync. Before that the document is empty. */
+function SessionGate({ session, meta, user, readOnly }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean }) {
+  const ready = useReady(session)
+  const status = useSyncStatus(session)
+  if (!ready) {
+    if (status.kind === 'denied') return <Opening text={deniedMessage(status.reason)} />
+    return <Opening text="Connecting…" />
+  }
+  return <EditorWorkspace session={session} meta={meta} user={user} readOnly={readOnly} />
+}
+
+function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean }) {
   const deck = useDeck(session.doc)
-  const save = useSaveState(session)
+  const status = useSyncStatus(session)
+  const peers = usePeers(session)
   const { canUndo, canRedo } = useUndoState(session)
 
   const [ui, setUiState] = useState<UiState>(DEFAULT_UI)
@@ -73,10 +86,19 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [prompt, setPrompt] = useState<PromptRequest | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
   const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
-  const [starred, setStarred] = useState(meta.starred)
+  const [starred, setStarredState] = useState(meta.starred)
   const titleRef = useRef<HTMLInputElement>(null)
   const imageInput = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (session.hasUnsavedChanges()) e.preventDefault()
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [session])
 
   const slide = currentSlide(deck, slideIdState)
   const slideId = slide.id
@@ -87,11 +109,21 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
     ? (slide.elements.find((e): e is ChartElement => e.id === ui.dataElementId && e.type === 'chart') ?? undefined)
     : undefined
 
+  // What this user is looking at, for collaborators.
+  const selectionKey = validSelection.join(',')
+  useEffect(() => {
+    session.setPresence({ slideId })
+  }, [session, slideId])
+  useEffect(() => {
+    session.setPresence({ selection: selectionKey ? selectionKey.split(',') : [] })
+  }, [session, selectionKey])
+
   const toast = useCallback((message: string) => setToastMessage(message), [])
   const onToastDone = useCallback(() => setToastMessage(null), [])
 
   const actions = createActions({
     session,
+    readOnly,
     deck,
     deckId: meta.id,
     slideId,
@@ -109,13 +141,13 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
       titleRef.current?.select()
     },
     navigate: async (href) => {
-      await session.flush()
       window.location.assign(href)
     },
   })
 
   const menus = buildMenus({
     actions,
+    readOnly,
     deck,
     canUndo,
     canRedo,
@@ -152,6 +184,21 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
       const target = e.target
       const inGrid = target instanceof HTMLElement && !!target.closest('[role=grid]')
       if (isEditable(target) && !(mod && key === 'enter')) return
+      if (readOnly) {
+        // Viewers and commenters: only keys that do not change the deck.
+        if (mod && key === '/') {
+          e.preventDefault()
+          setShortcutsOpen(true)
+        } else if (mod && key === 'a') {
+          e.preventDefault()
+          actions.selectAll()
+        } else if (mod && key === 'c') {
+          actions.copySelection(false)
+        } else if (e.key === 'Escape' && validSelection.length > 0) {
+          setSelection([])
+        }
+        return
+      }
       if (mod && key === 'z' && !e.shiftKey) {
         e.preventDefault()
         session.undo()
@@ -229,6 +276,7 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
   })
 
   const slideMenu = (id: string): MenuEntry[] => {
+    if (readOnly) return []
     const s = deck.slides.find((x) => x.id === id)
     return [
       { kind: 'item', label: 'New slide after', onSelect: () => actions.newSlide('title-content', true) },
@@ -253,20 +301,23 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
         deck={deck}
         starred={starred}
         deckId={meta.id}
-        userEmail={user.email}
         userName={user.name}
-        save={save}
+        selfColor={session.color}
+        status={status}
+        peers={peers}
+        readOnly={readOnly}
         titleRef={titleRef}
         onRename={(title) => actions.renameDeck(title)}
         onStar={() => {
           const next = !starred
-          setStarred(next)
-          updateDeckFn({ data: { deckId: meta.id, starred: next } }).catch((err: unknown) => {
-            setStarred(!next)
+          setStarredState(next)
+          setStarredFn({ data: { deckId: meta.id, starred: next } }).catch((err: unknown) => {
+            setStarredState(!next)
             toast(err instanceof Error ? err.message : 'Could not update star')
           })
         }}
         onPresent={() => actions.present(false)}
+        onShare={() => setShareOpen(true)}
       />
       <MenuBar menus={menus} />
       <Toolbar
@@ -278,14 +329,17 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
         actions={actions}
         canUndo={canUndo}
         canRedo={canRedo}
+        readOnly={readOnly}
         undo={() => session.undo()}
         redo={() => session.redo()}
       />
-      <FormulaBar deck={deck} slide={slide} single={single} actions={actions} setUi={setUi} />
+      <FormulaBar deck={deck} slide={slide} single={single} actions={actions} setUi={setUi} readOnly={readOnly} />
       <div className="flex min-h-0 flex-1">
         <Filmstrip
           deck={deck}
           currentSlideId={slideId}
+          readOnly={readOnly}
+          peers={peers}
           onSelect={(id) => {
             setSlideId(id)
             setSelection([])
@@ -302,20 +356,26 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
           selection={validSelection}
           editingId={editingId}
           showGuides={ui.showGuides}
+          readOnly={readOnly}
+          peers={peers}
           onSelect={setSelection}
           onGeometry={(id, next) => actions.commitGeometry(id, next)}
-          onStartEdit={(id) => setEditing(id)}
+          onStartEdit={(id) => {
+            if (!readOnly) setEditing(id)
+          }}
           onCommitText={(id, content: RichText) => {
             actions.commitText(id, content)
             setEditing(null)
           }}
+          onCursor={(point) => session.setCursor(point)}
         />
-        <SidePanel deck={deck} slide={slide} selected={selectedEls} ui={ui} setUi={setUi} actions={actions} />
+        <SidePanel deck={deck} slide={slide} selected={selectedEls} ui={ui} setUi={setUi} actions={actions} readOnly={readOnly} />
       </div>
       {dataChart && (
         <DataGrid
           key={dataChart.id}
           chart={dataChart}
+          readOnly={readOnly}
           onCommit={(data) => actions.updateEl(dataChart.id, { data })}
           onClose={() => setUi({ dataElementId: null })}
           onToast={toast}
@@ -327,6 +387,7 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
         ui={ui}
         setUi={setUi}
         actions={actions}
+        readOnly={readOnly}
         onSectionMenu={(x, y, id) => setContext({ x, y, items: sectionMenu(id) })}
       />
       <input
@@ -342,7 +403,8 @@ export function EditorShell({ deck: meta, user, state }: { deck: EditorDeck; use
       />
       {prompt && <PromptDialog request={prompt} onClose={() => setPrompt(null)} />}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
-      {context && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
+      {shareOpen && <ShareDialog deckId={meta.id} onClose={() => setShareOpen(false)} />}
+      {context && context.items.length > 0 && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
       <Toast message={toastMessage} onDone={onToastDone} />
       <span className="sr-only" aria-live="polite">
         {`Slide ${slideIndex(deck, slideId) + 1} of ${deck.slides.length}`}

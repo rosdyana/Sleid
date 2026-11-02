@@ -3,7 +3,7 @@
 // session, so every command is one undo step and is saved like any other edit.
 import { deckToMarkdown, renderDeckHtml } from '@sleid/render'
 import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, type Deck, type Element, type RichText, type Slide, type Theme } from '@sleid/model'
-import { createBlankDeckFn, updateDeckFn } from '~/lib/decks.functions'
+import { createBlankDeckFn, setStarredFn } from '~/lib/decks.functions'
 import { copyDeckFn } from '~/lib/deck-doc.functions'
 import { markOnEverything, setMarkEverywhere, clearMarksEverywhere, type MarkName } from './rich.ts'
 import {
@@ -22,7 +22,7 @@ import {
   CANVAS_H,
   CANVAS_W,
 } from './commands.ts'
-import type { DocSession } from './doc-session.ts'
+import type { CollabSession } from './collab-session.ts'
 
 export interface UiState {
   showNotes: boolean
@@ -42,7 +42,9 @@ export interface PromptRequest {
 }
 
 export interface ActionContext {
-  session: DocSession
+  session: CollabSession
+  /** Commenters and viewers: every change is refused here, and the session refuses too. */
+  readOnly: boolean
   deck: Deck
   deckId: string
   slideId: string
@@ -95,6 +97,10 @@ export function createActions(c: ActionContext) {
   const theme: Theme = deck.theme
 
   function run(ops: unknown[]): boolean {
+    if (c.readOnly) {
+      c.toast('View only: you cannot change this deck')
+      return false
+    }
     try {
       c.session.apply(ops)
       return true
@@ -402,7 +408,7 @@ export function createActions(c: ActionContext) {
 
   async function setStarred(starred: boolean) {
     try {
-      await updateDeckFn({ data: { deckId: c.deckId, starred } })
+      await setStarredFn({ data: { deckId: c.deckId, starred } })
     } catch (err) {
       c.toast(err instanceof Error ? err.message : 'Could not update star')
     }

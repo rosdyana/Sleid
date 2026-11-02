@@ -1,8 +1,8 @@
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from 'better-auth/adapters/drizzle'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
+import { account, session, user, verification } from '@sleid/db'
 import { db } from '~/db/client'
-import { account, session, user, verification } from '~/db/schema'
 
 const isProduction = process.env.NODE_ENV === 'production'
 const testAuth = process.env.SLEID_TEST_AUTH === '1'

@@ -10,8 +10,8 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core'
-import { user } from './auth'
-import { bytea } from './custom-types'
+import { user } from './auth.ts'
+import { bytea } from './custom-types.ts'
 
 /** Roles that can be held by a deck member. Owner is only ever assigned to the creator. */
 export const deckRole = pgEnum('deck_role', ['owner', 'editor', 'commenter', 'viewer'])
@@ -26,7 +26,6 @@ export const decks = pgTable('decks', {
   title: text('title').notNull().default('Untitled presentation'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  starred: boolean('starred').notNull().default(false),
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
 })
 
@@ -40,10 +39,16 @@ export const deckMembers = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
     role: deckRole('role').notNull(),
+    /** Per user: each collaborator stars decks for themselves. Moved here from decks in M2. */
+    starred: boolean('starred').notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.deckId, t.userId] })],
 )
 
+/**
+ * "General access" link. A deck has at most one active link (revokedAt null and not expired).
+ * Restricted means every link is revoked. Redeeming a link adds a deck_members row.
+ */
 export const shareLinks = pgTable('share_links', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   deckId: uuid('deck_id')
@@ -54,10 +59,12 @@ export const shareLinks = pgTable('share_links', {
   createdBy: text('created_by')
     .notNull()
     .references(() => user.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
 })
 
+/** Email invites. `email` is stored lower-case. An invite becomes a deck_members row when its email signs in. */
 export const invites = pgTable('invites', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   deckId: uuid('deck_id')
@@ -88,7 +95,7 @@ export const deckSnapshots = pgTable(
   (t) => [index('deck_snapshots_deck_id_idx').on(t.deckId, t.createdAt)],
 )
 
-/** Append-only Yjs update log. Compacted into deck_snapshots by the collab service (M2). */
+/** Append-only Yjs update log. Written by the collab service (onStoreDocument) and compacted into deck_snapshots. */
 export const deckUpdates = pgTable(
   'deck_updates',
   {

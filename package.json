@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @sleid/web dev",
+    "dev": "pnpm -r --parallel --filter ./apps/web --filter ./apps/collab dev",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
-    "test:e2e": "pnpm --filter @sleid/web test:e2e",
+    "test:e2e": "pnpm --filter @sleid/web test:e2e && pnpm --filter @sleid/web test:e2e:collab",
     "db:generate": "pnpm --filter @sleid/web db:generate",
     "db:migrate": "pnpm --filter @sleid/web db:migrate"
   },

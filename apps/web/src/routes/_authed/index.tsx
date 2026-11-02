@@ -1,6 +1,6 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
-import { createBlankDeckFn, listRecentDecksFn } from '~/lib/decks.functions'
+import { useMemo, useState } from 'react'
+import { createBlankDeckFn, listRecentDecksFn, setStarredFn } from '~/lib/decks.functions'
 import { authClient } from '~/lib/auth-client'
 
 export const Route = createFileRoute('/_authed/')({
@@ -8,11 +8,17 @@ export const Route = createFileRoute('/_authed/')({
   component: Dashboard,
 })
 
+type Filter = 'all' | 'shared'
+const ROLE_LABEL: Record<string, string> = { editor: 'Editor', commenter: 'Commenter', viewer: 'Viewer' }
+
 function Dashboard() {
-  const decks = Route.useLoaderData()
+  const loaded = Route.useLoaderData()
+  const [decks, setDecks] = useState(loaded)
   const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [filter, setFilter] = useState<Filter>('all')
+  const visible = useMemo(() => (filter === 'shared' ? decks.filter((d) => d.role !== 'owner') : decks), [decks, filter])
 
   async function newBlankDeck() {
     setBusy(true)
@@ -23,6 +29,16 @@ function Dashboard() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create deck')
       setBusy(false)
+    }
+  }
+
+  async function toggleStar(deckId: string, starred: boolean) {
+    setDecks((prev) => prev.map((d) => (d.id === deckId ? { ...d, starred: !starred } : d)))
+    try {
+      await setStarredFn({ data: { deckId, starred: !starred } })
+    } catch (e) {
+      setDecks((prev) => prev.map((d) => (d.id === deckId ? { ...d, starred } : d)))
+      setError(e instanceof Error ? e.message : 'Could not update star')
     }
   }
 
@@ -38,7 +54,25 @@ function Dashboard() {
 
       <main className="mx-auto max-w-6xl px-6 py-8">
         <div className="flex items-center justify-between">
-          <h1 className="text-base font-medium">Recent decks</h1>
+          <div className="flex items-center gap-1" role="tablist" aria-label="Deck filter">
+            {(
+              [
+                ['all', 'All decks'],
+                ['shared', 'Shared with me'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={filter === id}
+                onClick={() => setFilter(id)}
+                className={`rounded px-3 py-1.5 font-medium ${filter === id ? 'bg-accent-soft text-[#001d35]' : 'text-ink-muted hover:bg-hover'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={newBlankDeck}
@@ -50,12 +84,14 @@ function Dashboard() {
         </div>
         {error && <p className="mt-3 text-red-700">{error}</p>}
 
-        {decks.length === 0 ? (
-          <p className="mt-10 text-ink-muted">No decks yet. Create a blank deck to start.</p>
+        {visible.length === 0 ? (
+          <p className="mt-10 text-ink-muted">
+            {filter === 'shared' ? 'Nothing has been shared with you yet.' : 'No decks yet. Create a blank deck to start.'}
+          </p>
         ) : (
           <ul className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {decks.map((deck) => (
-              <li key={deck.id}>
+            {visible.map((deck) => (
+              <li key={deck.id} className="relative">
                 <Link
                   to="/d/$deckId"
                   params={{ deckId: deck.id }}
@@ -66,10 +102,22 @@ function Dashboard() {
                     {deck.starred && <span className="text-accent" aria-label="Starred">★</span>}
                     <span className="truncate font-medium">{deck.title}</span>
                   </div>
-                  <div className="mt-1 text-ink-muted">
-                    Updated {new Date(deck.updatedAt).toLocaleDateString()}
+                  <div className="mt-1 flex items-center gap-2 text-ink-muted">
+                    <span>Updated {new Date(deck.updatedAt).toLocaleDateString()}</span>
+                    {deck.role !== 'owner' && (
+                      <span className="rounded bg-hover px-1.5 py-0.5 text-[11px] font-medium text-ink-muted">{ROLE_LABEL[deck.role] ?? deck.role}</span>
+                    )}
                   </div>
                 </Link>
+                <button
+                  type="button"
+                  aria-label={deck.starred ? `Unstar ${deck.title}` : `Star ${deck.title}`}
+                  aria-pressed={deck.starred}
+                  onClick={() => void toggleStar(deck.id, deck.starred)}
+                  className={`absolute right-2 top-2 rounded bg-white/90 px-1.5 py-0.5 shadow-sm hover:bg-hover ${deck.starred ? 'text-amber-500' : 'text-ink-muted'}`}
+                >
+                  ★
+                </button>
               </li>
             ))}
           </ul>

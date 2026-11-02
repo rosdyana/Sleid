@@ -7,6 +7,24 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "dev": "node --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --env-file-if-exists=../../.env src/index.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hocuspocus/server": "^4.8.0",
+    "@sleid/db": "workspace:^",
+    "@sleid/model": "workspace:^",
+    "drizzle-orm": "^0.45.3",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "^4.8.0",
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.2",
+    "vitest": "^5.0.3",
+    "ws": "^8.22.1"
   }
 }

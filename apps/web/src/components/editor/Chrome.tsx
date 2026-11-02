@@ -5,7 +5,7 @@ import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Image as ImageI
 import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
 import { CHART_LABELS, elementLabel, SHAPE_LABELS, slideTitle } from './commands.ts'
-import type { SaveState } from './doc-session.ts'
+import { deniedMessage, type PresencePeer, type SyncStatus } from './collab-session.ts'
 import { markOnEverything, plainToRich, richToPlain } from './rich.ts'
 import { safeImageSrc } from './ElementView.tsx'
 
@@ -21,27 +21,42 @@ export function TitleBar({
   deck,
   starred,
   deckId,
-  userEmail,
   userName,
-  save,
+  selfColor,
+  status,
+  peers,
+  readOnly,
   titleRef,
   onRename,
   onStar,
   onPresent,
+  onShare,
 }: {
   deck: Deck
   starred: boolean
   deckId: string
-  userEmail: string
   userName: string
-  save: SaveState
+  selfColor: string
+  status: SyncStatus
+  peers: PresencePeer[]
+  readOnly: boolean
   titleRef: RefObject<HTMLInputElement | null>
   onRename: (title: string) => void
   onStar: () => void
   onPresent: () => void
+  onShare: () => void
 }) {
-  const status =
-    save.kind === 'saving' ? 'Saving…' : save.kind === 'error' ? `Not saved: ${save.message}` : 'All changes saved in Sleid'
+  const statusText =
+    status.kind === 'connecting'
+      ? 'Connecting…'
+      : status.kind === 'saving'
+        ? 'Saving…'
+        : status.kind === 'offline'
+          ? 'Offline — changes will sync'
+          : status.kind === 'denied'
+            ? deniedMessage(status.reason)
+            : 'All changes saved'
+  const others = uniqueByUser(peers)
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 bg-white px-3">
       <a href="/" aria-label="Back to decks" className="grid size-9 place-items-center rounded bg-accent text-base font-semibold text-white">
@@ -54,15 +69,16 @@ export function TitleBar({
             aria-label="Deck title"
             key={`${deckId}:${deck.title}`}
             defaultValue={deck.title}
+            readOnly={readOnly}
             onBlur={(e) => {
               const next = e.currentTarget.value.trim() || 'Untitled presentation'
               e.currentTarget.value = next
-              if (next !== deck.title) onRename(next)
+              if (!readOnly && next !== deck.title) onRename(next)
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur()
             }}
-            className="w-72 rounded px-1 text-lg text-ink outline-none hover:shadow-[inset_0_0_0_1px_var(--color-rule)] focus:shadow-[inset_0_0_0_2px_var(--color-accent)]"
+            className="w-72 rounded px-1 text-lg text-ink outline-none hover:shadow-[inset_0_0_0_1px_var(--color-rule)] focus:shadow-[inset_0_0_0_2px_var(--color-accent)] read-only:hover:shadow-none"
           />
           <button
             type="button"
@@ -73,33 +89,55 @@ export function TitleBar({
           >
             <Star size={16} className={starred ? 'fill-current' : ''} aria-hidden />
           </button>
+          {readOnly && (
+            <span className="ml-1 rounded-full border border-rule px-2 py-0.5 text-[11px] font-medium text-ink-muted" title="You can look at this deck but not change it">
+              View only
+            </span>
+          )}
         </div>
-        <div className={`px-1 text-[11px] ${save.kind === 'error' ? 'text-red-700' : 'text-ink-muted'}`} role="status">
-          {status}
+        <div className={`px-1 text-[11px] ${status.kind === 'denied' ? 'text-red-700' : 'text-ink-muted'}`} role="status">
+          {statusText}
         </div>
       </div>
       <div className="ml-auto flex items-center gap-3">
+        <div className="flex items-center -space-x-1.5" aria-label="People viewing this deck">
+          {others.slice(0, 5).map((peer) => (
+            <span
+              key={peer.userId}
+              title={peer.name}
+              aria-label={`${peer.name} is here`}
+              className="grid size-7 place-items-center rounded-full border-2 border-white text-[12px] font-medium text-white"
+              style={{ background: peer.color }}
+            >
+              {(peer.name.trim().charAt(0) || '?').toUpperCase()}
+            </span>
+          ))}
+          {others.length > 5 && <span className="pl-2 text-[12px] text-ink-muted">+{others.length - 5}</span>}
+        </div>
         <button type="button" onClick={onPresent} className="flex items-center gap-1.5 rounded px-3 py-1.5 font-medium text-ink hover:bg-hover">
           <Presentation size={16} aria-hidden /> Present
         </button>
-        <button
-          type="button"
-          disabled
-          title="Sharing arrives in milestone 2"
-          className="rounded-full bg-accent-soft px-4 py-1.5 font-medium text-[#001d35] opacity-70"
-        >
+        <button type="button" onClick={onShare} className="rounded-full bg-accent-soft px-4 py-1.5 font-medium text-[#001d35] hover:brightness-95">
           Share
         </button>
         <div
-          aria-label={`Signed in as ${userEmail}`}
-          title={userEmail}
-          className="grid size-8 place-items-center rounded-full bg-[#7c4dff] text-sm font-medium text-white"
+          aria-label={`Signed in as ${userName}`}
+          title={userName}
+          className="grid size-8 place-items-center rounded-full text-sm font-medium text-white"
+          style={{ background: selfColor }}
         >
           {(userName.trim().charAt(0) || '?').toUpperCase()}
         </div>
       </div>
     </header>
   )
+}
+
+/** Collaborators, one entry per person even when they have two tabs open. */
+export function uniqueByUser(peers: PresencePeer[]): PresencePeer[] {
+  const seen = new Map<string, PresencePeer>()
+  for (const peer of peers) if (!seen.has(peer.userId)) seen.set(peer.userId, peer)
+  return [...seen.values()]
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +160,7 @@ export function Toolbar({
   actions,
   canUndo,
   canRedo,
+  readOnly,
   undo,
   redo,
 }: {
@@ -133,6 +172,7 @@ export function Toolbar({
   actions: Actions
   canUndo: boolean
   canRedo: boolean
+  readOnly: boolean
   undo: () => void
   redo: () => void
 }) {
@@ -143,10 +183,10 @@ export function Toolbar({
 
   return (
     <div role="toolbar" aria-label="Formatting" className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-y border-rule bg-white px-2">
-      <button type="button" className={btn} aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!canUndo} onClick={undo}>
+      <button type="button" className={btn} aria-label="Undo" title="Undo (Ctrl+Z)" disabled={readOnly || !canUndo} onClick={undo}>
         <Undo2 size={16} aria-hidden />
       </button>
-      <button type="button" className={btn} aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled={!canRedo} onClick={redo}>
+      <button type="button" className={btn} aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled={readOnly || !canRedo} onClick={redo}>
         <Redo2 size={16} aria-hidden />
       </button>
       <select aria-label="Zoom" className={sel} value={String(ui.zoom)} onChange={(e) => setUi({ zoom: e.target.value === 'fit' ? 'fit' : Number(e.target.value) })}>
@@ -156,6 +196,8 @@ export function Toolbar({
         <option value="100">100%</option>
         <option value="150">150%</option>
       </select>
+      {/* Everything below changes the deck. A disabled fieldset turns all of it off for viewers and commenters. */}
+      <fieldset disabled={readOnly} className="contents">
       <Sep />
       <button type="button" className={btn} aria-label="New slide" title="New slide (Ctrl+Enter)" onClick={() => actions.newSlide()}>
         <Plus size={16} aria-hidden />
@@ -273,6 +315,7 @@ export function Toolbar({
           </option>
         ))}
       </select>
+      </fieldset>
     </div>
   )
 }
@@ -287,12 +330,14 @@ export function FormulaBar({
   single,
   actions,
   setUi,
+  readOnly,
 }: {
   deck: Deck
   slide: Slide
   single: Element | undefined
   actions: Actions
   setUi: (patch: Partial<UiState>) => void
+  readOnly: boolean
 }) {
   const n = deck.slides.findIndex((s) => s.id === slide.id) + 1
   const ref = single ? `Slide ${n} · ${elementLabel(single)}` : `Slide ${n}`
@@ -360,9 +405,9 @@ export function FormulaBar({
         key={`${slide.id}:${single?.id ?? 'slide'}:${value}`}
         aria-label="Formula bar"
         defaultValue={value}
-        readOnly={kind === 'chart' || kind === 'none'}
+        readOnly={readOnly || kind === 'chart' || kind === 'none'}
         placeholder={placeholder}
-        onBlur={(e) => kind !== 'chart' && kind !== 'none' && e.currentTarget.value !== value && commit(e.currentTarget.value)}
+        onBlur={(e) => !readOnly && kind !== 'chart' && kind !== 'none' && e.currentTarget.value !== value && commit(e.currentTarget.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') e.currentTarget.blur()
           if (e.key === 'Escape') {

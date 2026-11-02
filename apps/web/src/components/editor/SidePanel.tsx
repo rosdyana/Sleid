@@ -18,6 +18,7 @@ export function SidePanel({
   ui,
   setUi,
   actions,
+  readOnly,
 }: {
   deck: Deck
   slide: Slide
@@ -25,6 +26,7 @@ export function SidePanel({
   ui: UiState
   setUi: (patch: Partial<UiState>) => void
   actions: Actions
+  readOnly: boolean
 }) {
   const single = selected.length === 1 ? selected[0] : undefined
   const tabs: Array<{ id: UiState['sidePanel']; label: string }> = [
@@ -62,9 +64,12 @@ export function SidePanel({
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3 text-[13px]">
-        {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
-        {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
-        {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
+        {/* Viewers and commenters see the values but cannot change them. */}
+        <fieldset disabled={readOnly} className="min-w-0 border-0 p-0">
+          {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
+          {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
+          {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
+        </fieldset>
       </div>
     </aside>
   )

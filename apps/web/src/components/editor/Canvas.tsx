@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as Reac
 import Moveable, { type OnDrag, type OnDragEnd, type OnDragStart, type OnResize, type OnResizeEnd, type OnRotate, type OnRotateEnd } from 'react-moveable'
 import type { Element, RichText, Slide, Theme } from '@sleid/model'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
+import type { PresencePeer } from './collab-session.ts'
 import { SlideSurface } from './ElementView.tsx'
 import { TextEditor } from './TextEditor.tsx'
 
@@ -19,17 +20,23 @@ export interface CanvasProps {
   selection: readonly string[]
   editingId: string | null
   showGuides: boolean
+  /** Viewers and commenters: no move, resize, rotate or text editing. Selection still works. */
+  readOnly: boolean
+  /** Collaborators on this slide: their selections and cursors are drawn over the slide. */
+  peers: PresencePeer[]
   onSelect: (ids: string[]) => void
   onGeometry: (id: string, next: Geometry) => void
   onStartEdit: (id: string) => void
   onCommitText: (id: string, content: RichText) => void
+  /** Pointer position in slide coordinates, or null when it leaves the canvas. */
+  onCursor: (point: { x: number; y: number } | null) => void
 }
 
 // 100% zoom shows the stage 1280 px wide.
 const PERCENT_SCALE = 1280 / CANVAS_W / 100
 
 export function SlideCanvas(props: CanvasProps) {
-  const { slide, theme, zoom, selection, editingId, showGuides, onSelect, onGeometry, onStartEdit, onCommitText } = props
+  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor } = props
   const outerRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [available, setAvailable] = useState({ w: 900, h: 600 })
@@ -80,8 +87,9 @@ export function SlideCanvas(props: CanvasProps) {
   }
 
   function onStagePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!marquee) return
     const rect = stageRef.current!.getBoundingClientRect()
+    onCursor({ x: Math.round((e.clientX - rect.left) / scale), y: Math.round((e.clientY - rect.top) / scale) })
+    if (!marquee) return
     setMarquee({ ...marquee, x1: e.clientX - rect.left, y1: e.clientY - rect.top })
   }
 
@@ -172,6 +180,7 @@ export function SlideCanvas(props: CanvasProps) {
         onPointerDown={onStagePointerDown}
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
+        onPointerLeave={() => onCursor(null)}
         data-testid="slide-canvas"
       >
         <SlideSurface
@@ -183,7 +192,7 @@ export function SlideCanvas(props: CanvasProps) {
           showGuides={showGuides}
           onElementPointerDown={onElementPointerDown}
           onElementDoubleClick={(el) => {
-            if (el.type === 'text') onStartEdit(el.id)
+            if (el.type === 'text' && !readOnly) onStartEdit(el.id)
           }}
           renderEditing={(el) =>
             el.type === 'text' ? (
@@ -213,7 +222,8 @@ export function SlideCanvas(props: CanvasProps) {
             }}
           />
         )}
-        {target && stageRef.current && (
+        <PresenceLayer slide={slide} scale={scale} peers={peers} />
+        {target && stageRef.current && !readOnly && (
           <Moveable
             target={target}
             container={stageRef.current}
@@ -250,5 +260,57 @@ export function SlideCanvas(props: CanvasProps) {
         )}
       </div>
     </div>
+  )
+}
+
+/** Remote selections (outlined in the collaborator's colour) and remote cursors on this slide. */
+function PresenceLayer({ slide, scale, peers }: { slide: Slide; scale: number; peers: PresencePeer[] }) {
+  const here = peers.filter((p) => p.slideId === slide.id)
+  if (here.length === 0) return null
+  return (
+    <>
+      {here.flatMap((peer) =>
+        peer.selection
+          .map((id) => slide.elements.find((el) => el.id === id))
+          .filter((el): el is Element => el !== undefined)
+          .map((el) => (
+            <div
+              key={`${peer.clientId}:${el.id}`}
+              data-testid="remote-selection"
+              className="pointer-events-none absolute"
+              style={{
+                left: el.x * scale - 3,
+                top: el.y * scale - 3,
+                width: el.w * scale + 6,
+                height: el.h * scale + 6,
+                border: `2px solid ${peer.color}`,
+                borderRadius: 3,
+                zIndex: 10000,
+              }}
+            >
+              <span className="absolute -top-5 left-0 whitespace-nowrap rounded px-1 text-[11px] font-medium text-white" style={{ background: peer.color }}>
+                {peer.name}
+              </span>
+            </div>
+          )),
+      )}
+      {here
+        .filter((p) => p.cursor)
+        .map((peer) => (
+          <div
+            key={`cursor-${peer.clientId}`}
+            data-testid="remote-cursor"
+            className="pointer-events-none absolute"
+            style={{ left: peer.cursor!.x * scale, top: peer.cursor!.y * scale, zIndex: 10001 }}
+          >
+            <svg width="16" height="20" viewBox="0 0 16 20" aria-hidden className="block drop-shadow">
+              <path d="M1 1 L1 16 L5 12 L8 19 L10.5 18 L7.5 11 L13 11 Z" fill={peer.color} stroke="white" strokeWidth="1" />
+            </svg>
+            <span className="ml-3 -mt-1 inline-block whitespace-nowrap rounded px-1 text-[11px] font-medium text-white" style={{ background: peer.color }}>
+              {peer.name}
+            </span>
+          </div>
+        ))}
+    </>
   )
 }

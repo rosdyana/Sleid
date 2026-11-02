@@ -13,6 +13,7 @@ export function BottomBar({
   ui,
   setUi,
   actions,
+  readOnly,
   onSectionMenu,
 }: {
   deck: Deck
@@ -20,6 +21,7 @@ export function BottomBar({
   ui: UiState
   setUi: (patch: Partial<UiState>) => void
   actions: Actions
+  readOnly: boolean
   onSectionMenu: (x: number, y: number, sectionId: string) => void
 }) {
   function openSection(sectionId: string | null) {
@@ -30,11 +32,13 @@ export function BottomBar({
 
   return (
     <div className="shrink-0">
-      {ui.showNotes && <NotesArea key={slide.id} slide={slide} onSave={(notes) => actions.setNotes(notes)} />}
+      {ui.showNotes && <NotesArea key={slide.id} slide={slide} readOnly={readOnly} onSave={(notes) => actions.setNotes(notes)} />}
       <div className="flex h-8 items-end gap-1 border-t border-rule bg-[#f1f3f4] px-2">
-        <button type="button" aria-label="Add section" title="Add section" onClick={actions.addSection} className="mb-1 grid size-6 place-items-center rounded text-ink-muted hover:bg-hover">
-          <Plus size={16} aria-hidden />
-        </button>
+        {!readOnly && (
+          <button type="button" aria-label="Add section" title="Add section" onClick={actions.addSection} className="mb-1 grid size-6 place-items-center rounded text-ink-muted hover:bg-hover">
+            <Plus size={16} aria-hidden />
+          </button>
+        )}
         <SectionTab label="Slides" active={ui.section === null} onClick={() => openSection(null)} />
         {deck.sections.map((section) => (
           <SectionTab
@@ -42,10 +46,10 @@ export function BottomBar({
             label={section.name}
             active={ui.section === section.id}
             onClick={() => openSection(section.id)}
-            onDoubleClick={() => actions.renameSection(section.id)}
+            onDoubleClick={() => !readOnly && actions.renameSection(section.id)}
             onContextMenu={(e) => {
               e.preventDefault()
-              onSectionMenu(e.clientX, e.clientY, section.id)
+              if (!readOnly) onSectionMenu(e.clientX, e.clientY, section.id)
             }}
           />
         ))}
@@ -83,7 +87,7 @@ function SectionTab({
   )
 }
 
-function NotesArea({ slide, onSave }: { slide: Slide; onSave: (notes: string) => void }) {
+function NotesArea({ slide, readOnly, onSave }: { slide: Slide; readOnly: boolean; onSave: (notes: string) => void }) {
   return (
     <div className="flex h-24 shrink-0 flex-col border-t border-rule bg-white px-4 py-2">
       <label className="mb-1 text-[11px] font-medium text-ink-muted" htmlFor="speaker-notes">
@@ -93,7 +97,8 @@ function NotesArea({ slide, onSave }: { slide: Slide; onSave: (notes: string) =>
         id="speaker-notes"
         className="min-h-0 flex-1 resize-none rounded border border-rule-soft p-1.5 text-[13px] outline-none focus:border-accent"
         defaultValue={slide.notes}
-        onBlur={(e) => e.target.value !== slide.notes && onSave(e.target.value)}
+        readOnly={readOnly}
+        onBlur={(e) => !readOnly && e.target.value !== slide.notes && onSave(e.target.value)}
       />
     </div>
   )

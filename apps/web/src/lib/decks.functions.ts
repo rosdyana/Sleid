@@ -2,24 +2,21 @@ import { createServerFn } from '@tanstack/react-start'
 import { and, desc, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
 import { db } from '~/db/client'
-import { decks, deckMembers } from '~/db/schema'
+import { decks, deckMembers, setStarred } from '@sleid/db'
 import { getDeckRole, requireDeckRole } from '~/lib/deck-access.server'
 import { requireUser } from '~/lib/session.server'
 
 const deckIdSchema = z.object({ deckId: z.uuid() })
-const updateDeckSchema = z.object({
-  deckId: z.uuid(),
-  title: z.string().trim().min(1).max(200).optional(),
-  starred: z.boolean().optional(),
-})
+const starSchema = z.object({ deckId: z.uuid(), starred: z.boolean() })
 
+/** Decks the caller is a member of, with their role and their own star. Owners and shared decks alike. */
 export const listRecentDecksFn = createServerFn({ method: 'GET' }).handler(async () => {
   const user = await requireUser()
   const rows = await db
     .select({
       id: decks.id,
       title: decks.title,
-      starred: decks.starred,
+      starred: deckMembers.starred,
       updatedAt: decks.updatedAt,
       role: deckMembers.role,
     })
@@ -27,7 +24,7 @@ export const listRecentDecksFn = createServerFn({ method: 'GET' }).handler(async
     .innerJoin(decks, eq(decks.id, deckMembers.deckId))
     .where(and(eq(deckMembers.userId, user.id), isNull(decks.deletedAt)))
     .orderBy(desc(decks.updatedAt))
-    .limit(50)
+    .limit(100)
   return rows.map((r) => ({ ...r, updatedAt: r.updatedAt.toISOString() }))
 })
 
@@ -42,29 +39,29 @@ export const createBlankDeckFn = createServerFn({ method: 'POST' }).handler(asyn
   return { id }
 })
 
+/** The deck's metadata for the caller, or null when they are not a member. The document itself loads over the collab socket. */
 export const getDeckFn = createServerFn({ method: 'GET' })
   .validator((data: unknown) => deckIdSchema.parse(data))
   .handler(async ({ data }) => {
     const user = await requireUser()
     const role = await getDeckRole(user.id, data.deckId)
     if (!role) return null
-    const [deck] = await db
-      .select({ id: decks.id, title: decks.title, starred: decks.starred })
+    const [row] = await db
+      .select({ id: decks.id, title: decks.title, starred: deckMembers.starred })
       .from(decks)
+      .innerJoin(deckMembers, and(eq(deckMembers.deckId, decks.id), eq(deckMembers.userId, user.id)))
       .where(and(eq(decks.id, data.deckId), isNull(decks.deletedAt)))
       .limit(1)
-    if (!deck) return null
-    return { ...deck, role }
+    if (!row) return null
+    return { ...row, role }
   })
 
-export const updateDeckFn = createServerFn({ method: 'POST' })
-  .validator((data: unknown) => updateDeckSchema.parse(data))
+/** Stars or unstars a deck for the caller only. Viewers and up. */
+export const setStarredFn = createServerFn({ method: 'POST' })
+  .validator((data: unknown) => starSchema.parse(data))
   .handler(async ({ data }) => {
     const user = await requireUser()
-    await requireDeckRole(user.id, data.deckId, 'editor')
-    const patch: { title?: string; starred?: boolean; updatedAt: Date } = { updatedAt: new Date() }
-    if (data.title !== undefined) patch.title = data.title
-    if (data.starred !== undefined) patch.starred = data.starred
-    await db.update(decks).set(patch).where(eq(decks.id, data.deckId))
+    await requireDeckRole(user.id, data.deckId, 'viewer')
+    await setStarred(db, user.id, data.deckId, data.starred)
     return { ok: true as const }
   })

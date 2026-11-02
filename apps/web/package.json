@@ -10,9 +10,12 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node --env-file-if-exists=../../.env scripts/migrate.mjs",
-    "test:e2e": "node --env-file-if-exists=../../.env tests/smoke.mjs"
+    "test:e2e": "node --env-file-if-exists=../../.env tests/smoke.mjs",
+    "test:e2e:collab": "node --env-file-if-exists=../../.env tests/collab.mjs"
   },
   "dependencies": {
+    "@hocuspocus/provider": "^4.8.0",
+    "@sleid/db": "workspace:^",
     "@sleid/model": "workspace:^",
     "@sleid/render": "workspace:^",
     "@tanstack/react-router": "^1.170.40",
@@ -35,6 +38,7 @@
     "react-moveable": "^0.56.0",
     "reveal.js": "5.2.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "y-protocols": "^1.0.7",
     "yjs": "^13.6.33",
     "zod": "^4.6.5"
   },

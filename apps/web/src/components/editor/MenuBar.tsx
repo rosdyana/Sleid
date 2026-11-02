@@ -8,6 +8,8 @@ import { MenuList, type MenuEntry } from './Overlays.tsx'
 
 export interface MenuDeps {
   actions: Actions
+  /** Commenters and viewers: only items that do not change the deck stay enabled. */
+  readOnly: boolean
   deck: Deck
   canUndo: boolean
   canRedo: boolean
@@ -27,7 +29,48 @@ type AlignKind = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'
 
 const TODO = (milestone: string): Pick<Extract<MenuEntry, { kind: 'item' }>, 'disabled' | 'note'> => ({ disabled: true, note: milestone })
 
-export function buildMenus(d: MenuDeps): Array<{ label: string; items: MenuEntry[] }> {
+type Menu = { label: string; items: MenuEntry[] }
+
+// Items that stay enabled for viewers and commenters. Everything else is disabled in read-only mode.
+const VIEWER_ITEMS = new Set([
+  'New deck',
+  'Make a copy',
+  'JSON (.json)',
+  'Markdown (.md)',
+  'HTML (.html)',
+  'Present from beginning',
+  'Present from current slide',
+  'Show speaker notes',
+  'Show grid and guides',
+  'Fit',
+  '50%',
+  '75%',
+  '100%',
+  '150%',
+  'Copy',
+  'Select all',
+  'Keyboard shortcuts',
+])
+
+function restrictForViewer(menus: Menu[]): Menu[] {
+  const walk = (entries: MenuEntry[]): MenuEntry[] =>
+    entries.map((entry) => {
+      if (entry.kind === 'group') return { ...entry, items: walk(entry.items) }
+      if (entry.kind === 'sep') return entry
+      const plain = entry.label.replace(/^✓ /, '')
+      if (entry.disabled || VIEWER_ITEMS.has(plain)) return entry
+      return { ...entry, disabled: true, note: entry.note ?? 'View only' }
+    })
+  return menus.map((m) => ({ ...m, items: walk(m.items) }))
+}
+
+export function buildMenus(d: MenuDeps): Menu[] {
+  const a = d.actions
+  const menus: Menu[] = buildAllMenus(d)
+  return d.readOnly ? restrictForViewer(menus) : menus
+}
+
+function buildAllMenus(d: MenuDeps): Menu[] {
   const a = d.actions
   const sel = d.hasSelection
   const item = (label: string, onSelect: () => void, shortcut?: string): Extract<MenuEntry, { kind: 'item' }> => ({ kind: 'item', label, onSelect, shortcut })

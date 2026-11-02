@@ -36,7 +36,8 @@ try {
   const anon = await browser.newContext()
   const anonPage = await anon.newPage()
   await anonPage.goto(`${base}/`)
-  await anonPage.waitForURL('**/login', { timeout: 20000 })
+  // /login may carry a ?redirect= return path (M2): match the path, not the whole URL.
+  await anonPage.waitForURL(/\/login(\?|$)/, { timeout: 20000 })
   await anonPage.getByRole('button', { name: 'Sign in with Google' }).waitFor({ state: 'visible', timeout: 10000 })
   log('unauthenticated / redirects to /login')
   await anon.close()

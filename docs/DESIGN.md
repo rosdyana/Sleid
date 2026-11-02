@@ -9,7 +9,7 @@ Living document. Update it as decisions change.
 | 0. Scaffold monorepo, compose, Better Auth Google login, Drizzle schema, DESIGN.md + README | **Done** (checks run, see below) |
 | 1a. Model (zod schema, Yjs binding, deck-ops, undo) + reveal.js renderer + Markdown | **Done** (checks run, see M1a below) |
 | 1b. Sheets-style editor UI, single user, reveal.js present, slide ordering fix | **Done** (checks run, see M1b below) |
-| 2. Hocuspocus live co-edit, presence, sharing and roles, link tokens | Pending |
+| 2. Hocuspocus live co-edit, presence, sharing and roles, link tokens | **Done** (checks run, see M2 below; open gaps listed there) |
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON | Pending |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | Pending |
 | 5. MCP server + access tokens | Pending |
@@ -115,7 +115,7 @@ Scope: slide ordering in `packages/model`, persistence API in `apps/web`, and th
 - Keyboard map is in `EditorShell.tsx`. Editable fields keep their native keys. The grid keeps its own paste handling.
 
 **Known gaps (not done in M1b).**
-- Viewers and commenters can open the editor. Their edits are applied locally and fail on push with "Deck not found", which the status line shows. A read-only editor is M2 work, with roles.
+- Viewers and commenters can open the editor. Their edits are applied locally and fail on push with "Deck not found", which the status line shows. A read-only editor is M2 work, with roles. **Resolved in M2**: read-only editor and server-side read-only connections.
 - Multi-select drag: react-moveable works on one selected element. Several elements move with arrow keys, align and distribute, not by dragging together.
 - Chart palette colours are not editable in the side panel. Theme fonts are typed names, not a font picker.
 - Grid and guides toggle only outlines elements. There is no ruler.
@@ -145,6 +145,118 @@ Scope: slide ordering in `packages/model`, persistence API in `apps/web`, and th
 - Runs used Google Chrome through `CHROME_PATH`. Playwright's bundled Chromium was not used.
 - Production serving (`vite build` then `node .output/server/index.mjs`) was not run. Only the dev server was used.
 - Snapshot growth under sustained editing is not measured.
+
+### What M2 built, and decisions taken while building it
+
+Scope: live co-editing through Hocuspocus (`apps/collab`), presence, roles end to end, sharing, per-user stars, a server-side ops entry point, and the shared DB package. The pieces are listed first, then the decisions.
+
+**Packages and layout.**
+- `packages/db` (`@sleid/db`): Drizzle schema (moved from `apps/web/src/db/schema`), the DB client factory `createDb(url)`, deck persistence (`loadDeckState`, `appendDeckUpdate`, `copyDeck`, `COMPACT_THRESHOLD`), roles (`getDeckRole`, `requireDeckRole`, `canEdit`, `canGrant`, ...), sharing (`grantMembership`, `acceptPendingInvites`, `createInvite`, `redeemShareLink`, `setGeneralAccess`, `setStarred`, ...) and collab tokens (`signCollabToken`, `verifyCollabToken`). Two subpath exports: `@sleid/db/permissions` (pure, safe for the browser bundle) and `@sleid/db/testing` (test helpers).
+- **Migrations stay in `apps/web/drizzle`.** The schema moved; drizzle-kit reads it from `packages/db`. `pnpm db:generate` and `pnpm db:migrate` still run from the root.
+- `apps/collab`: `config.ts` (env), `hooks.ts` (Hocuspocus hooks), `internal-api.ts` (internal HTTP), `server.ts` (`createCollabServer`, used by `index.ts` and by the integration test), `index.ts` (entry point).
+- `apps/web`: `collab-client.server.ts` (typed client for the internal API), `collab-revalidate.server.ts`, `sharing.functions.ts`, `collab.functions.ts` (`getCollabTokenFn`), and the editor client in `components/editor/collab-session.ts` and `ShareDialog.tsx`. `doc-session.ts` and `pushDeckUpdateFn` are removed.
+
+**Versions.** `@hocuspocus/server` and `@hocuspocus/provider` are both `^4.8.0` (4.8.0 is the current release). Both need `yjs` and `y-protocols` as peers (`y-protocols` `^1.0.7`). Hocuspocus 4 requires Node 22 or newer; the repo uses Node 24. `ws` 8.22.1 is used by the integration test. `drizzle-orm` is `^0.45.3` in every package.
+
+**Collab tokens.** `signCollabToken` issues `base64url(JSON claims).base64url(HMAC-SHA256)` with claims `{ userId, deckId, role, name, image, exp }`, `exp` in epoch seconds, five minutes ahead. `verifyCollabToken` checks the signature (constant-time), the expiry and, when given, the deck. Every failure has a reason: `malformed`, `bad-signature`, `expired`, `wrong-deck`, `invalid-claims`. The secret must be at least 32 characters. `getCollabTokenFn` issues a token after a session and role check, and the provider calls it again on every reconnect.
+
+**Hocuspocus hooks** (`apps/collab/src/hooks.ts`).
+- `onAuthenticate`: verifies the token against `documentName` (the deck id), then re-reads the role from the database. The DB role wins over the token role. Editors and owners get a writable connection. Commenters and viewers get `connectionConfig.readOnly = true`. A non-member is refused with `not-a-member`.
+- `onLoadDocument`: applies `loadDeckState` and records the state vector that the database already holds.
+- `onStoreDocument`: debounced by Hocuspocus (2 s, at most 10 s). It appends the diff since the last store as one `deck_updates` row and syncs `decks.title`. Unchanged documents store nothing. A failed append restores the previous state vector, so the next store retries.
+- `beforeSync` (**added beyond the plan**): before a writable client's SyncStep2 or Update is applied, it is applied to a scratch copy, and the result must still parse as a deck. Otherwise the connection is closed and nothing is applied. This keeps M1b's rule that a push which breaks the deck is refused. Read-only connections skip this check, because Hocuspocus drops their writes anyway.
+- `beforeHandleAwareness` (**added beyond the plan**): presence identity (`user.id`, `user.name`) is replaced with the connection's authenticated identity. A client can still choose its colour and cursor, but cannot show itself as another user. The integration test checks this, and fails when the hook is disabled.
+- `afterUnloadDocument`: frees the per-document state vector.
+- The config sets `unloadImmediately: true`, so the last client leaving stores at once, and `maxPayload` 3 MB for WebSocket frames.
+
+**Persistence decisions.**
+- An update that no longer parses after a store is **logged loudly and still stored**. Dropping it would lose the user's work. The beforeSync guard makes this path rare. If it happens, the next load of that deck fails in the editor, and the log shows why.
+- `decks.title` is written from the document title on every store. The dashboard reads it at page load, so a title can lag by up to about 2 seconds, and it refreshes on the next load.
+
+**Internal API** (`apps/collab/src/internal-api.ts`). It runs on its own HTTP listener, `COLLAB_INTERNAL_HOST:COLLAB_INTERNAL_PORT` (default `127.0.0.1:3002`), not on the WebSocket port. Hocuspocus's own request handler writes a default response after the `onRequest` hook, so serving internal routes from the hook would conflict with it. Every request needs `x-sleid-internal`, compared as SHA-256 digests with `timingSafeEqual`.
+- `POST /internal/decks/:deckId/ops` with `{ actor, ops }`: applies the batch with `applyOps(doc, ops, 'server:<actor>')` to the live document, so connected clients receive it through the normal broadcast. The batch is all-or-nothing. Success returns `{ ok: true, results }`. An invalid op returns 422 with `{ opIndex, opName, reason }`, and nothing is applied.
+- `GET /internal/decks/:deckId/json`: `yDocToDeck` of the live document.
+- `POST /internal/decks/:deckId/revalidate` (**added beyond the plan**): re-reads each connected user's role. A downgrade sets `connection.readOnly` in place. A user who has lost access is closed with code 4403. Called by the web app after a role change, a removal, or a general-access change, on a best-effort basis.
+
+**Roles and sharing** (`packages/db/src/sharing.ts`, `apps/web/src/lib/sharing.functions.ts`).
+- Owner: changes roles, removes people, sets general access. Editor: invites as editor, commenter or viewer. Commenter and viewer: see the people list only. Ownership is never granted by an invite or a link.
+- `grantMembership` is one atomic `INSERT ... ON CONFLICT DO UPDATE` with a SQL rank comparison, so a grant can only raise a role. A test runs concurrent grants and checks the highest role wins.
+- Invites: stored lower-case. If an account already exists for the email, it is added at once. Otherwise the invite waits and is accepted by `acceptPendingInvites` on the next authenticated navigation (`_authed` `beforeLoad`). No email is sent.
+- General access is one active link per deck. "Restricted" revokes every link. Choosing a role keeps the existing token and changes its role, or creates a new link. The token is shown only to people who can invite.
+- `/d/<id>?share=<token>`: a signed-in user redeems the link (`redeemShareLink`) and gets a membership with the link's role, unless they already have a stronger one. A signed-out visitor goes to `/login?redirect=<path>`. `safeReturnPath` keeps only same-origin paths.
+- Commenters and viewers get a read-only editor with a "View only" badge. Comments are M7, so commenters have the same read-only UI as viewers for now.
+
+**Starred per user.** `starred` moved from `decks` to `deck_members` in migration `0001`. The migration copies the star to every member of a starred deck. Before M2 only owners existed, so this is the owner's star. `setStarredFn` stars a deck for the caller only. The dashboard has an "All decks" and a "Shared with me" filter. "Shared with me" means the caller's role is not owner.
+
+**Editor client** (`collab-session.ts`).
+- One `Y.Doc` per open deck, synced by `HocuspocusProvider` with a token function. The editor renders only after the first sync, because the document is empty before then. A denied connection shows its reason.
+- Local edits use origin `'local'`. `Y.UndoManager` tracks only `'local'`, so undo never reverts a collaborator's change. The plan said "the provider's local origin". The provider itself is the origin of remote updates, so a separate string constant is used for local edits.
+- A read-only session throws on `apply`. `run()` in `actions.ts` refuses the change with a toast before that. The toolbar, side panel and fx bar sit in disabled fieldsets. The menu items outside a small allow-list are disabled with the note "View only". Moveable is not mounted, and text editing and grid edits are off. Keyboard shortcuts that change the deck are not handled.
+- Status (title bar): "Connecting…", "Saving…" while changes wait for the server, "All changes saved", "Offline — changes will sync", or the denial reason. The provider's own offline detection took 38 seconds in a measured run, so the browser's `offline` event shows the status at once. On `online` the socket is detached and reconnected. A plain `disconnect()` would wait for a close handshake that a dead network never completes, and `connect()` would return early.
+- Presence (awareness): each user has a stable colour. The fields are `user`, `slideId`, `selection` and `cursor`. Cursor updates are throttled to 50 ms (20 Hz). Remote selections are outlined in the collaborator's colour on the canvas, with their name. Remote cursors show only for collaborators on the same slide. The filmstrip shows a coloured dot for each collaborator on a slide. The title bar shows one avatar per person.
+- The share dialog (`ShareDialog.tsx`) does everything in the plan: invite by email with role, role dropdown and remove (owner only), pending invites, general access, copy link.
+
+**Ops endpoint client.** `apps/web/src/lib/collab-client.server.ts` exports `createCollabInternalClient({ baseUrl, secret, fetch })`, which is testable with a fake fetch, and `getCollabInternalClient()`, which reads `COLLAB_INTERNAL_SECRET` and `COLLAB_INTERNAL_URL`. Errors are `CollabInternalError` with the HTTP status.
+
+**Deviations from the plan.**
+- `COLLAB_INTERNAL_PORT`, `COLLAB_INTERNAL_HOST` and `COLLAB_INTERNAL_URL` are extra variables. The internal API has its own listener (see above).
+- `updateDeckFn` is replaced by `setStarredFn`, because the title now syncs through the document. `pushDeckUpdateFn` is removed, because a push outside the live document would bypass the collab service. `getDeckStateFn` stays, for the present route only.
+- `smoke.mjs`: the login URL matcher now accepts a `?redirect=` query. The unauthenticated redirect now carries a return URL, which the plan asked for. Nothing else in the smoke test changed.
+- No collab container: `compose.yml` documents it, and a Dockerfile is a follow-up. See the gaps.
+- The title bar's status text reads "All changes saved" (it had "in Sleid" in M1b), and "Saving…", "Connecting…", "Offline — changes will sync" and the denial text are added.
+
+**Known gaps and limitations (decisions to revisit).**
+- **Restricted does not remove people who joined through the link.** A redeemed link adds a membership row, and restricting the link does not remove it. The owner removes those people in the people list. A `via` column on `deck_members` would fix this and is a decision for you.
+- **Mid-session role changes are enforced on the server, but the editor UI keeps its role until reload.** After a downgrade, the server refuses the user's writes, but their local edits still show, and the status stays "Saving…" until reload. After an upgrade, the UI stays read-only until reload. If the internal API is down, the change applies on the next connect.
+- **Rich text is last-writer-wins per element** (opaque JSON, unchanged from M1b). Two people typing into the same text box at the same time overwrite each other. Upgrade path: a `Y.XmlFragment` per text element bound with `y-prosemirror`. Only `ydoc.ts` and `ops.ts` change, because the rest of the app goes through them. Speaker notes are also a plain string, last-writer-wins.
+- **Edits made offline** live in the browser's document until the connection returns. Closing the tab while offline loses them, and the page asks for confirmation when there are unsaved changes.
+- **The token is checked at connect.** A live connection stays open past the token's five-minute expiry. Role changes are re-checked by `revalidate`, but a token expiry is not enforced on live connections. The provider reconnects with a new token.
+- **Presence colours and cursors are client-chosen.** Identity is stamped by the server; the rest is not checked.
+- **Present reads the persisted state** (`getDeckStateFn`), so it can miss the last ~2 seconds of live edits.
+- **Single collab process.** The per-document state vectors live in memory. Two collab processes on one deck would each store, which is not supported.
+- **No email for invites.** Pending invites appear when the invited address signs in.
+- **Dashboard titles** come from the database at page load. They lag the document by up to ~2 seconds.
+- **Commenter UI** is read-only, the same as viewer. Comments are M7.
+- **Viewers see the people list** in the share dialog (without invite controls or tokens).
+- **Store of an unparseable deck** is logged and kept (see above).
+- **Undo** still merges nothing across users: a local undo can overwrite a remote change to the same key, as in M1a.
+- **Compose:** no collab container or Dockerfile. Run `pnpm dev`.
+
+### M2 verification
+
+Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0.0.1:5433), Google Chrome through `CHROME_PATH`. The dev servers ran with `SLEID_TEST_AUTH=1`.
+
+- `pnpm typecheck`: exit 0 in every workspace.
+- `pnpm test`: **15 files, 153 tests, all passing, none skipped** (the database was reachable). M1b had 10 files and 111 tests. The new coverage is:
+  - `packages/db`, 5 files: collab tokens (sign and verify, expired, wrong deck, tampered payload and signature, wrong secret, malformed, invalid claims, short secret); role gating and the no-downgrade helpers; `deck-doc` persistence (first snapshot, append with title sync, compaction at the threshold, copy); sharing against Postgres (concurrent grants, invite waiting and acceptance with mixed case, existing-account invites, owner and editor never downgraded, link redemption, expired and revoked links, restricted, token kept on a role change, owner row immune to member operations, stars per user); the 0001 migration on a scratch database (the star reaches every member, `decks.starred` is dropped).
+  - `apps/collab`, integration against an in-process Hocuspocus on random ports, real Postgres, and `ws` clients: two editors converge after concurrent ops; a viewer's update is refused on the server and the server state is unchanged; an internal ops call reaches a connected client, returns per-op results, and is stored; a bad op rejects the whole batch with its index; the internal API refuses a wrong secret, a bad id and an unknown deck; a live change is stored and a reload equals it; an editor update that breaks the deck is refused and the connection closes; wrong deck, expired, bad signature and non-member are denied with their reasons; revalidate downgrades an editor in place and closes a removed member; presence shows the authenticated identity.
+  - `apps/web`: `safeReturnPath`.
+- Mutation check: with the awareness identity stamp disabled, the spoof test fails; with it on, it passes.
+- `pnpm --filter @sleid/web build`: exit 0. The client bundle contains no `drizzle-orm`, `postgres`, `node:crypto`, `COLLAB_*` secrets or `DATABASE_URL`. Warnings are the same chunk-size ones as M1b.
+- `apps/web/tests/smoke.mjs` (single user, through the collab service): **passed**, no page or console errors.
+- `apps/web/tests/collab.mjs` (two browsers, plus a third for the viewer): **passed**, no page or console errors. It covers:
+  - A creates a deck, titles it, invites B's email as editor (pending), sets "Anyone with the link: viewer", and sees the share link.
+  - B signs up and finds the deck under "Shared with me". B's avatar and A's avatar appear on each other's screen.
+  - A moves the title box: B sees it within 10 ms in the last run. B adds a slide: A sees it within 10 ms. A sees B's cursor on the canvas. The target was 3 s.
+  - B goes offline and sees "Offline — changes will sync". B moves the title box, comes back online, and A receives the move.
+  - A signed-out visit to the link goes to `/login?redirect=…`.
+  - C opens the link and sees "View only". The title is read-only. The toolbar insert buttons, Undo and Insert > Text box are disabled. Delete and Backspace change nothing.
+  - A forced write from a Node client with a valid viewer token: the server reports the connection as `readonly`, the server title is unchanged, and A's title is unchanged.
+  - Screenshots: `share-dialog.png`, `collab-A.png`, `collab-B.png` (saved under `SCREENSHOT_DIR`). I looked at them. They show the colour-coded outline with the name, the remote cursor, the slide dot, the avatars and the share dialog.
+- Playwright timing: the first run failed on two timing problems in the test, not the product: a dashboard reads titles at load, and a remote cursor appears only on the same slide. The fixed test reloads until the stored title shows. Neither change touched the product code.
+
+### Unverified in M2
+
+- Real Google sign-in (still unverified, as in M0).
+- Restricted and link revocation in a browser (the database logic is tested, and the browser path is not).
+- A commenter in a browser (the logic is shared with viewers, and only viewer is exercised end to end).
+- A role change mid-session in a browser (the server path is covered by the integration test).
+- Two people typing into one text box at the same time, in a browser.
+- Remote selection outlines are checked by screenshot, not by an assertion.
+- Behaviour with more than two or three collaborators, and snapshot growth under sustained editing.
+- Firefox and Safari. Chrome only.
+- Production serving (`node .output/server/index.mjs`) and a deployed collab service.
+- The collab container image (not built).
 
 ---
 

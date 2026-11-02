@@ -45,7 +45,20 @@ function pad(grid: Grid): Grid {
   return grid.map((r) => [...r, ...Array(width - r.length).fill('')])
 }
 
-export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartElement; onCommit: (data: ChartData) => void; onClose: () => void; onToast: (m: string) => void }) {
+export function DataGrid({
+  chart,
+  readOnly,
+  onCommit,
+  onClose,
+  onToast,
+}: {
+  chart: ChartElement
+  /** Viewers and commenters can read the data but not change it. */
+  readOnly: boolean
+  onCommit: (data: ChartData) => void
+  onClose: () => void
+  onToast: (m: string) => void
+}) {
   const [grid, setGrid] = useState<Grid>(() => toGrid(chart.data))
   const [sel, setSel] = useState<{ r: number; c: number }>({ r: 0, c: 0 })
   const [editing, setEditing] = useState<string | null>(null)
@@ -58,6 +71,7 @@ export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartEl
   }, [chart.data])
 
   const commitGrid = (next: Grid) => {
+    if (readOnly) return onToast('View only: the data cannot be changed')
     const padded = pad(next)
     setGrid(padded)
     onCommit(toData(padded))
@@ -90,6 +104,7 @@ export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartEl
     if (e.key === 'ArrowUp') return (e.preventDefault(), move(-1, 0))
     if (e.key === 'ArrowLeft') return (e.preventDefault(), move(0, -1))
     if (e.key === 'ArrowRight' || e.key === 'Tab') return (e.preventDefault(), move(0, e.shiftKey ? -1 : 1))
+    if (readOnly) return
     if (e.key === 'Enter' || e.key === 'F2') {
       e.preventDefault()
       setEditing(grid[sel.r]?.[sel.c] ?? '')
@@ -107,7 +122,7 @@ export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartEl
   }
 
   function onPaste(e: ClipboardEvent<HTMLDivElement>) {
-    if (editing !== null) return
+    if (editing !== null || readOnly) return
     const text = e.clipboardData.getData('text/plain')
     if (!text) return
     e.preventDefault()
@@ -172,15 +187,18 @@ export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartEl
         <span className="font-medium">Data for {chart.chartType} chart</span>
         <span className="text-ink-muted">Row 1 is the header. Column A holds the categories.</span>
         <div className="ml-auto flex items-center gap-1">
-          <button type="button" className="rounded px-2 py-1 hover:bg-hover" onClick={addRow}>+ Row</button>
-          <button type="button" className="rounded px-2 py-1 hover:bg-hover" onClick={addColumn}>+ Column</button>
-          <button type="button" className="rounded px-2 py-1 hover:bg-hover" onClick={deleteRow}>Delete row</button>
-          <button type="button" className="rounded px-2 py-1 hover:bg-hover" onClick={deleteColumn}>Delete column</button>
-          <button type="button" className="rounded px-2 py-1 text-accent hover:bg-hover" onClick={() => fileRef.current?.click()}>Import CSV/XLSX</button>
+          <fieldset disabled={readOnly} className="contents">
+            <button type="button" className="rounded px-2 py-1 hover:bg-hover disabled:opacity-40" onClick={addRow}>+ Row</button>
+            <button type="button" className="rounded px-2 py-1 hover:bg-hover disabled:opacity-40" onClick={addColumn}>+ Column</button>
+            <button type="button" className="rounded px-2 py-1 hover:bg-hover disabled:opacity-40" onClick={deleteRow}>Delete row</button>
+            <button type="button" className="rounded px-2 py-1 hover:bg-hover disabled:opacity-40" onClick={deleteColumn}>Delete column</button>
+            <button type="button" className="rounded px-2 py-1 text-accent hover:bg-hover disabled:opacity-40" onClick={() => fileRef.current?.click()}>Import CSV/XLSX</button>
+          </fieldset>
           <input
             ref={fileRef}
             type="file"
             accept=".csv,.xlsx,.xls,text/csv"
+            disabled={readOnly}
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -231,7 +249,7 @@ export function DataGrid({ chart, onCommit, onClose, onToast }: { chart: ChartEl
                         setSel({ r, c })
                         wrapRef.current?.focus()
                       }}
-                      onDoubleClick={() => setEditing(value)}
+                      onDoubleClick={() => !readOnly && setEditing(value)}
                       className={`h-7 min-w-28 border px-0 ${selected ? 'border-2 border-accent' : 'border-rule-soft'} ${
                         r === 0 || c === 0 ? 'font-medium' : ''
                       }`}

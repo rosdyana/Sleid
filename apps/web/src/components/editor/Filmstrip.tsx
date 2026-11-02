@@ -5,6 +5,7 @@ import { useState, type DragEvent } from 'react'
 import { Plus } from 'lucide-react'
 import type { Deck } from '@sleid/model'
 import { CANVAS_W } from './commands.ts'
+import type { PresencePeer } from './collab-session.ts'
 import { SlideSurface } from './ElementView.tsx'
 
 const THUMB_WIDTH = 168
@@ -16,6 +17,8 @@ export function thumbId(slideId: string) {
 export function Filmstrip({
   deck,
   currentSlideId,
+  readOnly,
+  peers,
   onSelect,
   onMove,
   onNew,
@@ -23,6 +26,8 @@ export function Filmstrip({
 }: {
   deck: Deck
   currentSlideId: string
+  readOnly: boolean
+  peers: PresencePeer[]
   onSelect: (slideId: string) => void
   onMove: (slideId: string, toIndex: number) => void
   onNew: () => void
@@ -40,6 +45,7 @@ export function Filmstrip({
 
   function onDrop(e: DragEvent) {
     e.preventDefault()
+    if (readOnly) return
     const id = dragId ?? e.dataTransfer.getData('text/plain')
     const from = deck.slides.findIndex((s) => s.id === id)
     setDragId(null)
@@ -56,7 +62,7 @@ export function Filmstrip({
       aria-label="Slides"
       className="flex w-48 shrink-0 flex-col gap-3 overflow-y-auto border-r border-rule bg-[#f1f3f4] p-3"
       onDragOver={(e) => {
-        if (dragId) e.preventDefault()
+        if (dragId && !readOnly) e.preventDefault()
       }}
       onDrop={onDrop}
     >
@@ -71,14 +77,14 @@ export function Filmstrip({
               tabIndex={0}
               aria-label={`Slide ${index + 1}${slide.hidden ? ' (hidden)' : ''}`}
               aria-current={current ? 'true' : undefined}
-              draggable
-              onDragStart={(e) => onDragStart(e, slide.id)}
+              draggable={!readOnly}
+              onDragStart={(e) => (readOnly ? e.preventDefault() : onDragStart(e, slide.id))}
               onDragEnd={() => {
                 setDragId(null)
                 setDropBefore(null)
               }}
               onDragOver={(e) => {
-                if (!dragId) return
+                if (!dragId || readOnly) return
                 e.preventDefault()
                 const rect = e.currentTarget.getBoundingClientRect()
                 setDropBefore(e.clientY < rect.top + rect.height / 2 ? index : index + 1)
@@ -93,7 +99,7 @@ export function Filmstrip({
               onContextMenu={(e) => {
                 e.preventDefault()
                 onSelect(slide.id)
-                onContextMenu(e.clientX, e.clientY, slide.id)
+                if (!readOnly) onContextMenu(e.clientX, e.clientY, slide.id)
               }}
               className={`relative cursor-pointer rounded-sm outline-none ${current ? 'ring-2 ring-accent' : 'hover:ring-1 hover:ring-rule'} ${
                 slide.hidden ? 'opacity-50' : ''
@@ -109,17 +115,34 @@ export function Filmstrip({
                   <SlideSurface slide={slide} theme={deck.theme} scale={scale} />
                 </div>
               </div>
+              {/* Collaborators currently on this slide */}
+              <div className="pointer-events-none absolute right-1 top-1 flex -space-x-1">
+                {peers
+                  .filter((p) => p.slideId === slide.id)
+                  .slice(0, 3)
+                  .map((p) => (
+                    <span
+                      key={p.clientId}
+                      title={`${p.name} is on this slide`}
+                      data-testid="slide-presence-dot"
+                      className="size-2.5 rounded-full ring-2 ring-white"
+                      style={{ background: p.color }}
+                    />
+                  ))}
+              </div>
             </div>
           </div>
         )
       })}
-      <button
-        type="button"
-        onClick={onNew}
-        className="ml-7 flex items-center gap-1 rounded px-2 py-1 text-[12px] text-ink-muted hover:bg-hover"
-      >
-        <Plus size={14} aria-hidden /> New slide
-      </button>
+      {!readOnly && (
+        <button
+          type="button"
+          onClick={onNew}
+          className="ml-7 flex items-center gap-1 rounded px-2 py-1 text-[12px] text-ink-muted hover:bg-hover"
+        >
+          <Plus size={14} aria-hidden /> New slide
+        </button>
+      )}
     </aside>
   )
 }
