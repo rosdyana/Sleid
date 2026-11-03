@@ -8,8 +8,8 @@ import { CHART_LABELS, elementLabel, SHAPE_LABELS, slideTitle } from './commands
 import { deniedMessage, type PresencePeer, type SyncStatus } from './collab-session.ts'
 import { markOnEverything, plainToRich, richToPlain } from './rich.ts'
 import { safeImageSrc } from './ElementView.tsx'
+import { FONT_FAMILIES } from '~/lib/brand-fonts'
 
-const FONT_FAMILIES = ['Inter', 'Georgia, serif', 'Arial, sans-serif', 'Courier New, monospace']
 const FONT_SIZES = [12, 14, 18, 24, 32, 40, 56, 72]
 const ANIMATIONS = ['none', 'fade-in', 'fade-up', 'fade-down', 'fade-left', 'fade-right', 'grow', 'shrink', 'highlight-red', 'zoom-in']
 

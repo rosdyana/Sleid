@@ -4,9 +4,11 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { ANIMATION_EFFECTS, BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
 import { CHART_LABELS, elementLabel, SHAPE_LABELS } from './commands.ts'
+import { BrandKitSection } from '~/components/brand/BrandKitSection'
 
 export function SidePanel({
   deck,
+  deckId,
   slide,
   selected,
   ui,
@@ -19,6 +21,8 @@ export function SidePanel({
   commentsAlert,
 }: {
   deck: Deck
+  /** The deck's id in the database (the Brand kit section applies kits through the server). */
+  deckId: string
   slide: Slide
   selected: Element[]
   ui: UiState
@@ -66,7 +70,7 @@ export function SidePanel({
           <fieldset disabled={readOnly} className="flex min-h-0 min-w-0 flex-col border-0 p-0">
             {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
             {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
-            {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
+            {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} brand={deck.brand} deckId={deckId} readOnly={readOnly} actions={actions} />}
             {ui.sidePanel === 'ai' && aiPanel}
           </fieldset>
         )}
@@ -372,9 +376,10 @@ function SlideTab({ deck, slide, actions }: { deck: Deck; slide: Slide; actions:
 
 const COLOR_KEYS: Array<keyof Theme['colors']> = ['background', 'surface', 'text', 'muted', 'accent', 'accent2', 'accent3', 'accent4']
 
-function ThemeTab({ theme, actions }: { theme: Theme; actions: Actions }) {
+function ThemeTab({ theme, brand, deckId, readOnly, actions }: { theme: Theme; brand: Deck['brand']; deckId: string; readOnly: boolean; actions: Actions }) {
   return (
     <div>
+      <BrandKitSection deckId={deckId} brand={brand} readOnly={readOnly} />
       <p className="mb-2 font-medium">Built-in themes</p>
       <div className="mb-4 grid grid-cols-2 gap-2">
         {BUILT_IN_THEMES.map((t) => (

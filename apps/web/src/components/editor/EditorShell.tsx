@@ -30,6 +30,7 @@ import { CommentPins, pinsFor } from './comments/CommentPins.tsx'
 import { useComments } from './comments/useComments.ts'
 import { HistoryPanel } from './HistoryPanel.tsx'
 import { ImportDialog } from '~/components/import/ImportDialog'
+import { SaveTemplateDialog } from '~/components/templates/SaveTemplateDialog'
 
 export type EditorDeck = { id: string; title: string; starred: boolean; role: string }
 export type EditorUser = { id: string; name: string; email: string; image: string | null }
@@ -149,6 +150,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const [themeOpen, setThemeOpen] = useState(false)
   const [exportDialog, setExportDialog] = useState<DialogFormat | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
   const exportJobs = useExportJobs(meta.id)
   const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
   const [starred, setStarredState] = useState(meta.starred)
@@ -387,6 +389,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
     },
     openExport: (format) => setExportDialog(format),
     openImport: () => setImportOpen(true),
+    saveTemplate: () => setSaveTemplateOpen(true),
     prompt: setPrompt,
     openShortcuts: () => setShortcutsOpen(true),
     toast,
@@ -684,6 +687,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         />
         <SidePanel
           deck={deck}
+          deckId={meta.id}
           slide={slide}
           selected={selectedEls}
           ui={ui}
@@ -776,6 +780,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         />
       )}
       {importOpen && <ImportDialog openInNewTab onClose={() => setImportOpen(false)} />}
+      {saveTemplateOpen && <SaveTemplateDialog deckId={meta.id} defaultName={deck.title} onClose={() => setSaveTemplateOpen(false)} />}
       <ExportTray jobs={exportJobs.jobs} onDismiss={exportJobs.dismiss} />
       {context && context.items.length > 0 && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
       <Toast message={toastMessage} onDone={onToastDone} />

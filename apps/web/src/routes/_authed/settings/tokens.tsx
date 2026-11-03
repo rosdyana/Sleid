@@ -2,6 +2,7 @@ import { Link, createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { createApiTokenFn, listApiTokensFn, revokeApiTokenFn } from '~/lib/api-tokens.functions'
 import { listRecentDecksFn } from '~/lib/decks.functions'
+import { SettingsNav } from '~/components/settings/SettingsNav'
 
 export const Route = createFileRoute('/_authed/settings/tokens')({
   loader: async () => {
@@ -115,6 +116,7 @@ function TokenSettings() {
       </header>
 
       <main className="mx-auto max-w-4xl space-y-6 px-6 py-8">
+        <SettingsNav />
         <section className="space-y-2 text-[14px] text-ink-muted">
           <p>
             A token lets an AI agent (Claude Code, Claude Desktop, or any MCP client) work on your decks as you. Its MCP server is at{' '}

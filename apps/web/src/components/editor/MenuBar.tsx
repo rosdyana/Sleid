@@ -26,6 +26,8 @@ export interface MenuDeps {
   openExport: (format: 'pdf' | 'png' | 'jpg') => void
   /** Opens the Import dialog (File, PowerPoint, Markdown or JSON, or a Google Slides link). It makes a new deck. */
   openImport: () => void
+  /** Opens Save as template (File). Editors and owners only; viewers and commenters get it disabled. */
+  saveTemplate: () => void
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
@@ -113,6 +115,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
         item('From prompt…', () => window.location.assign('/wizard/new')),
         item('Import slides…', d.openImport),
         item('Make a copy', () => void a.makeCopy()),
+        item('Save as template…', d.saveTemplate),
         sep,
         group('Download', [
           item('PDF (.pdf)', () => d.openExport('pdf')),

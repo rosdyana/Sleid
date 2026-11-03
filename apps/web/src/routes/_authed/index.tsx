@@ -4,9 +4,16 @@ import { createBlankDeckFn, listRecentDecksFn, setStarredFn } from '~/lib/decks.
 import { markMentionsSeenFn, myMentionsFn } from '~/lib/comments.functions'
 import { authClient } from '~/lib/auth-client'
 import { ImportDialog, type Tab as ImportTab } from '~/components/import/ImportDialog'
+import { TemplateGallery, type GalleryTab } from '~/components/templates/TemplateGallery'
+import { TemplateCard, type TemplateItem } from '~/components/templates/TemplateCard'
+import { useStartFromTemplate } from '~/components/templates/start-from-template'
+import { listTemplatesFn } from '~/lib/templates.functions'
 
 export const Route = createFileRoute('/_authed/')({
-  loader: async () => ({ decks: await listRecentDecksFn(), mentions: await myMentionsFn() }),
+  // ?gallery=builtin|mine|shared opens the template gallery on that tab (the save-template dialog links here).
+  validateSearch: (search: Record<string, unknown>): { gallery?: GalleryTab } =>
+    search.gallery === 'builtin' || search.gallery === 'mine' || search.gallery === 'shared' ? { gallery: search.gallery } : {},
+  loader: async () => ({ decks: await listRecentDecksFn(), mentions: await myMentionsFn(), templates: await listTemplatesFn() }),
   component: Dashboard,
 })
 
@@ -14,9 +21,13 @@ type Filter = 'all' | 'shared'
 const ROLE_LABEL: Record<string, string> = { editor: 'Editor', commenter: 'Commenter', viewer: 'Viewer' }
 
 function Dashboard() {
-  const { decks: loadedDecks, mentions: loadedMentions } = Route.useLoaderData()
+  const { decks: loadedDecks, mentions: loadedMentions, templates: loadedTemplates } = Route.useLoaderData()
+  const search = Route.useSearch()
   const [decks, setDecks] = useState(loadedDecks)
   const [mentions, setMentions] = useState(loadedMentions)
+  const [templates, setTemplates] = useState<TemplateItem[]>(loadedTemplates)
+  const [gallery, setGallery] = useState<GalleryTab | null>(search.gallery ?? null)
+  const startTemplate = useStartFromTemplate()
   const [mentionsOpen, setMentionsOpen] = useState(false)
   const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
@@ -81,6 +92,15 @@ function Dashboard() {
       </header>
       {mentionsOpen && <MentionsList items={mentions.items} onClose={() => setMentionsOpen(false)} />}
       {importTab && <ImportDialog initialTab={importTab} openInNewTab={false} onClose={() => setImportTab(null)} />}
+      {gallery && (
+        <TemplateGallery
+          initialTab={gallery}
+          onClose={() => {
+            setGallery(null)
+            void listTemplatesFn().then(setTemplates).catch(() => undefined)
+          }}
+        />
+      )}
 
       <main className="mx-auto max-w-6xl px-6 py-8">
         <div className="flex items-center justify-between">
@@ -138,6 +158,11 @@ function Dashboard() {
                       From wizard
                     </Link>
                   </li>
+                  <li role="none">
+                    <button role="menuitem" type="button" className="block w-full px-3 py-2 text-left hover:bg-hover" onClick={() => { setMenuOpen(false); setGallery('builtin') }}>
+                      From template…
+                    </button>
+                  </li>
                   <li role="none" className="my-1 border-t border-rule" />
                   <li role="none">
                     <button role="menuitem" type="button" className="block w-full px-3 py-2 text-left hover:bg-hover" onClick={() => { setMenuOpen(false); setImportTab('file') }}>
@@ -155,6 +180,34 @@ function Dashboard() {
           </div>
         </div>
         {error && <p className="mt-3 text-red-700">{error}</p>}
+
+        <section aria-label="Start a new deck" className="mt-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-[14px] font-medium">Start a new deck</h2>
+            <button type="button" data-testid="open-template-gallery" onClick={() => setGallery('builtin')} className="text-[13px] font-medium text-accent hover:underline">
+              Template gallery
+            </button>
+          </div>
+          <div className="mt-3 flex gap-3 overflow-x-auto pb-2" data-testid="start-row">
+            <button
+              type="button"
+              data-testid="start-blank"
+              onClick={newBlankDeck}
+              disabled={busy || startTemplate.busyId !== null}
+              className="flex w-44 shrink-0 flex-col gap-2 rounded-lg border border-dashed border-rule bg-white p-2 text-left hover:border-accent disabled:opacity-60"
+            >
+              <span className="grid aspect-video w-full place-items-center rounded bg-hover text-2xl text-ink-muted" aria-hidden="true">
+                +
+              </span>
+              <span className="text-[13px] font-medium">Blank</span>
+            </button>
+            {templates.map((t) => (
+              <TemplateCard key={t.id} template={t} testId={`start-template-${t.id}`} disabled={busy || startTemplate.busyId !== null} onPick={(picked) => void startTemplate.start(picked.id)} />
+            ))}
+          </div>
+          {startTemplate.busyId !== null && <p role="status" className="mt-2 text-[13px] text-ink-muted">Creating the deck…</p>}
+          {startTemplate.error && <p role="alert" className="mt-2 text-red-700">{startTemplate.error}</p>}
+        </section>
 
         {visible.length === 0 ? (
           <p className="mt-10 text-ink-muted">

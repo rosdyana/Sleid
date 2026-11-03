@@ -16,7 +16,7 @@ Living document. Update it as decisions change.
 | 6. Wizard + reference ingestion + research | **Done** (checks run, see M6 below; open items listed there, including the research check on a live search provider and the visual defects of live run 3) |
 | 7. Comments, version history, presenter + phone remote | **Done** (checks run, see M7 below; open items and unverified parts listed there) |
 | 8. Import: PPTX, Google Slides, Markdown, JSON | **Done** (checks run, see M8 below; open items and unverified parts listed there. Real Google OAuth, Picker and Drive were not run.) |
-| 9. Templates and brand kits | **In progress**: built-in templates, brand kit model, logo overlay, AI brand constraint (part A), and the wizard, thumbnail and render fixes (part B). Not done: the dashboard gallery, Save as template, the brand kit and template settings pages, the editor brand-kit section, the wizard pickers, and the m9 browser check. See M9 below. |
+| 9. Templates and brand kits | **In progress**: built-in templates, brand kit model, logo overlay, AI brand constraint (part A), the wizard, thumbnail and render fixes (part B), and the UI (part C). Not done: the m9 browser check, so the row stays open. See M9 below. |
 
 ### What M0 built, and decisions taken while building it
 
@@ -1293,7 +1293,7 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
 
 ## M9: Templates and brand kits (in progress)
 
-**State: partial.** Part A (the built-in templates, the brand kit model, the logo overlay, the AI brand constraint, the library tables and the MCP tools) is in `6ffc2af` and `bb8b81a`. This milestone's part B is only partly done. What is done is listed under *Done in part B*. The dashboard gallery, Save as template, the Brand kits and Templates settings pages, the wizard pickers, the editor's brand-kit section, and the `m9` browser check are **not** done. Status row 9 stays open until they are.
+**State: UI built, browser check not written.** Part A (the built-in templates, the brand kit model, the logo overlay, the AI brand constraint, the library tables and the MCP tools) is in `6ffc2af` and `bb8b81a`. Part B is the backend fixes listed under *Done in part B*. Part C is the UI: the dashboard start row and gallery, Save as template, the Brand kits and Templates settings pages (linked from a shared settings nav), the editor's Brand kit section, and the wizard's template and kit pickers. The `m9` browser check (`apps/web/tests/m9.mjs`) is **not** written, so status row 9 stays open.
 
 **Done in part B.**
 - **Wizard.** `templateId` (a user template uuid, or `builtin:<key>`) and `brandKitId` are optional on the brief (`packages/llm/src/wizard-schema.ts`). Creation checks that the caller can read each one (built-in, owned, or instance-visible) and answers "not found" otherwise, the same as a missing one. A brief with a kit and the AI theme is refused: the kit's palette is the rule for colours, and the AI theme invents them.
@@ -1321,8 +1321,9 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
 - `apps/worker/scripts/m9-render-check.ts` re-run: the Project kickoff mermaid diagram draws on the dark theme (light labels, dark boxes); the Quarterly review table header is white on the blue fill; the Project kickoff table header is near-black on yellow.
 
 **Unverified and open.**
-- The dashboard gallery, Save as template, the Brand kits and Templates pages, the editor's Brand kit section, and the wizard's template and kit pickers: **not built**.
-- The `m9` browser check (`apps/web/tests/m9.mjs`) and its screenshots: **not written**. The earlier browser suites (smoke, collab, export, ai, mcp, wizard, m7, m8) were not re-run for this change.
+- The `m9` browser check (`apps/web/tests/m9.mjs`): **not written**. The earlier browser suites other than smoke (collab, export, ai, mcp, wizard, m7, m8) were not re-run for part C.
+- Part C was checked with scratch Playwright scripts (not committed): the gallery, Save as template, the kit editor with a logo, the kit applied in the editor (logo on the canvas), the templates page, the wizard pickers and submit. Viewers and commenters get the Brand kit section disabled in code only (the side panel's read-only fieldset, and the server refuses the change); not checked in a browser.
+- A template saved just now shows a placeholder in the gallery until the gallery is reopened: the list is read on open, and the thumbnail may still be rendering.
 - The PPTX table header colour was checked in the code and in unit tests of the colour rule, not by opening the file in PowerPoint or LibreOffice.
 - The editor's Mermaid theme was not looked at in a browser.
 - `apps/worker/src/thumbnail.integration.test.ts` returns early (passes without asserting) when Chrome cannot start. It prints a message when that happens.

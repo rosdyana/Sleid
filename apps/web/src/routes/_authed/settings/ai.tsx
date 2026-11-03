@@ -5,6 +5,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { researchStatusFn } from '~/lib/wizard.functions'
 import { listAiProvidersFn, saveAiProviderFn, deleteAiProviderFn, setDefaultAiProviderFn, testAiProviderFn } from '~/lib/llm-settings.functions'
 import type { ProviderView } from '~/lib/llm-settings.server'
+import { SettingsNav } from '~/components/settings/SettingsNav'
 
 export const Route = createFileRoute('/_authed/settings/ai')({
   loader: () => listAiProvidersFn(),
@@ -196,6 +197,7 @@ function AiSettings() {
       </header>
 
       <main className="mx-auto max-w-4xl space-y-6 px-6 py-8">
+        <SettingsNav />
         <ResearchStatus />
         <section className="space-y-2 text-[14px] text-ink-muted">
           <p>
