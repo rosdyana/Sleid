@@ -173,7 +173,8 @@ describe('generateChart', () => {
 })
 
 describe('generateDiagram', () => {
-  it('accepts valid Mermaid on the first try', async () => {
+  it('accepts valid Mermaid on the first try', { timeout: 30_000 }, async () => {
+    // The first Mermaid check in a worker loads the library, which can take longer than the default 5 s under load.
     const env = envFor(fixtureDeck(), ['{"title":"Flow","source":"flowchart LR\\n  A --> B"}'])
     const out = await generateDiagram(env, { prompt: 'flow', slideId: SLIDE2 })
     const after = applied(fixtureDeck(), out.ops)

@@ -19,6 +19,7 @@ export function Filmstrip({
   currentSlideId,
   readOnly,
   peers,
+  commentCounts,
   onSelect,
   onMove,
   onNew,
@@ -28,6 +29,8 @@ export function Filmstrip({
   currentSlideId: string
   readOnly: boolean
   peers: PresencePeer[]
+  /** Open comment threads per slide id. A slide with none shows no badge. */
+  commentCounts?: Record<string, number>
   onSelect: (slideId: string) => void
   onMove: (slideId: string, toIndex: number) => void
   onNew: () => void
@@ -115,6 +118,15 @@ export function Filmstrip({
                   <SlideSurface slide={slide} theme={deck.theme} scale={scale} />
                 </div>
               </div>
+              {commentCounts?.[slide.id] ? (
+                <span
+                  data-testid="slide-comment-count"
+                  aria-label={`${commentCounts[slide.id]} open comments`}
+                  className="pointer-events-none absolute left-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-semibold text-white"
+                >
+                  {commentCounts[slide.id]}
+                </span>
+              ) : null}
               {/* Collaborators currently on this slide */}
               <div className="pointer-events-none absolute right-1 top-1 flex -space-x-1">
                 {peers

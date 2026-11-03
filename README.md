@@ -2,7 +2,7 @@
 
 A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 4** (AI assistant: pluggable providers, proposals you preview and apply). See the status table in DESIGN.md.
+Status: **milestone 7** (comments, version history, presenter view and phone remote). See the status table in DESIGN.md.
 
 ## Layout
 
@@ -110,6 +110,9 @@ Without these values the Google button will fail at sign-in. The server logs a w
 | `pnpm --filter @sleid/web test:e2e:collab` | Two-browser co-editing check (needs the dev servers) |
 | `pnpm --filter @sleid/web test:e2e:export` | Export, publish and public page check (needs the dev servers and Chrome) |
 | `pnpm --filter @sleid/web test:e2e:ai` | Assistant check against a fake local model server (needs the dev servers, `LLM_SECRET_KEY` and Chrome) |
+| `pnpm --filter @sleid/web test:e2e:mcp` | MCP check over HTTP against the live editor (needs the dev servers and a token) |
+| `pnpm --filter @sleid/web test:e2e:wizard` | Prompt-to-deck check with a fake model and fake SearXNG (needs `node tests/fake-searxng.mjs 4412` and `SEARXNG_URL=http://127.0.0.1:4412`) |
+| `pnpm --filter @sleid/web test:e2e:m7` | Comments, version history, presenter and phone remote (needs the dev servers and Chrome; uses `COLLAB_INTERNAL_SECRET`) |
 
 ## Browser checks
 
@@ -273,10 +276,12 @@ Sleid runs an MCP server at `/mcp` (Streamable HTTP). An agent can create decks,
 | `decks:read` | `list_decks`, `get_deck`, `render_slide`, the deck resource |
 | `decks:write` | `apply_ops`, the slide, text, chart, diagram, image and theme tools, `share_deck`. Needs editor access on each deck. |
 | `decks:create` | `create_deck` |
+| `decks:read` (comments, versions) | `list_comments`, `list_versions`. Viewers and up. |
+| `decks:write` (comments, versions) | `add_comment` (commenters and up) and `restore_version` (editors and owners only). |
 | `exports` | `export_deck`. Viewers can export, as in the editor. |
 | `ai` | `generate_with_ai`. Needs editor access. Uses your AI provider and its limits. |
 
-**Tools.** `list_decks`, `create_deck`, `get_deck` (outline or JSON), `apply_ops`, `add_slide`, `update_text`, `set_notes`, `delete_slide`, `move_slide`, `insert_chart`, `insert_diagram` (Mermaid is parsed first, and a parse error comes back to the agent), `insert_image`, `set_theme`, `render_slide`, `export_deck`, `share_deck`, `generate_with_ai` (returns proposed ops and changes nothing; the agent then calls `apply_ops`). Resources: `sleid://schema/deck`, `sleid://schema/ops`, `sleid://themes`, `sleid://decks/{deckId}`. Prompt: `build_deck`.
+**Tools.** `list_decks`, `create_deck`, `get_deck` (outline or JSON), `apply_ops`, `add_slide`, `update_text`, `set_notes`, `delete_slide`, `move_slide`, `insert_chart`, `insert_diagram` (Mermaid is parsed first, and a parse error comes back to the agent), `insert_image`, `set_theme`, `render_slide`, `export_deck`, `share_deck`, `generate_with_ai` (returns proposed ops and changes nothing; the agent then calls `apply_ops`), `list_comments`, `add_comment` (write `@[Name](userId)` to mention a member), `list_versions`, `restore_version`. Resources: `sleid://schema/deck`, `sleid://schema/ops`, `sleid://themes`, `sleid://decks/{deckId}`. Prompt: `build_deck`.
 
 **Exports from MCP.** `export_deck` returns a one-time link, valid for 15 minutes, to a file on the server. It carries its own secret, never the token. The link works once, after the export has finished (a request before that gets 409 and the link is kept). Do not share it.
 
@@ -286,11 +291,28 @@ Sleid runs an MCP server at `/mcp` (Streamable HTTP). An agent can create decks,
 
 Open **Share** in the title bar. Owners and editors can invite by email as editor, commenter or viewer. Invites for an email that has no account yet wait until that email signs in. The owner changes roles, removes people, and sets general access (Restricted, or Anyone with the link at a chosen role). Links look like `/d/<deckId>?share=<token>`. A signed-out visitor is sent to `/login` and returns to the link after signing in.
 
-Commenters and viewers get a read-only editor with a "View only" badge. The server enforces this too: their connection cannot write to the document.
+Commenters and viewers get a read-only editor. A commenter sees a "Commenting" badge and can start threads and reply; a viewer sees "View only". The server enforces this too: their connection cannot write to the document.
+
+## Comments, version history and presenting (M7)
+
+**Comments.** Select an element (or nothing, for the whole slide) and press **Ctrl/Cmd + Alt + M**, or use **Insert ▸ Comment**, or right-click an element and choose **Comment**. Type `@` and a name to mention someone in the deck. Each thread is a numbered pin on the slide, and the Comments tab lists the threads of this slide or of all slides. Commenters and up can start threads and reply, and edit or delete their own comments. Editors and owners resolve or reopen any thread (resolved threads are hidden until you tick **Resolved**). If an element is deleted, its thread stays and says "element removed". A mention shows as a badge on the Comments tab and on the dashboard, where **Mentions** lists them. There are no email notifications. Collaborators with the deck open see a new or changed thread within a second or two.
+
+**Version history.** The collab service keeps automatic checkpoints: two minutes after editing stops, or every ten minutes while someone keeps editing. Name a version with **File ▸ Version history ▸ Name current version…** (or the button in the History tab). Clicking a version in History shows it read-only, with a summary of how it differs from the current deck. **Restore this version** (editors and owners) makes the deck that version, live for everyone with it open. The state before a restore is kept as the version **Before restore**, so a restore can be undone with another restore.
+
+How long versions are kept: named versions and **Before restore** forever; automatic checkpoints in full for 24 hours, then one per hour for 7 days, then one per day for 90 days. A daily job in the worker applies this. Internal states (the first open and the log compaction) are not history: only the newest one is kept.
+
+**Presenting.** Press **F5** or **Present** for the audience window. Press **S** in that window, or choose **View ▸ Presenter view**, to open the presenter view: the current and next slide, the notes in large type, the elapsed time and clock, Prev and Next. The presenter view and the audience window talk over the browser's BroadcastChannel, so they must be in the same browser.
+
+**Phone remote.** In the presenter view, press **Phone remote** and scan the QR code, or open the link. The phone shows the current slide, its notes, and big Prev and Next buttons. The link works for 30 minutes, works without signing in, and stops working when you press **Close remote** or close the presenter view. **Follow presenter** (in the presenter view) gives a read-only link for viewers: their window follows the slide you are on.
+
+*Security of the remote.* The token is a signed value that names the deck, the presentation session and the presenter, and expires after 30 minutes. Closing the remote revokes it in the database. Each command checks that the presenter still has access to the deck, and the phone can send at most 20 commands in 10 seconds per session (per web process). The phone page sends no referrer and is not indexed. The token is in the page address, so it can appear in server logs and browser history; treat the QR code as a credential while it is open.
+
+**Checks.** `apps/web/tests/m7.mjs` runs the two-browser comment flow, the version flow, and the presenter and phone flow, with screenshots (`pnpm --filter @sleid/web test:e2e:m7`).
 
 ## Database
 
-- Schema: `packages/db/src/schema/` (Better Auth tables, `decks` with publish fields, `deck_members` with per-user `starred`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`, `assets`, `exports`).
+- Schema: `packages/db/src/schema/` (Better Auth tables, `decks` with publish fields, `deck_members` with per-user `starred`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`, `assets`, `exports`, `comment_threads`, `comments`, `comment_mention_reads`, `remote_sessions`).
+- Migration `0010` (M7) adds the comment tables, the phone-remote sessions, and `deck_snapshots.kind` and `editors`. Existing snapshots become `internal`.
 - Migrations: `apps/web/drizzle/`. The schema lives in `@sleid/db`, and drizzle-kit reads it from there. Regenerate with `pnpm db:generate` after schema changes and commit the SQL.
 - Migration `0001` moves `starred` from `decks` to `deck_members` and copies the value to every member. Its data copy is hand-written. Check it when you change the migration.
 - Migration `0002` adds `assets`, `exports`, and the publish columns on `decks`.

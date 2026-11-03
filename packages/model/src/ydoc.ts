@@ -67,41 +67,57 @@ export function appendElement(elements: YElements, el: Element): void {
   writeFields(m, el as PlainObject, opaqueElementKeys(el.type))
 }
 
+/** Writes a whole (already parsed) deck into the root map of a document. Caller holds the transaction. */
+function writeDeckIntoRoot(root: Y.Map<unknown>, parsed: Deck): void {
+  root.set('id', parsed.id)
+  root.set('title', parsed.title)
+  root.set('version', parsed.version)
+
+  const size = new Y.Map<unknown>()
+  root.set('size', size)
+  writeFields(size, parsed.size)
+
+  const theme = new Y.Map<unknown>()
+  root.set('theme', theme)
+  writeFields(theme, parsed.theme)
+
+  const sections: YSections = new Y.Array<Y.Map<unknown>>()
+  root.set('sections', sections)
+  for (const s of parsed.sections) {
+    const m = new Y.Map<unknown>()
+    sections.push([m])
+    writeFields(m, s as PlainObject)
+  }
+
+  const slides: YSlides = new Y.Map<Y.Map<unknown>>()
+  root.set('slides', slides)
+  const orders = generateNKeysBetween(null, null, parsed.slides.length)
+  parsed.slides.forEach((s, i) => {
+    const m = new Y.Map<unknown>()
+    slides.set(s.id, m)
+    writeSlideInto(m, s, orders[i]!)
+  })
+}
+
 export function deckToYDoc(deck: Deck): Y.Doc {
   const parsed = DeckSchema.parse(deck)
   const doc = new Y.Doc()
+  doc.transact(() => writeDeckIntoRoot(getDeckMap(doc), parsed))
+  return doc
+}
+
+/**
+ * Replaces the whole content of a live document with `deck`, in one transaction with `origin`.
+ * Used by version restore. The deck is validated first, so a bad target changes nothing. Yjs merges
+ * this with concurrent edits: the result is the target, plus whatever a collaborator typed at the same moment.
+ */
+export function replaceDeckContent(doc: Y.Doc, deck: Deck, origin: unknown): void {
+  const parsed = DeckSchema.parse(deck)
   doc.transact(() => {
     const root = getDeckMap(doc)
-    root.set('id', parsed.id)
-    root.set('title', parsed.title)
-    root.set('version', parsed.version)
-
-    const size = new Y.Map<unknown>()
-    root.set('size', size)
-    writeFields(size, parsed.size)
-
-    const theme = new Y.Map<unknown>()
-    root.set('theme', theme)
-    writeFields(theme, parsed.theme)
-
-    const sections: YSections = new Y.Array<Y.Map<unknown>>()
-    root.set('sections', sections)
-    for (const s of parsed.sections) {
-      const m = new Y.Map<unknown>()
-      sections.push([m])
-      writeFields(m, s as PlainObject)
-    }
-
-    const slides: YSlides = new Y.Map<Y.Map<unknown>>()
-    root.set('slides', slides)
-    const orders = generateNKeysBetween(null, null, parsed.slides.length)
-    parsed.slides.forEach((s, i) => {
-      const m = new Y.Map<unknown>()
-      slides.set(s.id, m)
-      writeSlideInto(m, s, orders[i]!)
-    })
-  })
-  return doc
+    for (const key of [...root.keys()]) root.delete(key)
+    writeDeckIntoRoot(root, parsed)
+  }, origin)
 }
 
 export interface SlideEntry {

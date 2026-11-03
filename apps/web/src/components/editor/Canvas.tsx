@@ -10,6 +10,7 @@ import { CANVAS_H, CANVAS_W } from './commands.ts'
 import type { PresencePeer } from './collab-session.ts'
 import { SlideSurface } from './ElementView.tsx'
 import { TextEditor } from './TextEditor.tsx'
+import { CommentPins, type Pin } from './comments/CommentPins.tsx'
 
 export type Geometry = { x: number; y: number; w: number; h: number; rotation: number }
 
@@ -32,13 +33,16 @@ export interface CanvasProps {
   onCursor: (point: { x: number; y: number } | null) => void
   /** Right-click on an element. The element is selected first. */
   onElementContextMenu?: (x: number, y: number, el: Element) => void
+  /** Comment pins for this slide. */
+  pins?: Pin[]
+  onPinPick?: (threadId: string) => void
 }
 
 // 100% zoom shows the stage 1280 px wide.
 const PERCENT_SCALE = 1280 / CANVAS_W / 100
 
 export function SlideCanvas(props: CanvasProps) {
-  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor, onElementContextMenu } = props
+  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor, onElementContextMenu, pins, onPinPick } = props
   const outerRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [available, setAvailable] = useState({ w: 900, h: 600 })
@@ -236,6 +240,7 @@ export function SlideCanvas(props: CanvasProps) {
           />
         )}
         <PresenceLayer slide={slide} scale={scale} peers={peers} />
+        {pins && pins.length > 0 && onPinPick && <CommentPins pins={pins} scale={scale} onPick={onPinPick} />}
         {target && stageRef.current && !readOnly && (
           <Moveable
             target={target}

@@ -33,12 +33,33 @@ export class CollabInternalError extends Error {
 }
 
 export interface CollabInternalClient {
-  /** Applies deck-ops as `server:<actor>`. Connected clients see the change live. All-or-nothing. */
-  applyOps(deckId: string, actor: string, ops: readonly unknown[]): Promise<{ ok: true; results: OpResult[] }>
+  /**
+   * Applies deck-ops as `server:<actor>`. Connected clients see the change live. All-or-nothing.
+   * `userId` is the person the change is for, when there is one (version checkpoints record the last editors).
+   */
+  applyOps(deckId: string, actor: string, ops: readonly unknown[], userId?: string): Promise<{ ok: true; results: OpResult[] }>
   /** The current deck, as the collab service sees it. */
   getDeck(deckId: string): Promise<Deck>
   /** Re-checks the roles of users connected to a deck and downgrades, upgrades or closes them. */
   revalidate(deckId: string): Promise<RevalidateResult>
+  /** A named version of the live state. */
+  snapshot(deckId: string, input: { userId: string; name: string }): Promise<{ id: string; createdAt: string }>
+  /** Replaces the deck's content with `deck` (validated by the collab service), after keeping "Before restore". */
+  restore(deckId: string, input: { userId: string; deck: Deck }): Promise<{ ok: true; beforeSnapshotId: string }>
+  /** Sends a stateless message to everyone connected to the deck. */
+  broadcast(deckId: string, payload: Record<string, unknown>): Promise<{ delivered: number }>
+  /** A remote command for a presenter session (next, prev, first, last). */
+  remoteCommand(deckId: string, sid: string, action: 'next' | 'prev' | 'first' | 'last'): Promise<{ delivered: number }>
+  /** The last state the presenter reported on its remote channel, or null. */
+  remoteState(deckId: string, sid: string): Promise<{ state: RemoteStateReport; ageMs: number } | { state: null; ageMs: null }>
+}
+
+export interface RemoteStateReport {
+  slide: number
+  total: number
+  slideId: string
+  notes: string
+  title: string
 }
 
 export function createCollabInternalClient(options: { baseUrl: string; secret: string; fetch?: typeof fetch }): CollabInternalClient {
@@ -62,15 +83,32 @@ export function createCollabInternalClient(options: { baseUrl: string; secret: s
     return payload as T
   }
 
+  const path = (deckId: string, rest: string) => `/internal/decks/${encodeURIComponent(deckId)}/${rest}`
+
   return {
-    applyOps(deckId, actor, ops) {
-      return call(`POST`, `/internal/decks/${encodeURIComponent(deckId)}/ops`, { actor, ops: [...ops] })
+    applyOps(deckId, actor, ops, userId) {
+      return call('POST', path(deckId, 'ops'), { actor, ops: [...ops], ...(userId ? { userId } : {}) })
     },
     getDeck(deckId) {
-      return call('GET', `/internal/decks/${encodeURIComponent(deckId)}/json`)
+      return call('GET', path(deckId, 'json'))
     },
     revalidate(deckId) {
-      return call('POST', `/internal/decks/${encodeURIComponent(deckId)}/revalidate`)
+      return call('POST', path(deckId, 'revalidate'))
+    },
+    snapshot(deckId, input) {
+      return call('POST', path(deckId, 'snapshot'), input)
+    },
+    restore(deckId, input) {
+      return call('POST', path(deckId, 'restore'), { userId: input.userId, deck: input.deck })
+    },
+    broadcast(deckId, payload) {
+      return call('POST', path(deckId, 'broadcast'), { payload })
+    },
+    remoteCommand(deckId, sid, action) {
+      return call('POST', path(deckId, `remote/${encodeURIComponent(sid)}/command`), { action })
+    },
+    remoteState(deckId, sid) {
+      return call('GET', path(deckId, `remote/${encodeURIComponent(sid)}/state`))
     },
   }
 }

@@ -13,14 +13,18 @@ import {
   canGrant,
   createExportJob,
   createInvite,
+  createThread,
   decks,
   deckMembers,
   getDeckRole,
   getAssetWithDeck,
   getExportJob,
   issueExportLink,
+  listThreadViews,
+  listVersions,
   markExportFailed,
   readDeck,
+  readVersion,
   recordMcpAudit,
   roleAtLeast,
   tokenAllowsDeck,
@@ -30,6 +34,8 @@ import {
   type TokenScope,
   type VerifiedToken,
 } from '@sleid/db'
+import { commentPlainText, validateCommentBody } from '@sleid/model'
+import { anchorFor, announceThreadChange } from '~/lib/comment-placement'
 import { CollabInternalError } from '~/lib/collab-client.server'
 import { runAbilityForDeck } from '~/lib/ai.server'
 import { ToolError } from './errors.ts'
@@ -117,7 +123,7 @@ class Call {
     const collab = this.deps.collab
     if (!collab) throw new ToolError('The live editing service is not configured on this server, so nothing was changed.')
     try {
-      const { results } = await collab.applyOps(deckId, `mcp:${this.principal.tokenId}`, parsed)
+      const { results } = await collab.applyOps(deckId, `mcp:${this.principal.tokenId}`, parsed, this.principal.userId)
       return results
     } catch (err) {
       if (err instanceof CollabInternalError && err.status === 422) {
@@ -138,6 +144,15 @@ function zodMessage(err: unknown): string {
     return issue ? `${issue.path.map(String).join('.') || 'input'}: ${issue.message}` : 'invalid input'
   }
   return err instanceof Error ? err.message : 'invalid input'
+}
+
+/** Runs a check that throws plain errors (validation helpers) and reports its message to the agent. */
+function toolValue<T>(run: () => T): T {
+  try {
+    return run()
+  } catch (err) {
+    throw new ToolError(err instanceof Error ? err.message : 'That input is not valid.')
+  }
 }
 
 /** What a thrown error means for the agent. Known problems are shown as-is; anything else is logged and hidden. */
@@ -765,6 +780,104 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
         failedSlides: run.failedSlides,
         sources: run.sources.map((s) => ({ title: s.title, url: s.url, status: s.status, words: s.wordCount })),
       })
+    },
+  )
+
+  // ---- Comments and versions ---------------------------------------------
+
+  tool(
+    'list_comments',
+    {
+      scope: 'decks:read',
+      readOnly: true,
+      description:
+        'List the comment threads of a deck: id, slide, element, whether resolved, and each comment (author, text, time). Optionally only one slide, and resolved threads too. Viewers and up can read comments.',
+      shape: {
+        deckId: deckIdField,
+        slideId: z.string().min(1).max(100).optional().describe('Only this slide. Slide ids come from get_deck.'),
+        includeResolved: z.boolean().optional().describe('Include resolved threads (default false).'),
+      },
+    },
+    async (args, call) => {
+      await call.role(args.deckId, 'viewer')
+      const threads = await listThreadViews(deps.db, args.deckId, {
+        ...(args.slideId ? { slideId: args.slideId } : {}),
+        includeResolved: args.includeResolved ?? false,
+      })
+      return asText({
+        threads: threads.map((t) => ({
+          id: t.id,
+          slideId: t.slideId,
+          elementId: t.elementId,
+          resolved: t.resolved,
+          comments: t.comments.map((c) => ({ id: c.id, author: c.authorName, text: c.deletedAt ? '(deleted)' : commentPlainText(c.body), createdAt: c.createdAt })),
+        })),
+      })
+    },
+  )
+
+  tool(
+    'add_comment',
+    {
+      scope: 'decks:write',
+      description:
+        'Start a comment thread on a slide, or on one element of that slide. The body is plain text (up to 5000 characters). Write @[Name](userId) to mention a member of the deck. Commenters, editors and owners can do this. Returns the thread id.',
+      shape: {
+        deckId: deckIdField,
+        slideId: z.string().min(1).max(100).describe('Slide id from get_deck.'),
+        elementId: z.string().min(1).max(100).optional().describe('Element id on that slide, from get_deck.'),
+        body: z.string().min(1).max(5000),
+      },
+    },
+    async (args, call) => {
+      await call.role(args.deckId, 'commenter')
+      const body = toolValue(() => validateCommentBody(args.body))
+      const deck = await call.read(args.deckId)
+      const placed = toolValue(() => anchorFor(deck, args.slideId, args.elementId ?? null, null))
+      const { threadId } = await createThread(deps.db, {
+        deckId: args.deckId,
+        authorId: principal.userId,
+        slideId: args.slideId,
+        elementId: placed.elementId,
+        anchor: placed.anchor,
+        body,
+      })
+      if (deps.collab) await announceThreadChange(deps.collab, args.deckId, threadId)
+      return asText({ threadId, slideId: args.slideId, elementId: placed.elementId, url: `${deps.publicUrl}/d/${args.deckId}` })
+    },
+  )
+
+  tool(
+    'list_versions',
+    {
+      scope: 'decks:read',
+      readOnly: true,
+      description:
+        'List the saved versions of a deck, newest first: named versions and automatic checkpoints, with their time and the people who edited. Use a versionId with restore_version. Viewers and up.',
+      shape: { deckId: deckIdField },
+    },
+    async (args, call) => {
+      await call.role(args.deckId, 'viewer')
+      const versions = await listVersions(deps.db, args.deckId, 100)
+      return asText({ versions: versions.map((v) => ({ id: v.id, kind: v.kind, name: v.name, createdAt: v.createdAt, editors: v.editors.map((e) => e.name) })) })
+    },
+  )
+
+  tool(
+    'restore_version',
+    {
+      scope: 'decks:write',
+      description:
+        'Restore a version of a deck. The deck becomes that version, live for everyone who has it open. The state before the restore is kept first as the named version "Before restore", so the restore can be undone with another restore. Editors and owners. Use list_versions for ids.',
+      shape: { deckId: deckIdField, versionId: z.uuid() },
+    },
+    async (args, call) => {
+      await call.role(args.deckId, 'editor')
+      const version = await readVersion(deps.db, args.deckId, args.versionId)
+      if (!version) throw new ToolError('That version was not found in this deck.')
+      if (!deps.collab) throw new ToolError('The live editing service is not configured on this server, so nothing was restored.')
+      const result = await deps.collab.restore(args.deckId, { userId: principal.userId, deck: version.deck })
+      return asText({ ok: true, restored: version.name ?? version.createdAt.toISOString(), beforeSnapshotId: result.beforeSnapshotId })
     },
   )
 

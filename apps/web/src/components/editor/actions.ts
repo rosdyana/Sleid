@@ -23,12 +23,13 @@ import {
   CANVAS_W,
 } from './commands.ts'
 import type { CollabSession } from './collab-session.ts'
+import { newSessionId, audienceUrl, presenterUrl } from '~/components/present/present-channel'
 
 export interface UiState {
   showNotes: boolean
   showGuides: boolean
   zoom: 'fit' | number
-  sidePanel: 'format' | 'slide' | 'theme' | 'ai'
+  sidePanel: 'format' | 'slide' | 'theme' | 'ai' | 'comments' | 'history'
   dataElementId: string | null
   section: string | null
 }
@@ -411,9 +412,16 @@ export function createActions(c: ActionContext) {
     if (format === 'markdown') downloadText(`${base}.md`, 'text/markdown', deckToMarkdown(deck))
   }
 
+  /** Opens the audience window. It gets a presenter session, so the presenter view and the phone remote can join it. */
   function present(fromStart = false) {
     const n = fromStart ? 1 : slideIndex(deck, slide.id) + 1
-    window.open(`/d/${c.deckId}/present?slide=${n}`, '_blank', 'noopener')
+    window.open(audienceUrl(c.deckId, newSessionId(), n), '_blank', 'noopener')
+  }
+
+  /** Opens the presenter view (notes, next slide, timer, phone remote) with a new session. */
+  function presenterView() {
+    const n = slideIndex(deck, slide.id) + 1
+    window.open(presenterUrl(c.deckId, newSessionId(), n), '_blank', 'noopener')
   }
 
   async function renameDeck(title: string) {
@@ -520,6 +528,7 @@ export function createActions(c: ActionContext) {
     makeCopy,
     download,
     present,
+    presenterView,
     renameDeck,
     setStarred,
     setTheme,

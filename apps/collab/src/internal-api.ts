@@ -8,23 +8,49 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Hocuspocus } from '@hocuspocus/server'
-import { applyOps, OpError, yDocToDeck } from '@sleid/model'
-import { canEdit, getDeckRole, type Db } from '@sleid/db'
+import * as Y from 'yjs'
+import { applyOps, DeckSchema, OpError, replaceDeckContent, yDocToDeck } from '@sleid/model'
+import { canEdit, getDeckRole, loadDeckState, writeSnapshot, BEFORE_RESTORE_NAME, type Db } from '@sleid/db'
 import { z } from 'zod'
 import type { ConnectionContext, Logger } from './hooks.ts'
+import type { RemoteStateStore } from './remote-state.ts'
 
 const MAX_BODY_BYTES = 1024 * 1024
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const OpsBody = z.object({
   actor: z.string().trim().min(1).max(100),
   ops: z.array(z.unknown()).min(1).max(500),
+  /** The user the change is made for, when there is one (MCP calls). Used for version checkpoints. */
+  userId: z.string().min(1).max(200).optional(),
 })
+const SnapshotBody = z.object({
+  userId: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(100),
+})
+const RestoreBody = z.object({
+  userId: z.string().min(1).max(200),
+  deck: z.unknown(),
+})
+const BroadcastBody = z.object({ payload: z.record(z.string(), z.unknown()) })
+const REMOTE_ACTIONS = ['next', 'prev', 'first', 'last'] as const
+const CommandBody = z.object({ action: z.enum(REMOTE_ACTIONS) })
+const MAX_BROADCAST_BYTES = 8 * 1024
+const SID = /^[A-Za-z0-9_-]{16,64}$/
+export const RESTORE_ORIGIN = 'server:restore'
 
 export interface InternalApiOptions {
   hocuspocus: Hocuspocus
   db: Db
   internalSecret: string
   logger: Logger
+  remoteStates: RemoteStateStore
+}
+
+/** A deck's state for a snapshot: the live document when someone has it open, otherwise the saved state. */
+export async function snapshotState(hocuspocus: Hocuspocus, db: Db, deckId: string): Promise<Uint8Array> {
+  const live = hocuspocus.documents.get(deckId)
+  if (live) return Y.encodeStateAsUpdate(live)
+  return loadDeckState(db, deckId)
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {
@@ -55,13 +81,24 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-export function createInternalHandler({ hocuspocus, db, internalSecret, logger }: InternalApiOptions) {
+export function createInternalHandler({ hocuspocus, db, internalSecret, logger, remoteStates }: InternalApiOptions) {
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       if (!secretMatches(req.headers['x-sleid-internal'], internalSecret)) return send(res, 401, { error: 'unauthorized' })
 
       const url = new URL(req.url ?? '/', 'http://internal')
-      const match = /^\/internal\/decks\/([^/]+)\/(ops|json|revalidate)$/.exec(url.pathname)
+      const remote = /^\/internal\/decks\/([^/]+)\/remote\/([^/]+)\/(command|state)$/.exec(url.pathname)
+      if (remote) {
+        const deckId = decodeURIComponent(remote[1]!)
+        const sid = decodeURIComponent(remote[2]!)
+        if (!UUID.test(deckId)) return send(res, 400, { error: 'deckId must be a uuid' })
+        if (!SID.test(sid)) return send(res, 400, { error: 'session id is not valid' })
+        if (remote[3] === 'command' && req.method === 'POST') return await handleCommand(req, res, deckId, sid)
+        if (remote[3] === 'state' && req.method === 'GET') return send(res, 200, remoteStates.get(deckId, sid) ?? { state: null, ageMs: null })
+        return send(res, 405, { error: 'method not allowed' })
+      }
+
+      const match = /^\/internal\/decks\/([^/]+)\/(ops|json|revalidate|snapshot|restore|broadcast)$/.exec(url.pathname)
       if (!match) return send(res, 404, { error: 'not found' })
       const deckId = decodeURIComponent(match[1]!)
       const action = match[2]!
@@ -70,6 +107,9 @@ export function createInternalHandler({ hocuspocus, db, internalSecret, logger }
       if (action === 'ops' && req.method === 'POST') return await handleOps(req, res, deckId)
       if (action === 'json' && req.method === 'GET') return await handleJson(res, deckId)
       if (action === 'revalidate' && req.method === 'POST') return await handleRevalidate(res, deckId)
+      if (action === 'snapshot' && req.method === 'POST') return await handleSnapshot(req, res, deckId)
+      if (action === 'restore' && req.method === 'POST') return await handleRestore(req, res, deckId)
+      if (action === 'broadcast' && req.method === 'POST') return await handleBroadcast(req, res, deckId)
       return send(res, 405, { error: 'method not allowed' })
     } catch (err) {
       const status = typeof (err as { status?: unknown }).status === 'number' ? (err as { status: number }).status : 500
@@ -81,11 +121,11 @@ export function createInternalHandler({ hocuspocus, db, internalSecret, logger }
   async function handleOps(req: IncomingMessage, res: ServerResponse, deckId: string) {
     const parsed = OpsBody.safeParse(await readJson(req))
     if (!parsed.success) return send(res, 400, { error: 'body must be { actor: string, ops: array }' })
-    const { actor, ops } = parsed.data
+    const { actor, ops, userId } = parsed.data
 
     let direct
     try {
-      direct = await hocuspocus.openDirectConnection(deckId, { actor })
+      direct = await hocuspocus.openDirectConnection(deckId, { actor, userId })
     } catch {
       return send(res, 404, { error: 'Deck not found' })
     }
@@ -148,5 +188,83 @@ export function createInternalHandler({ hocuspocus, db, internalSecret, logger }
       connection.context = { ...context, role }
     }
     return send(res, 200, { connections: document.getConnectionsCount(), downgraded, upgraded, closed })
+  }
+
+  /** Named version: the live state (including edits not yet saved), kept as a snapshot. */
+  async function handleSnapshot(req: IncomingMessage, res: ServerResponse, deckId: string) {
+    const parsed = SnapshotBody.safeParse(await readJson(req))
+    if (!parsed.success) return send(res, 400, { error: 'body must be { userId: string, name: string }' })
+    const state = await snapshotStateOrNotFound(res, deckId)
+    if (!state) return
+    const { id, createdAt } = await writeSnapshot(db, deckId, state, { kind: 'named', name: parsed.data.name, createdBy: parsed.data.userId, editors: [parsed.data.userId] })
+    return send(res, 200, { id, createdAt: createdAt.toISOString() })
+  }
+
+  /**
+   * Restore: the deck's content becomes the target, in one transaction on the live document, so connected clients
+   * update at once. The current state is kept first as the named version "Before restore". The target is validated
+   * before anything is written, so a bad target changes nothing.
+   */
+  async function handleRestore(req: IncomingMessage, res: ServerResponse, deckId: string) {
+    const parsed = RestoreBody.safeParse(await readJson(req))
+    if (!parsed.success) return send(res, 400, { error: 'body must be { userId: string, deck: object }' })
+    const target = DeckSchema.safeParse({ ...(parsed.data.deck as object), id: deckId })
+    if (!target.success) return send(res, 422, { error: `the version is not a valid deck: ${target.error.issues[0]?.message ?? 'invalid'}` })
+    const userId = parsed.data.userId
+
+    let direct
+    try {
+      direct = await hocuspocus.openDirectConnection(deckId, { actor: 'restore', userId })
+    } catch {
+      return send(res, 404, { error: 'Deck not found' })
+    }
+    try {
+      const doc = direct.document
+      if (!doc) throw new Error('document is not available')
+      const before = await writeSnapshot(db, deckId, Y.encodeStateAsUpdate(doc), {
+        kind: 'auto',
+        name: BEFORE_RESTORE_NAME,
+        createdBy: userId,
+        editors: [userId],
+      })
+      replaceDeckContent(doc, target.data, RESTORE_ORIGIN)
+      return send(res, 200, { ok: true, beforeSnapshotId: before.id })
+    } finally {
+      await direct.disconnect({ unloadImmediately: false })
+    }
+  }
+
+  /** Sends a stateless message to everyone connected to the deck (comments, remote). Returns how many connections it reached. */
+  async function handleBroadcast(req: IncomingMessage, res: ServerResponse, deckId: string) {
+    const parsed = BroadcastBody.safeParse(await readJson(req))
+    if (!parsed.success) return send(res, 400, { error: 'body must be { payload: object }' })
+    const text = JSON.stringify(parsed.data.payload)
+    if (Buffer.byteLength(text) > MAX_BROADCAST_BYTES) return send(res, 413, { error: 'payload is too large' })
+    const doc = hocuspocus.documents.get(deckId)
+    if (!doc) return send(res, 200, { delivered: 0 })
+    doc.broadcastStateless(text)
+    return send(res, 200, { delivered: doc.getConnectionsCount() })
+  }
+
+  /** A remote command from the phone (already checked by the web app): broadcast to the presenter window(s). */
+  async function handleCommand(req: IncomingMessage, res: ServerResponse, deckId: string, sid: string) {
+    const parsed = CommandBody.safeParse(await readJson(req))
+    if (!parsed.success) return send(res, 400, { error: 'body must be { action: next | prev | first | last }' })
+    const doc = hocuspocus.documents.get(deckId)
+    if (!doc) return send(res, 200, { delivered: 0 })
+    doc.broadcastStateless(JSON.stringify({ channel: `remote:${sid}`, type: 'command', action: parsed.data.action, at: Date.now() }))
+    return send(res, 200, { delivered: doc.getConnectionsCount() })
+  }
+
+  async function snapshotStateOrNotFound(res: ServerResponse, deckId: string): Promise<Uint8Array | null> {
+    try {
+      return await snapshotState(hocuspocus, db, deckId)
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Deck not found') {
+        send(res, 404, { error: 'Deck not found' })
+        return null
+      }
+      throw err
+    }
   }
 }

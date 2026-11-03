@@ -14,7 +14,7 @@ Living document. Update it as decisions change.
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | **Done** (checks run, see M4 below; open gaps and unverified items listed there) |
 | 5. MCP server + access tokens | **Done** (checks run, see M5 below; open gaps and unverified items listed there) |
 | 6. Wizard + reference ingestion + research | **Done** (checks run, see M6 below; open items listed there, including the research check on a live search provider and the visual defects of live run 3) |
-| 7. Comments, version history, presenter + phone remote | Pending |
+| 7. Comments, version history, presenter + phone remote | **Done** (checks run, see M7 below; open items and unverified parts listed there) |
 | 8. Import: PPTX, Google Slides, Markdown | Pending |
 | 9. Templates and brand kits | Pending |
 
@@ -89,7 +89,7 @@ Scope: slide ordering in `packages/model`, persistence API in `apps/web`, and th
 **Persistence (Part 2).** `apps/web/src/lib/deck-doc.server.ts`, `deck-doc.functions.ts`.
 - State = latest `deck_snapshots` row merged with every remaining `deck_updates` row (`Y.mergeUpdates`). Loads run in one REPEATABLE READ transaction, so a concurrent compaction cannot make them disagree.
 - Appends and compaction both update the `decks` row first. That row lock serialises writers per deck, so compaction sees every committed update, and nothing can be appended between its read and its delete.
-- Compaction runs when the update log passes 200 rows. It writes a new snapshot and deletes the updates it folded in. Old snapshots are kept, since M7 version history needs them. Storage grows with every compaction; pruning is not decided.
+- Compaction runs when the update log passes 200 rows. It writes a new snapshot and deletes the updates it folded in. Old snapshots were kept for M7 history at the time; M7 decided that compaction states are not history, so only the newest is kept (see M7).
 - The first open of a deck with no snapshot creates one from `createDeck(decks.title)`, with the doc `id` set to the deck id.
 - `appendDeckUpdate(deckId, update, title)` takes a third argument, the doc title. It writes `decks.title` in the same transaction, so the list title follows the document. The plan's signature had no title argument; this is the one deviation in Part 2.
 - `pushDeckUpdateFn` (editor+) checks base64 and the 2 MB byte cap, applies the update to a copy of the state, and rejects it unless `yDocToDeck` still parses. `getDeckStateFn` (viewer+) returns the base64 state. `copyDeckFn` (viewer+) copies the state into a new deck owned by the caller.
@@ -212,11 +212,11 @@ Scope: live co-editing through Hocuspocus (`apps/collab`), presence, roles end t
 - **Edits made offline** live in the browser's document until the connection returns. Closing the tab while offline loses them, and the page asks for confirmation when there are unsaved changes.
 - **The token is checked at connect.** A live connection stays open past the token's five-minute expiry. Role changes are re-checked by `revalidate`, but a token expiry is not enforced on live connections. The provider reconnects with a new token.
 - **Presence colours and cursors are client-chosen.** Identity is stamped by the server; the rest is not checked.
-- **Present reads the persisted state** (`getDeckStateFn`), so it can miss the last ~2 seconds of live edits.
+- **Present reads the persisted state** (`getDeckStateFn`), so it can miss the last ~2 seconds of live edits. **Resolved in M7:** present and presenter now read the live document through the collab service when it is up (see M7).
 - **Single collab process.** The per-document state vectors live in memory. Two collab processes on one deck would each store, which is not supported.
 - **No email for invites.** Pending invites appear when the invited address signs in.
 - **Dashboard titles** come from the database at page load. They lag the document by up to ~2 seconds.
-- **Commenter UI** is read-only, the same as viewer. Comments are M7.
+- **Commenter UI** is read-only, the same as viewer. **Resolved in M7:** commenters get the Commenting badge and can comment.
 - **Viewers see the people list** in the share dialog (without invite controls or tokens).
 - **Store of an unparseable deck** is logged and kept (see above).
 - **Undo** still merges nothing across users: a local undo can overwrite a remote change to the same key, as in M1a.
@@ -1098,3 +1098,127 @@ Visual review of every slide (contact sheet, and full size for slides 3, 4 and 6
 - The note's "✨ Ask AI" wording (see above).
 - The "pending" theme op is lost if the first slide batch is refused. That was there before this pass and is unchanged.
 - The Wikipedia figure check is one run against one page; the page can change.
+
+### What M7 built, and decisions taken while building it
+
+Scope: comments (threads, pins, mentions, resolve, MCP), version history (automatic checkpoints, retention, named versions, preview, restore, MCP), and presenter mode with a phone remote and a follow link. Branch `m7-collab-extras`, one commit, not pushed.
+
+**Layout.**
+- `packages/model`: `comment-text.ts` (mention markup, the comment markdown subset, plain text, validation), `deck-compare.ts` (version diff), `ydoc.ts` (`replaceDeckContent`, the restore writer, sharing the deck writer with `deckToYDoc`).
+- `packages/db`: schema `schema/comments.ts` (`comment_threads`, `comments`, `comment_mention_reads`) and `schema/remote.ts` (`remote_sessions`); `schema/decks.ts` (`deck_snapshots.kind`, `deck_snapshots.editors`); modules `snapshots.ts` (checkpoints, retention, listing, preview read, pruning), `comments.ts`, `remote-session.ts` (token and session rows); `permissions.ts` (`canComment`, `canResolveComments`). Migration `0010_m7_comments_versions_remote.sql`.
+- `apps/collab`: `checkpoints.ts` (the timing scheduler), `remote-state.ts` (last presenter state, in memory), `hooks.ts` (`onChange` for editors, `onStateless` for presenter state), `internal-api.ts` (snapshot, restore, broadcast, remote command and state).
+- `apps/worker`: `retention.ts` (daily: version retention and removal of expired remote sessions).
+- `apps/web`: `comments.functions.ts`, `comments.server.ts`, `comment-placement.ts`, `versions.functions.ts`, `remote.functions.ts`, `remote.server.ts` (token and session checks, rate limit, phone handlers), `remote.deps.server.ts`, the phone API routes `api/remote/$token/{state,command}.ts`; editor components `components/editor/comments/*`, `HistoryPanel.tsx`, `history-model.ts`; present components `present-channel.ts`, `remote-channel.ts`, `RemotePanel.tsx`, `PresenterView.tsx`; routes `_authed/d/$deckId/presenter.tsx`, `r/$token.tsx`; the MCP tools in `lib/mcp/server.ts`.
+
+**Comments.**
+- **Data.** Threads hold the slide, an optional element, the anchor `{x, y}` in slide coordinates (1920 by 1080), resolution, and the creator. Comments hold the author, the body (at most 5000 characters, also enforced by a database check constraint), the mention ids, edit time and a soft-delete time. Deleting keeps the row, so a thread keeps its shape for everyone.
+- **Mentions.** A mention is the markup `@[Name](userId)`, written by the mention picker. The server reads the ids from the body, keeps only the ids of current deck members, and stores them. A mention is never trusted from the client. Mention notifications are in-app only: a badge on the Comments tab and on the dashboard, and a Mentions list. Opening the list records the time, and mentions newer than that are unread.
+- **Permissions.** Commenters, editors and owners start threads and reply. A user edits or deletes only their own comments (the author check is in the data layer, so it holds for every role). Editors and owners resolve or reopen. Viewers read. The role checks are in the server functions and the MCP tools, through the same role helpers as the rest of the app.
+- **Live.** A write goes to the database, then the collab service broadcasts `{channel: 'comments', type: 'comments', threadId}` as a stateless message to every connection on the deck. Each client fetches that one thread again and replaces it locally. The broadcast is best effort: if the collab service is down, the write still stands and collaborators see it on their next load.
+- **Pins and anchors.** A thread on an element is pinned to the element's top-right corner when it is created, and the pin stays there if the element moves later. A slide thread is pinned to the centre unless the client gives an anchor. Pins are numbered per slide in creation order, the same number as in the panel.
+- **Removed things.** A thread whose element is deleted stays and says "element removed". A thread whose slide is gone (for example after a restore) stays and says "slide removed". Neither is deleted.
+- **Commenter mode.** A commenter opens the editor read-only with the "Commenting" badge and the Comments tab open. The fieldset that disables editing does not wrap the comment panels.
+
+**Version history.**
+- **Checkpoints** (`checkpoints.ts`, fake-clock tests). The first edit by an authenticated user starts two timers: an idle timer of two minutes, restarted by each edit, and a maximum of ten minutes. Whichever fires first writes an automatic checkpoint and clears both. The next edit starts them again. So a steady stream of edits gives a checkpoint about every ten minutes, and a pause gives one two minutes after it begins. A load does not count as an edit (its change has no user), so opening a deck writes nothing. The checkpoint is the live document's full state (so unsaved edits are included), written under the deck row lock. Its editors are the five most recent distinct users who edited (`deck_snapshots.editors`), and its author is the most recent one. MCP edits count as the token's user when the internal call names one.
+- **Named versions** are snapshots of the live state with a name. "Before restore" is an automatic snapshot with a name set, so it is kept like a named version.
+- **Retention** (`snapshotsToKeep`, pure and tested with a fixed clock, plus database tests). The newest snapshot of any kind is always kept, because a load starts from it.
+
+| Kind | Kept |
+|---|---|
+| Named, or any snapshot with a name (including "Before restore") | Forever |
+| Automatic, up to 24 hours old | All |
+| Automatic, 1 to 7 days old | The newest per clock hour |
+| Automatic, 7 to 90 days old | The newest per UTC day |
+| Automatic, older than 90 days | Deleted |
+| Internal (first open, log compaction) | Only the newest one in the deck |
+
+  The job (`apps/worker/src/retention.ts`) runs one minute after the worker starts and then every 24 hours. Each deck is pruned under its row lock. Phone-remote session rows older than a day are removed in the same run. This is a decision: M1b's note said old compaction snapshots are kept for M7 history. They are not history (the automatic checkpoints are), and keeping every compaction state would grow storage without a reader for them.
+- **Restore** (`handleRestore` in the collab internal API). The target deck is validated first, so a bad target writes nothing and returns 422. Then the current live state is saved as "Before restore", and the live document's content is replaced in one transaction with origin `server:restore` (`replaceDeckContent`). The result is exactly the target deck, and connected clients converge through the normal update path. The spec allowed this in place of deck-ops. Restore is not part of the local undo stack, which tracks only local edits, so Undo does not revert it. To go back, restore "Before restore".
+- **Preview and diff.** A preview reads the snapshot and renders it read-only in the canvas, with the toolbar, formula bar, side panel and filmstrip edit actions disabled. The summary compares it with the current deck: slides only in the version, slides only in the current deck, slides changed, and whether the title differs. Viewers may preview; only editors and owners restore or name versions.
+- **Listing.** History lists named versions first, then automatic checkpoints grouped by day, with the editors' initials. The list is fetched when the tab opens, after a naming or a restore, and on Refresh. It does not poll, so a checkpoint written while the tab is open appears on the next refresh.
+
+**Presenter mode and phone remote.**
+- **Presenter view.** The audience window (`/d/<id>/present`) is the reveal.js presentation. The presenter view (`/d/<id>/presenter`) shows the current and next slide, the notes, the elapsed time and clock, the slide counter, Prev and Next, and the remote panel. The two windows talk over `BroadcastChannel('sleid-present:<sid>')`. The presenter view needs no collab connection, because the audience window does the collab work. S in the audience window opens the presenter view for the same session. A session id is random (16 bytes), and a link without one gets one.
+- **Notes popup.** The reveal.js notes plugin is no longer loaded, so the S key does not compete with its popup. The popup was not tested in a browser before this change, so whether it would have been blocked is not known. The in-app view replaces it either way.
+- **Live deck.** The present and presenter routes read the live document through the collab service when it is up (`getPresentDeckFn`), and the saved state otherwise. A presentation opened right after an edit or a restore therefore shows the current deck. This resolves the M2 gap for these routes. The check that found it: after a restore, the audience window showed the four-slide state from before it.
+- **Remote channel.** The phone does not open a collab socket. It has no login, and a collab token would need one. So the phone talks HTTP to the web app (`/api/remote/<token>/state` and `/command`), and the web app forwards each command to the collab internal API, which broadcasts `{channel: 'remote:<sid>', type: 'command', action}` to the deck. The audience window receives it and moves the reveal. The audience window publishes its state (slide, total, notes, title) on the same channel, and the collab service keeps the last state in memory for the phone (`remote-state.ts`, two hours at most) and relays it to everyone on the deck. The audience window sends its state every three seconds (a heartbeat), because the phone treats a presenter silent for ten seconds as not open, and a late follower needs the current slide.
+- **Follow.** A viewer opens `/d/<id>/present?follow=<sid>`. It connects read-only and moves to each state the presenter reports. It cannot control the presenter.
+- **Remote security.**
+  - A remote token is `base64url(claims).base64url(HMAC-SHA256)`, with the claims `{deckId, sid, userId, exp}`. The HMAC key is derived from `COLLAB_TOKEN_SECRET` with a fixed label, so a collab token is never valid as a remote token (tested).
+  - The token lasts 30 minutes. `createRemoteSessionFn` issues it to any user who can present (viewers and up), for their own session.
+  - Each session has a row in `remote_sessions`. Closing the remote, or closing the presenter window (on `pagehide`), sets `revoked_at`. Every command and state read checks the row (not revoked, same deck, same user), then the user's current role on the deck. A removed presenter is refused on the next call.
+  - Commands are limited to 20 per session per 10 seconds, per web process (the same in-memory fixed window as MCP).
+  - Clients cannot send commands. The collab service accepts from clients only a `remote:` state message of a fixed shape, at most 16 KB, and drops everything else.
+  - The phone page sends no referrer and is not indexed. The shared root layout still loads the Google Fonts stylesheet, as every page does.
+  - The token is in the URL path, so it can reach server logs and browser history. This is accepted and documented in the README.
+- **Deviations and limits.**
+  - The reveal notes popup is not used (see above).
+  - The phone's Next moves reveal one step, so a fragment counts as a step.
+  - Hidden slides are not checked in the presentation.
+
+**MCP.** `list_comments` (`decks:read`, viewers and up), `add_comment` (`decks:write`, commenters and up), `list_versions` (`decks:read`), `restore_version` (`decks:write`, editors and owners). The tool list in `mcp.integration.test.ts` now has 23 names, and one new integration test covers a commenter, a viewer, an editor and a bad version id, with a real collab write.
+
+**Schema and migration.** Migration `0010` creates `comment_threads`, `comments` (with the length check and a GIN index on `mentions`), `comment_mention_reads`, and `remote_sessions`, and adds `deck_snapshots.kind` (default `internal`, so existing rows are internal) and `deck_snapshots.editors`. `drizzle-kit generate` produced it, and it was applied to the local database.
+
+**Deviations from the M7 brief.**
+- `comments.mentions` and `deck_snapshots.editors` are `text[]`, not `uuid[]`. User ids are text (Better Auth), as everywhere else in the schema.
+- The phone's commands go through the web app and the collab internal API (described above), not through a collab socket from the phone.
+- Present and presenter read the live deck (above).
+- Restore uses `replaceDeckContent`, a single transaction, instead of a diff of ops. The brief allowed either.
+- The diff summary compares the version with the current deck, one way: slides only in the version, only in the current deck, changed.
+- "Before restore" is an automatic snapshot with a name, not a named one. The brief called it a named auto version.
+- Compaction states are not history (see retention).
+- `deck_snapshots.kind` has three values: `auto`, `named`, and `internal` (new, for first-open and compaction states).
+- `getDeckStateFn` and the base64 helper were removed when the present routes changed. Nothing else used them.
+
+**Known gaps and limitations (decisions to revisit).**
+- **A viewer who knows a session id can change what the phone shows** (the slide and notes) until the presenter's next heartbeat, three seconds later. The session id is in the follow link, which viewers have. The phone cannot be controlled this way, and the presenter's own window is not affected. The fix is a per-session key that only the presenter holds. Not built.
+- **Presenter state is in memory per collab process.** A collab restart clears it. The audience window's heartbeat puts it back within three seconds, while that window is open.
+- **Rate limit and command counts are per web process.** Several web processes get the limit each.
+- **Snapshot size.** Every automatic checkpoint and named version stores the full document state, not a delta. A deck with large images (images are stored as data URLs in the document) makes large snapshots, and the retention policy can keep several hundred for one deck (an estimate). Storage was not measured.
+- **Thread loading** reads all threads of a deck in one call, with no paging.
+- **Mentions** are resolved when the comment is written. A person added to the deck later is not mentioned in older comments.
+- **Undo does not revert a restore**, and a local Undo after a restore can re-apply an earlier local edit over the restored content. Not checked in a browser.
+- **Notifications** are the in-app badge and the Mentions list only (as the brief said). There is no email.
+- **Multi-process collab** is still unsupported (as in M2). The checkpoint timers and the remote state live in one process.
+- **The retention job** was tested with fake timers and with a prune of one deck in the real database. It has not run on its own in a worker for a day.
+
+### M7 verification
+
+Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0.0.1:5433), Google Chrome (`CHROME_PATH`), used by the worker too. Dev stack: `pnpm dev` with `SLEID_TEST_AUTH=1`, a scratch `LLM_SECRET_KEY`, `LLM_USER_ALLOW_PRIVATE_URLS=1`, the collab secrets, and for the wizard `SEARXNG_URL=http://127.0.0.1:4412` and `SLEID_TEST_PRIVATE_WIZARD_URLS=1` with `node tests/fake-searxng.mjs 4412` running.
+
+- `pnpm typecheck`: exit 0 in every workspace (13 `tsc --noEmit` runs).
+- `CHROME_PATH=… pnpm test` (root): **66 files, 722 tests, all passing, none skipped** (exit 0). M6 had 53 files and 649 tests. The new coverage:
+  - `packages/model`: comment markup (mention round trip, body parsing, plain text, validation), the version diff, and `replaceDeckContent` (one update, origin, a refused target changes nothing, a concurrent edit converges).
+  - `packages/db`: retention by kind and age with a fixed clock; snapshot writes, listing without internal states, reading a version, pruning in Postgres; comment permissions by role; threads, replies, edit and delete by author only, resolve and reopen, filtering, mentions limited to members, the mention list with unread counts; remote token sign, verify, expiry, tampering, wrong secret and collab tokens refused; remote session create, reuse, revoke, pruning.
+  - `apps/collab`: checkpoint timing with fake timers (idle, maximum interval under continuous edits, restart after a checkpoint, editors, two decks, failure, dispose); the remote state store; integration against real Postgres and real Hocuspocus clients: a named version keeps unsaved edits; restore converges two connected clients to exactly the target and writes "Before restore"; a bad restore target returns 422 and writes nothing; a broadcast reaches a viewer; presenter state reaches followers and the store; a client's own command or comment message reaches nobody; an edit starts an automatic checkpoint that records its editor.
+  - `apps/worker`: the retention job's schedule with stand-ins for the prune steps, and its prune of one deck in the real database.
+  - `apps/web`: anchors and the comment broadcast; the phone's server rules against real Postgres (expired token 410, closed remote 410, lost access 403, command routing, 429 with `Retry-After` after 20 commands, 409 when no presenter window is open, presenter staleness); pins, pin numbers, the element-removed and slide-removed labels, history grouping, session ids and URLs; the MCP tool list and the comment and version integration test.
+  - Two kinds of test change were made for timing only. Two Mermaid tests that load the library cold got a 30-second timeout, because under full-suite load the first load took more than 5 seconds. The retention database test prunes its own deck, so it does not wait on every deck in the local database.
+- Browser checks against the dev stack, all passing (exit 0 each). Their output is in the session scratchpad.
+  - `smoke.mjs`: 22 checks.
+  - `collab.mjs`: 24 checks.
+  - `export.mjs`: 21 checks.
+  - `ai.mjs`: 32 checks.
+  - `mcp.mjs`: 19 checks.
+  - `wizard.mjs`: 34 checks (with the fake SearXNG, research on).
+  - `m7.mjs` (new): 45 checks, with no page or console errors. The only console entries filtered out are the phone's 410 responses after the remote is closed, which is the refusal under test.
+  - What `m7.mjs` covers. A (owner), B (commenter) and C (viewer). B pins a comment with an `@` mention of A. A sees it live, between about 100 and 250 ms after B posted it across runs (budget 3 seconds), with the Comments dot and the banner, and the filmstrip count. The dashboard shows the mention badge and the Mentions list, and opening the list clears it. A replies and resolves; B sees the thread leave its open list. A deletes the commented element and the thread says "element removed". A names v1 (History), adds a slide and a title, previews v1 (three slides, the diff text, the editing controls off), restores it, and B converges to v1 (three slides, title "Quarterly v1") without a reload. "Before restore" appears in History. A opens the audience window from Present, presses S, and gets the presenter view on the same session. A makes the remote and reads the QR link from the DOM; the QR is an SVG. A phone context (390 by 844, touch) opens the link, shows Connected and 1 / 3, taps Next twice, and the audience window is on slide 3 with the phone showing slide 3's notes. C follows the presenter: slide 3, then slide 2 after Prev, then slide 3 after Next. Closing the remote stops the phone.
+- Screenshots, in `SCREENSHOT_DIR` (`/private/tmp/claude-501/-Users-rosdyanakusuma-Ross-projects-sleid/c1400ba8-0388-449b-ad43-785f923a7331/scratchpad/shots-m7`): `comments.png`, `history-preview.png`, `presenter.png`, `phone-remote.png` (390 by 844). I looked at each. The presenter layout was fixed after the first look (the QR panel had squeezed the notes), and the first comment screenshot showed a typing bug in the mention caret (fixed, and the test now checks the full comment text).
+- Fixes made during the run, each covered by a rerun: the mention caret placement; the toolbar and side panel are disabled during a version preview; the Comments and History tabs fit the panel; the present and presenter routes read the live deck; the presenter heartbeat; the presenter column layout; the timestamp width in History.
+
+### Unverified in M7
+
+- The reveal.js notes popup: not checked in a browser (see the decision above).
+- Firefox and Safari. Chrome only.
+- A real phone and a real network. The phone was emulated in Chrome with a 390 by 844 touch viewport.
+- A QR code scanned by a camera. The URL was read from the DOM and checked.
+- Long decks, many threads, and a deck with large images: performance and snapshot size.
+- Two web processes or two collab processes (the limits are per process, as above).
+- The retention job running daily in a worker over real time.
+- Undo after a restore, in a browser.
+- Hidden slides in presentations, the phone and follow mode.
+- A follower who joins mid-presentation while the heartbeat is the only source of state (the follow check started after the presenter's last change, so it relied on the heartbeat).
+- Mentions of a person added to the deck after the comment was written.
+- Notifications beyond the in-app badge and list (no email, as the brief said).

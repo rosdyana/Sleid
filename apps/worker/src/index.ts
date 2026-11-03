@@ -7,6 +7,7 @@ import { createBrowserPool } from './browser.ts'
 import { consoleLogger } from './logger.ts'
 import { startExportService } from './service.ts'
 import { startWizardService } from './wizard/service.ts'
+import { startSnapshotRetention } from './retention.ts'
 import { createWizardCollab } from './wizard/collab.ts'
 import { createSearchProvider, researchFromEnv } from '@sleid/research'
 
@@ -52,10 +53,13 @@ const wizardService = config.live
   : null
 if (!config.live) consoleLogger.warn('COLLAB_INTERNAL_SECRET is not set: the wizard cannot generate decks (it needs the collab service)')
 
+const retention = startSnapshotRetention({ db, logger: consoleLogger })
+
 let stopping = false
 async function shutdown() {
   if (stopping) return
   stopping = true
+  await retention.stop()
   await service.stop()
   await wizardService?.stop()
   await db.$client.end({ timeout: 2 })

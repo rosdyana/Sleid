@@ -27,6 +27,12 @@ export interface MenuDeps {
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
+  /** Commenters: Comment stays enabled. Viewers do not get it. */
+  commenting: boolean
+  startComment: () => void
+  showHistory: () => void
+  nameVersion: () => void
+  presenterView: () => void
   /** The assistant's Tools items. Only passed for editors and owners; viewers get them disabled. */
   ai?: {
     openPanel: () => void
@@ -56,6 +62,8 @@ const VIEWER_ITEMS = new Set([
   'JPG (.jpg)',
   'Present from beginning',
   'Present from current slide',
+  'Presenter view',
+  'Show version history',
   'Show speaker notes',
   'Show grid and guides',
   'Fit',
@@ -68,22 +76,22 @@ const VIEWER_ITEMS = new Set([
   'Keyboard shortcuts',
 ])
 
-function restrictForViewer(menus: Menu[]): Menu[] {
+function restrictForViewer(menus: Menu[], commenting: boolean): Menu[] {
+  const allowed = commenting ? new Set([...VIEWER_ITEMS, 'Comment']) : VIEWER_ITEMS
   const walk = (entries: MenuEntry[]): MenuEntry[] =>
     entries.map((entry) => {
       if (entry.kind === 'group') return { ...entry, items: walk(entry.items) }
       if (entry.kind === 'sep') return entry
       const plain = entry.label.replace(/^✓ /, '')
-      if (entry.disabled || VIEWER_ITEMS.has(plain)) return entry
+      if (entry.disabled || allowed.has(plain)) return entry
       return { ...entry, disabled: true, note: entry.note ?? 'View only' }
     })
   return menus.map((m) => ({ ...m, items: walk(m.items) }))
 }
 
 export function buildMenus(d: MenuDeps): Menu[] {
-  const a = d.actions
   const menus: Menu[] = buildAllMenus(d)
-  return d.readOnly ? restrictForViewer(menus) : menus
+  return d.readOnly ? restrictForViewer(menus, d.commenting) : menus
 }
 
 function buildAllMenus(d: MenuDeps): Menu[] {
@@ -113,6 +121,8 @@ function buildAllMenus(d: MenuDeps): Menu[] {
         ]),
         sep,
         item('Rename', d.focusTitle),
+        sep,
+        group('Version history', [item('Show version history', d.showHistory), item('Name current version…', d.nameVersion)]),
       ],
     },
     {
@@ -135,6 +145,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
       items: [
         item('Present from beginning', () => a.present(true), 'F5'),
         item('Present from current slide', () => a.present(false)),
+        item('Presenter view', d.presenterView),
         sep,
         { kind: 'item', label: `${d.ui.showNotes ? '✓ ' : ''}Show speaker notes`, onSelect: () => d.setUi({ showNotes: !d.ui.showNotes }) },
         { kind: 'item', label: `${d.ui.showGuides ? '✓ ' : ''}Show grid and guides`, onSelect: () => d.setUi({ showGuides: !d.ui.showGuides }) },
@@ -154,6 +165,8 @@ function buildAllMenus(d: MenuDeps): Menu[] {
     {
       label: 'Insert',
       items: [
+        item('Comment', d.startComment, 'Ctrl+Alt+M'),
+        sep,
         item('Text box', a.insertText),
         group('Image', [item('From URL…', a.insertImageUrl), item('Upload (up to 10 MB)…', d.pickImage)]),
         group(

@@ -81,6 +81,7 @@ export class CollabSession {
   private hasSynced = false
   private status: SyncStatus = { kind: 'connecting' }
   private statusListeners = new Set<() => void>()
+  private statelessListeners = new Set<(payload: string) => void>()
   private peers: PresencePeer[] = []
   private peerListeners = new Set<() => void>()
   private cursorTimer: ReturnType<typeof setTimeout> | undefined
@@ -114,6 +115,9 @@ export class CollabSession {
       },
       onUnsyncedChanges: () => this.refreshStatus(),
       onAuthenticationFailed: ({ reason }) => this.setStatus({ kind: 'denied', reason }),
+      onStateless: ({ payload }: { payload: string }) => {
+        for (const listener of this.statelessListeners) listener(payload)
+      },
     })
     this.awareness.on('change', this.onAwarenessChange)
     this.refreshPeers()
@@ -180,6 +184,12 @@ export class CollabSession {
   subscribeStatus(listener: () => void): () => void {
     this.statusListeners.add(listener)
     return () => this.statusListeners.delete(listener)
+  }
+
+  /** Messages the server broadcasts to the deck (comment changes). The payload is the JSON text the sender wrote. */
+  subscribeStateless(listener: (payload: string) => void): () => void {
+    this.statelessListeners.add(listener)
+    return () => this.statelessListeners.delete(listener)
   }
 
   getPeers(): PresencePeer[] {

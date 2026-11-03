@@ -4,11 +4,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import WebSocket from 'ws'
 import * as Y from 'yjs'
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider'
-import { applyOps, yDocToDeck, type Deck } from '@sleid/model'
-import { count, eq } from 'drizzle-orm'
-import { COLLAB_TOKEN_TTL_SECONDS, createInvite, deckUpdates, decks, grantMembership, loadDeckState, redeemShareLink, setGeneralAccess, setMemberRole, removeMember, signCollabToken, type DeckRole, type Db } from '@sleid/db'
+import { applyOps, createDeck, yDocToDeck, type Deck } from '@sleid/model'
+import { and, count, eq } from 'drizzle-orm'
+import { BEFORE_RESTORE_NAME, COLLAB_TOKEN_TTL_SECONDS, createInvite, deckSnapshots, deckUpdates, decks, grantMembership, listVersions, loadDeckState, redeemShareLink, setGeneralAccess, setMemberRole, removeMember, signCollabToken, type DeckRole, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createCollabServer, type CollabServer } from './server.ts'
+import { RemoteStateStore } from './remote-state.ts'
 import { CollabInternalError, createCollabInternalClient } from '../../web/src/lib/collab-client.server.ts'
 
 const TOKEN_SECRET = 'integration-token-secret-0123456789abcdef'
@@ -309,5 +310,148 @@ describe('collab server (real Postgres, in-process Hocuspocus)', () => {
     // The explicitly invited editor keeps working.
     applyOps(x.doc, [{ op: 'setTitle', title: 'still editing' }], 'local')
     await waitFor(() => yDocToDeck(o.doc).title === 'still editing', 'explicit member still syncs', 5000)
+  })
+
+  it('a named version keeps the live state, including edits that are not saved yet', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('named-owner')
+    const deckId = await makeDeck(db, owner.id, 'Named')
+    const o = await connectAs(deckId, owner.id, 'owner')
+    applyOps(o.doc, [{ op: 'setTitle', title: 'Typed just now' }], 'local')
+    const saved = await internal().snapshot(deckId, { userId: owner.id, name: 'v1' })
+    expect(saved.id).toBeTruthy()
+    const versions = await listVersions(db, deckId)
+    expect(versions).toHaveLength(1)
+    expect(versions[0]).toMatchObject({ id: saved.id, kind: 'named', name: 'v1' })
+    const [row] = await db.select({ ydoc: deckSnapshots.ydoc }).from(deckSnapshots).where(eq(deckSnapshots.id, saved.id))
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, row!.ydoc)
+    expect(yDocToDeck(doc).title).toBe('Typed just now')
+  })
+
+  it('restore makes connected clients show the target, keeps "Before restore", and refuses a bad target', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('restore-owner')
+    const editor = await person('restore-editor')
+    const deckId = await makeDeck(db, owner.id, 'Restore')
+    await db.transaction((tx) => grantMembership(tx, deckId, editor.id, 'editor'))
+    const a = await connectAs(deckId, owner.id, 'owner')
+    const b = await connectAs(deckId, editor.id, 'editor')
+    applyOps(a.doc, [{ op: 'setTitle', title: 'Current title' }], 'local')
+    await waitFor(() => yDocToDeck(b.doc).title === 'Current title', 'editor sees the current title')
+
+    const target: Deck = { ...createDeck('Version one'), id: deckId, slides: createDeck('x').slides.map((s) => ({ ...s, id: 'v1-slide' })) }
+    const result = await internal().restore(deckId, { userId: owner.id, deck: target })
+    expect(result.ok).toBe(true)
+
+    await waitFor(() => JSON.stringify(yDocToDeck(b.doc)) === JSON.stringify(target), 'editor converges to the restored version', 5000)
+    expect(JSON.stringify(yDocToDeck(a.doc))).toBe(JSON.stringify(target))
+    const versions = await listVersions(db, deckId)
+    const before = versions.find((v) => v.name === BEFORE_RESTORE_NAME)
+    expect(before).toMatchObject({ kind: 'auto', createdBy: { id: owner.id } })
+    expect(before!.id).toBe(result.beforeSnapshotId)
+
+    const countBefore = (await db.select({ n: count() }).from(deckSnapshots).where(eq(deckSnapshots.deckId, deckId)))[0]!.n
+    const bad = await fetch(`${server!.internalUrl}/internal/decks/${deckId}/restore`, {
+      method: 'POST',
+      headers: { 'x-sleid-internal': INTERNAL_SECRET, 'content-type': 'application/json' },
+      body: JSON.stringify({ userId: owner.id, deck: { title: 'not a deck' } }),
+    })
+    expect(bad.status).toBe(422)
+    expect((await db.select({ n: count() }).from(deckSnapshots).where(eq(deckSnapshots.deckId, deckId)))[0]!.n).toBe(countBefore)
+    expect(JSON.stringify(yDocToDeck(a.doc))).toBe(JSON.stringify(target))
+  })
+
+  it('a broadcast reaches every connected client as a stateless message', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('bcast-owner')
+    const viewer = await person('bcast-viewer')
+    const deckId = await makeDeck(db, owner.id, 'Broadcast')
+    await db.transaction((tx) => grantMembership(tx, deckId, viewer.id, 'viewer'))
+    const o = await connectAs(deckId, owner.id, 'owner')
+    const v = await connectAs(deckId, viewer.id, 'viewer')
+    const seen: string[] = []
+    v.provider.on('stateless', ({ payload }: { payload: string }) => seen.push(payload))
+    const result = await internal().broadcast(deckId, { channel: 'comments', type: 'comments', threadId: 'thread-1' })
+    expect(result.delivered).toBeGreaterThanOrEqual(2)
+    await waitFor(() => seen.length === 1, 'viewer got the broadcast')
+    expect(JSON.parse(seen[0]!)).toEqual({ channel: 'comments', type: 'comments', threadId: 'thread-1' })
+    void o
+  })
+
+  it('presenter state is kept for the phone and relayed to followers; commands reach the presenter; other client messages are dropped', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('remote-owner')
+    const follower = await person('remote-follower')
+    const deckId = await makeDeck(db, owner.id, 'Remote channel')
+    await db.transaction((tx) => grantMembership(tx, deckId, follower.id, 'viewer'))
+    const sid = 'remote-sid-0123456789ab'
+    const presenter = await connectAs(deckId, owner.id, 'owner')
+    const watcher = await connectAs(deckId, follower.id, 'viewer')
+    const commands: string[] = []
+    const relayed: string[] = []
+    const dropped: string[] = []
+    presenter.provider.on('stateless', ({ payload }: { payload: string }) => commands.push(payload))
+    watcher.provider.on('stateless', ({ payload }: { payload: string }) => {
+      if (payload.includes('"type":"state"')) relayed.push(payload)
+      if (payload.includes('spoofed')) dropped.push(payload)
+    })
+
+    presenter.provider.sendStateless(JSON.stringify({ channel: `remote:${sid}`, type: 'state', slide: 2, total: 5, slideId: 'slide-2', notes: 'Notes here', title: 'Deck' }))
+    await waitFor(() => relayed.length === 1, 'follower receives the relayed state')
+    const stored = await internal().remoteState(deckId, sid)
+    expect(stored.state).toMatchObject({ slide: 2, total: 5, notes: 'Notes here' })
+
+    // Commands come only from the internal API. A client that sends one itself reaches nobody.
+    watcher.provider.sendStateless(JSON.stringify({ channel: `remote:${sid}`, type: 'command', action: 'next', spoofed: true }))
+    watcher.provider.sendStateless(JSON.stringify({ channel: 'comments', type: 'comments', threadId: 'spoofed' }))
+    await sleep(300)
+    expect(dropped).toEqual([])
+    expect(commands.some((c) => c.includes('spoofed'))).toBe(false)
+
+    await internal().remoteCommand(deckId, sid, 'next')
+    await waitFor(() => commands.some((c) => c.includes('"action":"next"')), 'presenter receives the next command')
+    expect(JSON.parse(commands.find((c) => c.includes('"action":"next"'))!)).toMatchObject({ channel: `remote:${sid}`, type: 'command', action: 'next' })
+  })
+
+  it('an edit by a user starts an automatic checkpoint that records them as an editor', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('auto-owner')
+    const deckId = await makeDeck(db, owner.id, 'Automatic')
+    const quick = await createCollabServer({
+      db,
+      tokenSecret: TOKEN_SECRET,
+      internalSecret: INTERNAL_SECRET,
+      host: '127.0.0.1',
+      port: 0,
+      internalHost: '127.0.0.1',
+      internalPort: 0,
+      debounceMs: 100,
+      maxDebounceMs: 300,
+      checkpointIdleMs: 400,
+      checkpointMaxIntervalMs: 60_000,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    try {
+      const doc = new Y.Doc()
+      const socket = new HocuspocusProviderWebsocket({ url: quick.wsUrl, WebSocketPolyfill: WebSocket, maxAttempts: 1 })
+      sockets.push(socket)
+      const provider = new HocuspocusProvider({ name: deckId, document: doc, websocketProvider: socket, token: tokenFor(owner.id, deckId, 'owner', 'Owner') })
+      providers.push(provider)
+      provider.attach()
+      await waitFor(() => provider.isSynced, 'quick server synced')
+      await sleep(200)
+      const before = (await listVersions(db, deckId)).length
+      applyOps(doc, [{ op: 'setTitle', title: 'Changed' }], 'local')
+      await waitFor(() => quick.checkpoints.pending() === 1, 'the edit is noted for a checkpoint', 5000)
+      await waitFor(() => quick.checkpoints.pending() === 0, 'checkpoint timer finished', 5000)
+      await sleep(300)
+      const versions = await listVersions(db, deckId)
+      expect(versions.length).toBeGreaterThan(before)
+      expect(versions[0]).toMatchObject({ kind: 'auto', createdBy: { id: owner.id } })
+      expect(versions[0]!.editors.map((e) => e.id)).toEqual([owner.id])
+    } finally {
+      await quick.close()
+    }
   })
 })

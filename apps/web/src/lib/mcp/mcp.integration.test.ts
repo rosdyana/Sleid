@@ -16,7 +16,9 @@ import JSZip from 'jszip'
 import {
   createApiToken,
   deckMembers,
+  deckSnapshots,
   getExportJob,
+  grantMembership,
   listMcpAudit,
   revokeApiToken,
   type Db,
@@ -214,6 +216,7 @@ describe('MCP over Streamable HTTP', () => {
     const names = tools.map((t) => t.name).sort()
     expect(names).toEqual(
       [
+        'add_comment',
         'add_slide',
         'apply_ops',
         'create_deck',
@@ -226,9 +229,12 @@ describe('MCP over Streamable HTTP', () => {
         'insert_chart',
         'insert_diagram',
         'insert_image',
+        'list_comments',
         'list_decks',
+        'list_versions',
         'move_slide',
         'render_slide',
+        'restore_version',
         'set_notes',
         'set_theme',
         'share_deck',
@@ -644,4 +650,54 @@ describe('MCP create_deck_from_prompt', () => {
       await model.close()
     }
   }, 120_000)
+
+  it('comments and versions: a commenter starts a thread, a viewer reads it but cannot write, and only an editor restores', async (ctx) => {
+    if (!db || !collab) return ctx.skip()
+    const owner = await person('mcp-m7-owner')
+    const commenter = await person('mcp-m7-commenter')
+    const viewer = await person('mcp-m7-viewer')
+    const deckId = await makeDeck(db, owner.id, 'M7 through MCP')
+    await db.transaction(async (tx) => {
+      await grantMembership(tx, deckId, commenter.id, 'commenter')
+      await grantMembership(tx, deckId, viewer.id, 'viewer')
+    })
+    const ownerMcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write']))
+    const commenterMcp = await client(await tokenFor(commenter.id, ['decks:read', 'decks:write']))
+    const viewerMcp = await client(await tokenFor(viewer.id, ['decks:read', 'decks:write']))
+
+    const slideId = (await collab.getDeck(deckId)).slides[0]!.id
+    const added = await tool(commenterMcp, 'add_comment', { deckId, slideId, body: `Please check the numbers, ${'@[Owner](' + owner.id + ')'}` })
+    expect(added.isError).toBeFalsy()
+    const threadId = jsonOf(added).threadId as string
+    expect(threadId).toMatch(/^[0-9a-f-]{36}$/)
+
+    const listed = jsonOf(await tool(viewerMcp, 'list_comments', { deckId, slideId }))
+    const threads = listed.threads as Array<{ id: string; comments: Array<{ text: string; author: string }> }>
+    expect(threads.map((t) => t.id)).toEqual([threadId])
+    expect(threads[0]!.comments[0]).toMatchObject({ author: 'mcp-m7-commenter', text: 'Please check the numbers, @Owner' })
+
+    const viewerTry = await tool(viewerMcp, 'add_comment', { deckId, slideId, body: 'viewers cannot comment' })
+    expect(viewerTry.isError).toBe(true)
+    expect(textOf(viewerTry)).toContain('commenter')
+
+    // Versions: name the live state, change it, then a commenter cannot restore and the owner can.
+    const named = await collab.snapshot(deckId, { userId: owner.id, name: 'v1' })
+    await collab.applyOps(deckId, 'test', [{ op: 'setTitle', title: 'Changed after v1' }])
+    const versions = jsonOf(await tool(viewerMcp, 'list_versions', { deckId }))
+    expect((versions.versions as Array<{ id: string; name: string | null }>).map((v) => v.name)).toContain('v1')
+
+    const denied = await tool(commenterMcp, 'restore_version', { deckId, versionId: named.id })
+    expect(denied.isError).toBe(true)
+    expect(textOf(denied)).toContain('editor')
+
+    const restored = await tool(ownerMcp, 'restore_version', { deckId, versionId: named.id })
+    expect(restored.isError).toBeFalsy()
+    expect(jsonOf(restored)).toMatchObject({ ok: true, restored: 'v1' })
+    expect((await collab.getDeck(deckId)).title).toBe('M7 through MCP')
+    const after = await db.select({ name: deckSnapshots.name }).from(deckSnapshots).where(eq(deckSnapshots.deckId, deckId))
+    expect(after.map((r) => r.name)).toContain('Before restore')
+
+    const badVersion = await tool(ownerMcp, 'restore_version', { deckId, versionId: '00000000-0000-4000-8000-000000000000' })
+    expect(badVersion.isError).toBe(true)
+  })
 })

@@ -2,7 +2,9 @@
 // write guard that runs before any client update is applied.
 import * as Y from 'yjs'
 import { yDocToDeck } from '@sleid/model'
+import { z } from 'zod'
 import { appendDeckUpdate, canEdit, CollabTokenError, loadDeckState, verifyCollabToken, type Db, getDeckRole } from '@sleid/db'
+import type { RemoteStateStore } from './remote-state.ts'
 
 export interface Logger {
   info(message: string): void
@@ -30,17 +32,34 @@ const EMPTY_STATE_VECTOR = Y.encodeStateVector(new Y.Doc())
 /** Yjs message types that carry document content: SyncStep2 (1) and Update (2). */
 const CONTENT_MESSAGE_TYPES = new Set([1, 2])
 
+/** Largest stateless message accepted from a client. Presenter state is a few hundred bytes. */
+const MAX_STATELESS_BYTES = 16 * 1024
+
+/** A presenter's state report on its remote channel. Anything else a client sends on stateless is dropped. */
+const RemoteStateMessage = z.object({
+  channel: z.string().regex(/^remote:[A-Za-z0-9_-]{16,64}$/),
+  type: z.literal('state'),
+  slide: z.number().int().min(1).max(10000),
+  total: z.number().int().min(1).max(10000),
+  slideId: z.string().min(1).max(100),
+  notes: z.string().max(5000),
+  title: z.string().max(200),
+})
+
 export interface HooksOptions {
   db: Db
   tokenSecret: string
   logger: Logger
+  /** Called for each edit by an authenticated user (drives the automatic checkpoints). */
+  onEdit?: (deckId: string, userId: string) => void
+  remoteStates: RemoteStateStore
 }
 
 /**
  * Creates the hook set for one server. The lastStored map is per server instance:
  * it holds, for each loaded document, the state vector that the database already has.
  */
-export function createHooks({ db, tokenSecret, logger }: HooksOptions) {
+export function createHooks({ db, tokenSecret, logger, onEdit, remoteStates }: HooksOptions) {
   const lastStored = new Map<string, Uint8Array>()
 
   return {
@@ -102,6 +121,35 @@ export function createHooks({ db, tokenSecret, logger }: HooksOptions) {
 
     async afterUnloadDocument({ documentName }: { documentName: string }) {
       lastStored.delete(documentName)
+    },
+
+    /**
+     * Every document change. Only changes with an authenticated user count as edits. A load has no user on it,
+     * so opening a deck does not start a checkpoint.
+     */
+    async onChange({ update, documentName, context }: { update: Uint8Array; documentName: string; context: ConnectionContext | undefined }) {
+      if (update.byteLength === 0 || !context?.userId) return
+      onEdit?.(documentName, context.userId)
+    },
+
+    /**
+     * Presenter state for the phone remote and for followers. The state is kept for the phone to poll, and sent to
+     * everyone on the deck so followers can keep up. Other stateless messages from clients are dropped: commands
+     * come only from the web app, through the internal API.
+     */
+    async onStateless({ payload, documentName, document }: { payload: string; documentName: string; document: Y.Doc & { broadcastStateless(p: string): void } }) {
+      if (payload.length > MAX_STATELESS_BYTES) return
+      let raw: unknown
+      try {
+        raw = JSON.parse(payload)
+      } catch {
+        return
+      }
+      const parsed = RemoteStateMessage.safeParse(raw)
+      if (!parsed.success) return
+      const { channel, slide, total, slideId, notes, title } = parsed.data
+      remoteStates.set(documentName, channel.slice('remote:'.length), { slide, total, slideId, notes, title })
+      document.broadcastStateless(payload)
     },
 
     /**

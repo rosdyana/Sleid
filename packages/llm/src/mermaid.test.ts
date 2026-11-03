@@ -19,7 +19,8 @@ describe('validateMermaid', () => {
     'timeline\n  2024 : Launch',
     'journey\n  title Day\n  section Morning\n    Coffee: 5: Me',
     'quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Low --> High\n  Campaign A: [0.3, 0.6]',
-  ])('accepts %j', async (source) => {
+  ])('accepts %j', { timeout: 30_000 }, async (source) => {
+    // The first call in a worker loads the whole Mermaid library, which can take longer than the default 5 s under load.
     expect(await validateMermaid(source)).toEqual({ ok: true })
   })
 

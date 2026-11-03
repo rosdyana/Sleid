@@ -25,9 +25,19 @@ export function canEdit(role: DeckRole): boolean {
   return roleAtLeast(role, 'editor')
 }
 
-/** Commenters and viewers open a read-only editor. Comments themselves arrive in M7. */
+/** Commenters and viewers open a read-only editor. Commenters can still comment. */
 export function isReadOnlyRole(role: DeckRole): boolean {
   return !canEdit(role)
+}
+
+/** Commenters, editors and owners can start threads and reply. Viewers read comments only. */
+export function canComment(role: DeckRole): boolean {
+  return roleAtLeast(role, 'commenter')
+}
+
+/** Editors and owners resolve or reopen any thread. Authors edit and delete their own comments, whatever their role. */
+export function canResolveComments(role: DeckRole): boolean {
+  return roleAtLeast(role, 'editor')
 }
 
 /** Editors and owners can invite people. */

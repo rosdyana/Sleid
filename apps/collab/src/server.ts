@@ -2,9 +2,11 @@
 // by the integration tests, which run it in-process on random ports.
 import { createServer, type Server as HttpServer } from 'node:http'
 import { Server, type Hocuspocus } from '@hocuspocus/server'
-import type { Db } from '@sleid/db'
+import { writeSnapshot, type Db } from '@sleid/db'
 import { createHooks, type Logger } from './hooks.ts'
-import { createInternalHandler } from './internal-api.ts'
+import { createInternalHandler, snapshotState } from './internal-api.ts'
+import { createCheckpointScheduler, type CheckpointScheduler } from './checkpoints.ts'
+import { RemoteStateStore } from './remote-state.ts'
 
 export interface CollabServerOptions {
   db: Db
@@ -18,6 +20,9 @@ export interface CollabServerOptions {
   debounceMs?: number
   /** Longest a store may be postponed by constant typing, ms. Production default 10000. */
   maxDebounceMs?: number
+  /** Automatic checkpoint timing (see checkpoints.ts). Production defaults: 2 minutes idle, 10 minutes at most. */
+  checkpointIdleMs?: number
+  checkpointMaxIntervalMs?: number
   logger?: Logger
 }
 
@@ -27,6 +32,8 @@ export interface CollabServer {
   wsUrl: string
   /** http:// URL of the internal API. */
   internalUrl: string
+  /** Automatic checkpoints still waiting for their timer (for tests). */
+  checkpoints: CheckpointScheduler
   close(): Promise<void>
 }
 
@@ -41,7 +48,25 @@ const MAX_FRAME_BYTES = 3 * 1024 * 1024
 
 export async function createCollabServer(options: CollabServerOptions): Promise<CollabServer> {
   const logger = options.logger ?? consoleLogger
-  const hooks = createHooks({ db: options.db, tokenSecret: options.tokenSecret, logger })
+  const remoteStates = new RemoteStateStore()
+  let hocuspocus: Hocuspocus | undefined
+  const checkpoints = createCheckpointScheduler({
+    idleMs: options.checkpointIdleMs,
+    maxIntervalMs: options.checkpointMaxIntervalMs,
+    onCheckpoint: async (deckId, editors) => {
+      if (!hocuspocus) return
+      const state = await snapshotState(hocuspocus, options.db, deckId)
+      await writeSnapshot(options.db, deckId, state, { kind: 'auto', createdBy: editors[0] ?? null, editors })
+    },
+    onError: (deckId, err) => logger.error(`[collab] automatic checkpoint for deck ${deckId} failed`, err),
+  })
+  const hooks = createHooks({
+    db: options.db,
+    tokenSecret: options.tokenSecret,
+    logger,
+    remoteStates,
+    onEdit: (deckId, userId) => checkpoints.noteEdit(deckId, userId),
+  })
 
   const server = new Server({
     port: options.port ?? 3001,
@@ -54,10 +79,10 @@ export async function createCollabServer(options: CollabServerOptions): Promise<
     websocketOptions: { maxPayload: MAX_FRAME_BYTES },
     ...hooks,
   })
-  const hocuspocus = await server.listen()
+  hocuspocus = await server.listen()
 
   const internal: HttpServer = createServer(
-    createInternalHandler({ hocuspocus, db: options.db, internalSecret: options.internalSecret, logger }),
+    createInternalHandler({ hocuspocus, db: options.db, internalSecret: options.internalSecret, logger, remoteStates }),
   )
   await new Promise<void>((resolve, reject) => {
     internal.once('error', reject)
@@ -71,7 +96,9 @@ export async function createCollabServer(options: CollabServerOptions): Promise<
     hocuspocus,
     wsUrl: `ws://${displayHost(options.host)}:${wsAddress.port}`,
     internalUrl: `http://${displayHost(options.internalHost)}:${internalAddress.port}`,
+    checkpoints,
     async close() {
+      checkpoints.dispose()
       await new Promise<void>((resolve) => internal.close(() => resolve()))
       await server.destroy()
     },

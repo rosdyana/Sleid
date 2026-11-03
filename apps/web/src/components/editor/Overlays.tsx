@@ -134,6 +134,7 @@ export function PromptDialog({ request, onClose }: { request: PromptRequest; onC
 }
 
 export const SHORTCUTS: Array<[string, string]> = [
+  ['Cmd/Ctrl + Alt + M', 'Comment on the selected element, or on the slide'],
   ['Cmd/Ctrl + Z', 'Undo'],
   ['Cmd/Ctrl + Shift + Z, or Ctrl + Y', 'Redo'],
   ['Cmd/Ctrl + C, X, V', 'Copy, cut, paste elements'],
@@ -145,6 +146,7 @@ export const SHORTCUTS: Array<[string, string]> = [
   ['Cmd/Ctrl + Enter', 'New slide after the current one'],
   ['Escape', 'Clear the selection or close a dialog'],
   ['F5', 'Present from the first slide'],
+  ['S (in the presentation window)', 'Open the presenter view for that presentation'],
 ]
 
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {

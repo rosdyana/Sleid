@@ -26,6 +26,7 @@ export function TitleBar({
   status,
   peers,
   readOnly,
+  commenting,
   titleRef,
   onRename,
   onStar,
@@ -40,6 +41,8 @@ export function TitleBar({
   status: SyncStatus
   peers: PresencePeer[]
   readOnly: boolean
+  /** Commenters: read-only, but they can comment. The badge says so. */
+  commenting?: boolean
   titleRef: RefObject<HTMLInputElement | null>
   onRename: (title: string) => void
   onStar: () => void
@@ -90,8 +93,12 @@ export function TitleBar({
             <Star size={16} className={starred ? 'fill-current' : ''} aria-hidden />
           </button>
           {readOnly && (
-            <span className="ml-1 rounded-full border border-rule px-2 py-0.5 text-[11px] font-medium text-ink-muted" title="You can look at this deck but not change it">
-              View only
+            <span
+              data-testid="access-badge"
+              className="ml-1 rounded-full border border-rule px-2 py-0.5 text-[11px] font-medium text-ink-muted"
+              title={commenting ? 'You can comment on this deck but not change it' : 'You can look at this deck but not change it'}
+            >
+              {commenting ? 'Commenting' : 'View only'}
             </span>
           )}
         </div>

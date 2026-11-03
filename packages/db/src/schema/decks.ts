@@ -92,7 +92,13 @@ export const invites = pgTable('invites', {
   acceptedAt: timestamp('accepted_at', { withTimezone: true }),
 })
 
-/** Full Yjs document state at a point in time. `name` is set for named versions. */
+/**
+ * What a snapshot is for. auto: a checkpoint written by the collab service (history, pruned by the retention policy).
+ * named: a version the user named. internal: first-open and compaction states, kept only as the newest one (see snapshots.ts).
+ */
+export const snapshotKind = pgEnum('snapshot_kind', ['auto', 'named', 'internal'])
+
+/** Full Yjs document state at a point in time. `name` is set for named versions and for "Before restore". */
 export const deckSnapshots = pgTable(
   'deck_snapshots',
   {
@@ -104,6 +110,9 @@ export const deckSnapshots = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
     name: text('name'),
+    kind: snapshotKind('kind').notNull().default('internal'),
+    /** Most recent editors when an auto checkpoint was written, newest first (at most five). */
+    editors: text('editors').array().notNull().default(sql`'{}'`),
   },
   (t) => [index('deck_snapshots_deck_id_idx').on(t.deckId, t.createdAt)],
 )

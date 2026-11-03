@@ -3,8 +3,9 @@
 // selection, the keyboard map and the overlays. Everything the user can do is an action in
 // actions.ts, which builds deck-ops and applies them through the session.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { ChartElement, Deck, Element as SlideElement, RichText } from '@sleid/model'
-import { isReadOnlyRole, type DeckRole } from '@sleid/db/permissions'
+import type { ChartElement, Deck, Element as SlideElement, RichText, VersionDiff } from '@sleid/model'
+import type { ThreadView, VersionEntry } from '@sleid/db'
+import { canComment as roleCanComment, isReadOnlyRole, type DeckRole } from '@sleid/db/permissions'
 import { createActions, currentSlide, slideIndex, type PromptRequest, type UiState } from './actions.ts'
 import { CollabSession, deniedMessage, useDeck, usePeers, useReady, useSyncStatus, useUndoState } from './collab-session.ts'
 import { Filmstrip } from './Filmstrip.tsx'
@@ -23,6 +24,11 @@ import { ExportDialog, type DialogFormat } from './ExportDialog.tsx'
 import { ExportTray, useExportJobs } from './ExportTray.tsx'
 import { getCollabTokenFn } from '~/lib/collab.functions'
 import { setStarredFn } from '~/lib/decks.functions'
+import { nameVersionFn, previewVersionFn, restoreVersionFn } from '~/lib/versions.functions'
+import { CommentsPanel, elementName, pinNumbers, type PendingComment } from './comments/CommentsPanel.tsx'
+import { CommentPins, pinsFor } from './comments/CommentPins.tsx'
+import { useComments } from './comments/useComments.ts'
+import { HistoryPanel } from './HistoryPanel.tsx'
 
 export type EditorDeck = { id: string; title: string; starred: boolean; role: string }
 export type EditorUser = { id: string; name: string; email: string; image: string | null }
@@ -34,6 +40,25 @@ const DEFAULT_UI: UiState = {
   sidePanel: 'format',
   dataElementId: null,
   section: null,
+}
+
+/** A saved version opened for reading. The canvas shows its deck; nothing here changes the live document. */
+interface VersionPreview {
+  id: string
+  name: string | null
+  kind: 'auto' | 'named'
+  createdAt: string
+  deck: Deck
+  diff: VersionDiff
+}
+
+function diffSentence(diff: VersionDiff): string {
+  const parts = [
+    `${diff.onlyInVersion} ${diff.onlyInVersion === 1 ? 'slide' : 'slides'} only in this version`,
+    `${diff.onlyInCurrent} only in the current deck`,
+    `${diff.changed} changed`,
+  ]
+  return `Compared with the current deck: ${parts.join(', ')}${diff.titleChanged ? ', and the title differs' : ''}.`
 }
 
 function isEditable(target: EventTarget | null): boolean {
@@ -100,8 +125,17 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const status = useSyncStatus(session)
   const peers = usePeers(session)
   const { canUndo, canRedo } = useUndoState(session)
+  const commentable = roleCanComment(meta.role as DeckRole)
+  const comments = useComments(meta.id, session)
 
-  const [ui, setUiState] = useState<UiState>(DEFAULT_UI)
+  // Commenters open the editor in "Commenting" mode: the Comments tab is what they use.
+  const [ui, setUiState] = useState<UiState>(() => ({ ...DEFAULT_UI, sidePanel: readOnly && commentable ? 'comments' : 'format' }))
+  const [pending, setPending] = useState<PendingComment | null>(null)
+  const [focusThreadId, setFocusThreadId] = useState<string | null>(null)
+  const [commentScope, setCommentScope] = useState<'slide' | 'all'>('slide')
+  const [showResolved, setShowResolved] = useState(false)
+  const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null)
+  const [historyRefresh, setHistoryRefresh] = useState(0)
   const setUi = useCallback((patch: Partial<UiState>) => setUiState((prev) => ({ ...prev, ...patch })), [])
   const [slideIdState, setSlideId] = useState(() => deck.slides[0]?.id ?? '')
   const [selection, setSelection] = useState<string[]>([])
@@ -130,6 +164,11 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const slide = currentSlide(deck, slideIdState)
   const slideId = slide.id
   const validSelection = selection.filter((id) => slide.elements.some((e) => e.id === id))
+  const commentCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const t of comments.threads) if (!t.resolved) counts[t.slideId] = (counts[t.slideId] ?? 0) + 1
+    return counts
+  }, [comments.threads])
   const selectedEls = slide.elements.filter((e) => validSelection.includes(e.id))
   const single: SlideElement | undefined = selectedEls.length === 1 ? selectedEls[0] : undefined
   const dataChart = ui.dataElementId
@@ -151,14 +190,68 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const openPanel = useCallback(() => setUi({ sidePanel: 'ai' }), [setUi])
   const assistant = useAssistant({ deckId: meta.id, session, onOpenPanel: openPanel, toast, enabled: !readOnly })
   // While a proposal is previewed, the canvas and filmstrip show the preview's copy of the deck.
+  // While a saved version is previewed, they show that version instead.
   const preview = assistant.preview
   const viewDeck = assistant.viewDeck(deck)
-  const viewSlide = preview ? currentSlide(viewDeck, preview.slideId) : slide
+  const shownDeck = versionPreview ? versionPreview.deck : viewDeck
+  const viewSlide = versionPreview ? currentSlide(shownDeck, slideIdState) : preview ? currentSlide(viewDeck, preview.slideId) : slide
+  const blocked = versionPreview ? 'You are looking at an older version. Back to current, or restore it, first.' : undefined
   const previewCard = preview ? assistant.findCard(preview.cardId) : undefined
   const applyFromCard = (card: ProposalCard) => {
     assistant.applyCard(card)
     if (card.focusSlideId) setSlideId(card.focusSlideId)
   }
+
+  const toastFor = (err: unknown, fallback: string) => toast(err instanceof Error ? err.message : fallback)
+
+  /** Opens a new comment on the selected element, or on the slide when nothing is selected. Commenters and up. */
+  const startComment = (elementId?: string | null) => {
+    if (!commentable) return toast('Commenting needs commenter access or higher')
+    const el = elementId === undefined ? single : slide.elements.find((e) => e.id === elementId)
+    setPending({ slideId: slide.id, elementId: el?.id ?? null, label: el ? elementName(el) : `Slide ${slideIndex(deck, slide.id) + 1}` })
+    setUi({ sidePanel: 'comments' })
+  }
+
+  const previewVersion = (version: VersionEntry) => {
+    previewVersionFn({ data: { deckId: meta.id, versionId: version.id } })
+      .then((result) => {
+        setVersionPreview({ ...result.version, deck: JSON.parse(result.deckJson) as Deck, diff: result.diff })
+        setSlideId(deck.slides[0]?.id ?? slideIdState)
+        setSelection([])
+        setEditing(null)
+      })
+      .catch((err: unknown) => toastFor(err, 'Could not open that version'))
+  }
+
+  const restoreVersion = () => {
+    if (!versionPreview) return
+    const label = versionPreview.name ?? 'this version'
+    if (!window.confirm(`Restore ${label}? The current version is kept in History as "Before restore".`)) return
+    restoreVersionFn({ data: { deckId: meta.id, versionId: versionPreview.id } })
+      .then(() => {
+        setVersionPreview(null)
+        setHistoryRefresh((n) => n + 1)
+        toast('Restored. The version before it is in History as "Before restore".')
+      })
+      .catch((err: unknown) => toastFor(err, 'The version was not restored'))
+  }
+
+  const nameCurrentVersion = () =>
+    setPrompt({
+      title: 'Name current version',
+      label: 'Version name, for example "Before the client review"',
+      submitLabel: 'Save version',
+      onSubmit: (value) => {
+        const name = value.trim()
+        if (!name) return
+        nameVersionFn({ data: { deckId: meta.id, name } })
+          .then(() => {
+            toast(`Saved version "${name}"`)
+            setHistoryRefresh((n) => n + 1)
+          })
+          .catch((err: unknown) => toastFor(err, 'The version was not saved'))
+      },
+    })
 
   const actions = createActions({
     session,
@@ -182,7 +275,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
     navigate: async (href) => {
       window.location.assign(href)
     },
-    blockedReason: preview ? 'A preview is showing. Apply or discard the change first.' : undefined,
+    blockedReason: preview ? 'A preview is showing. Apply or discard the change first.' : blocked,
   })
 
   // Ask AI, context menu and Tools actions. Each one starts a proposal in the AI panel.
@@ -267,6 +360,11 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const menus = buildMenus({
     actions,
     readOnly,
+    commenting: commentable,
+    startComment: () => startComment(),
+    showHistory: () => setUi({ sidePanel: 'history' }),
+    nameVersion: nameCurrentVersion,
+    presenterView: () => actions.presenterView(),
     deck,
     canUndo,
     canRedo,
@@ -310,6 +408,17 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
       const target = e.target
       const inGrid = target instanceof HTMLElement && !!target.closest('[role=grid]')
       if (isEditable(target) && !(mod && key === 'enter')) return
+      // Cmd/Ctrl+Option+M. Matched by key code, since Option changes the character on a Mac.
+      if (mod && e.altKey && e.code === 'KeyM') {
+        e.preventDefault()
+        startComment()
+        return
+      }
+      if (versionPreview && mod && (key === 'z' || key === 'y')) {
+        // Undo and redo change the live document, which is not what the preview shows.
+        e.preventDefault()
+        return
+      }
       if (readOnly) {
         // Viewers and commenters: only keys that do not change the deck.
         if (mod && key === '/') {
@@ -432,6 +541,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         status={status}
         peers={peers}
         readOnly={readOnly}
+        commenting={commentable}
         titleRef={titleRef}
         onRename={(title) => actions.renameDeck(title)}
         onStar={() => {
@@ -455,7 +565,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         actions={actions}
         canUndo={canUndo}
         canRedo={canRedo}
-        readOnly={readOnly}
+        readOnly={readOnly || !!versionPreview}
         undo={() => session.undo()}
         redo={() => session.redo()}
       />
@@ -477,13 +587,37 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
           )}
         </div>
       )}
+      {versionPreview && (
+        <div role="region" aria-label="Version preview" data-testid="version-preview" className="flex shrink-0 flex-wrap items-center justify-between gap-3 bg-sky-100 px-3 py-1.5 text-[13px] text-sky-900">
+          <span>
+            <strong className="font-semibold">Viewing {versionPreview.name ?? 'an automatic version'}</strong>, read only. {diffSentence(versionPreview.diff)}
+          </span>
+          <span className="flex shrink-0 gap-2">
+            {!readOnly && (
+              <button type="button" onClick={restoreVersion} className="rounded bg-accent px-3 py-1 font-medium text-white hover:brightness-95">
+                Restore this version
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setVersionPreview(null)
+                setSelection([])
+              }}
+              className="rounded px-3 py-1 font-medium text-sky-900 hover:bg-sky-200"
+            >
+              Back to current
+            </button>
+          </span>
+        </div>
+      )}
       <FormulaBar
         deck={deck}
         slide={slide}
         single={single}
         actions={actions}
         setUi={setUi}
-        readOnly={readOnly}
+        readOnly={readOnly || !!versionPreview}
         onAskAi={readOnly ? undefined : () => setAskOpen((open) => !open)}
         askMenu={
           askOpen && !readOnly ? (
@@ -498,10 +632,11 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
       />
       <div className="flex min-h-0 flex-1">
         <Filmstrip
-          deck={viewDeck}
+          deck={shownDeck}
           currentSlideId={viewSlide.id}
-          readOnly={readOnly || !!preview}
+          readOnly={readOnly || !!preview || !!versionPreview}
           peers={peers}
+          commentCounts={versionPreview ? undefined : commentCounts}
           onSelect={(id) => {
             if (preview) return assistant.setPreviewSlide(id)
             setSlideId(id)
@@ -514,16 +649,23 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         />
         <SlideCanvas
           slide={viewSlide}
-          theme={viewDeck.theme}
+          theme={shownDeck.theme}
           zoom={ui.zoom}
           selection={validSelection}
           editingId={editingId}
           showGuides={ui.showGuides}
-          readOnly={readOnly || !!preview}
+          readOnly={readOnly || !!preview || !!versionPreview}
           peers={peers}
+          pins={versionPreview ? [] : pinsFor(comments.threads, slideId, pinNumbers(comments.threads), focusThreadId, showResolved)}
+          onPinPick={(threadId) => {
+            setFocusThreadId(threadId)
+            setUi({ sidePanel: 'comments' })
+          }}
           onElementContextMenu={(x, y, el) => {
-            if (readOnly || el.type !== 'text') return
-            setContext({ x, y, items: [{ kind: 'group', label: 'Rewrite', items: rewriteEntries(el.id, askHandlers) }] })
+            const items: MenuEntry[] = []
+            if (commentable) items.push({ kind: 'item', label: 'Comment', onSelect: () => startComment(el.id) })
+            if (!readOnly && el.type === 'text') items.push({ kind: 'group', label: 'Rewrite', items: rewriteEntries(el.id, askHandlers) })
+            if (items.length > 0) setContext({ x, y, items })
           }}
           onSelect={setSelection}
           onGeometry={(id, next) => actions.commitGeometry(id, next)}
@@ -543,11 +685,43 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
           ui={ui}
           setUi={setUi}
           actions={actions}
-          readOnly={readOnly}
+          readOnly={readOnly || !!versionPreview}
           aiPanel={
             readOnly ? undefined : (
               <AiPanel assistant={assistant} selectionIds={validSelection} slideId={slideId} />
             )
+          }
+          commentsAlert={comments.unread > 0}
+          commentsPanel={
+            <CommentsPanel
+              deckId={meta.id}
+              deck={deck}
+              slideId={slideId}
+              store={comments}
+              scope={commentScope}
+              onScope={setCommentScope}
+              showResolved={showResolved}
+              onShowResolved={setShowResolved}
+              pending={pending}
+              onPendingDone={() => setPending(null)}
+              onPendingCancel={() => setPending(null)}
+              focusThreadId={focusThreadId}
+              onFocus={setFocusThreadId}
+              onGoToSlide={(id) => {
+                setSlideId(id)
+                setSelection([])
+              }}
+              toast={toast}
+            />
+          }
+          historyPanel={
+            <HistoryPanel
+              deckId={meta.id}
+              activeVersionId={versionPreview?.id ?? null}
+              refreshKey={historyRefresh}
+              onPreview={previewVersion}
+              onNameCurrent={nameCurrentVersion}
+            />
           }
         />
       </div>

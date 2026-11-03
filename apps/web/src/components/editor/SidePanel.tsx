@@ -1,14 +1,9 @@
-// Right side panel: Format (selected element), Slide, Theme. The AI, Comments
-// and History tabs are visibly disabled until their milestones.
+// Right side panel: Format (selected element), Slide, Theme, AI, Comments and History. Comments and History
+// render outside the read-only fieldset, because commenters and viewers use them.
 import { useEffect, useState, type ReactNode } from 'react'
 import { ANIMATION_EFFECTS, BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
 import { CHART_LABELS, elementLabel, SHAPE_LABELS } from './commands.ts'
-
-const PLACEHOLDER_TABS = [
-  { label: 'Comments', note: 'Comments arrive in milestone 7' },
-  { label: 'History', note: 'Version history arrives in milestone 7' },
-] as const
 
 export function SidePanel({
   deck,
@@ -19,6 +14,9 @@ export function SidePanel({
   actions,
   readOnly,
   aiPanel,
+  commentsPanel,
+  historyPanel,
+  commentsAlert,
 }: {
   deck: Deck
   slide: Slide
@@ -29,51 +27,51 @@ export function SidePanel({
   readOnly: boolean
   /** The assistant panel. Only passed for editors and owners. */
   aiPanel?: ReactNode
+  /** The Comments tab. Rendered for everyone: commenters and viewers read and (for commenters) write comments. */
+  commentsPanel: ReactNode
+  historyPanel: ReactNode
+  /** Shown as a dot on the Comments tab when there are unread mentions. */
+  commentsAlert?: boolean
 }) {
   const single = selected.length === 1 ? selected[0] : undefined
-  const tabs: Array<{ id: UiState['sidePanel']; label: string }> = [
+  const tabs: Array<{ id: UiState['sidePanel']; label: string; alert?: boolean }> = [
     { id: 'format', label: 'Format' },
     { id: 'slide', label: 'Slide' },
     { id: 'theme', label: 'Theme' },
     ...(aiPanel ? [{ id: 'ai' as const, label: 'AI' }] : []),
+    { id: 'comments', label: 'Comments', alert: commentsAlert },
+    { id: 'history', label: 'History' },
   ]
   return (
     <aside aria-label="Side panel" className="flex w-72 shrink-0 flex-col border-l border-rule bg-white">
-      <div role="tablist" className="flex h-9 shrink-0 items-stretch border-b border-rule text-[12px]">
+      <div role="tablist" className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-rule text-[11.5px]">
         {tabs.map((t) => (
           <button
             key={t.id}
             role="tab"
             type="button"
             aria-selected={ui.sidePanel === t.id}
+            data-testid={`side-tab-${t.id}`}
             onClick={() => setUi({ sidePanel: t.id })}
-            className={`flex-1 border-b-2 px-2 font-medium ${ui.sidePanel === t.id ? 'border-accent text-accent' : 'border-transparent text-ink-muted hover:bg-hover'}`}
+            className={`relative shrink-0 border-b-2 px-1 font-medium ${ui.sidePanel === t.id ? 'border-accent text-accent' : 'border-transparent text-ink-muted hover:bg-hover'}`}
           >
             {t.label}
-          </button>
-        ))}
-        {PLACEHOLDER_TABS.map((t) => (
-          <button
-            key={t.label}
-            type="button"
-            role="tab"
-            aria-selected={false}
-            disabled
-            title={t.note}
-            className="flex-1 cursor-not-allowed border-b-2 border-transparent px-1 text-ink-muted/60"
-          >
-            {t.label}
+            {t.alert && <span data-testid="comments-alert" aria-label="Unread mentions" className="absolute right-1 top-1.5 size-1.5 rounded-full bg-red-500" />}
           </button>
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3 text-[13px]">
         {/* Viewers and commenters see the values but cannot change them. */}
-        <fieldset disabled={readOnly} className="flex min-h-0 min-w-0 flex-col border-0 p-0">
-          {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
-          {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
-          {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
-          {ui.sidePanel === 'ai' && aiPanel}
-        </fieldset>
+        {ui.sidePanel !== 'comments' && ui.sidePanel !== 'history' && (
+          <fieldset disabled={readOnly} className="flex min-h-0 min-w-0 flex-col border-0 p-0">
+            {ui.sidePanel === 'format' && <FormatTab single={single} selected={selected} actions={actions} setUi={setUi} />}
+            {ui.sidePanel === 'slide' && <SlideTab deck={deck} slide={slide} actions={actions} />}
+            {ui.sidePanel === 'theme' && <ThemeTab theme={deck.theme} actions={actions} />}
+            {ui.sidePanel === 'ai' && aiPanel}
+          </fieldset>
+        )}
+        {ui.sidePanel === 'comments' && commentsPanel}
+        {ui.sidePanel === 'history' && historyPanel}
       </div>
     </aside>
   )
