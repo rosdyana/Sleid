@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { LIMITS } from '@sleid/ingest'
+// The limits module only: the package root pulls in the server-side extractors (happy-dom, unpdf) which the browser cannot load.
+import { LIMITS } from '@sleid/ingest/limits'
 import { WIZARD_LAYOUTS, VISUALS, type Outline, type OutlineSlide } from '@sleid/llm/wizard-schema'
 import {
   addWizardUrlFn,

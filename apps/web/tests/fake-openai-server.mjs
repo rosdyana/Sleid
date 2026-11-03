@@ -1,7 +1,8 @@
-// A fake OpenAI-compatible server for the browser checks (tests/ai.mjs). No model is involved:
+// A fake OpenAI-compatible server for the browser checks (tests/ai.mjs, tests/wizard.mjs). No model is involved:
 // every reply is canned, chosen from the request. It handles:
 //   - the connection test ("Reply with the single word OK")
 //   - structured calls, by response_format name: slide, rewrite, chart, theme (plain, or streamed as content)
+//   - the wizard's calls (tests/wizard.mjs): queries, outline, and "slide" when the system prompt says "write slide N of M"
 //   - streamed chat turns: a tool call for "slide" or "chart" requests, then a closing reply
 // Usage from another script: const fake = await startFakeOpenAI(); fake.url, await fake.close()
 // Run alone for a manual check: node tests/fake-openai-server.mjs 4011
@@ -16,10 +17,44 @@ function lastUserText(messages) {
   return (user.content ?? []).map((p) => p.text ?? '').join(' ')
 }
 
+/** The wizard's outline: the slide count from the brief, two reference labels (S1 is the first reference). */
+function wizardOutline(system) {
+  const count = Number(/exactly (\d+) slides/.exec(system)?.[1] ?? 5)
+  const slides = Array.from({ length: count }, (_, i) => {
+    if (i === 0) return { title: 'Rooftop solar for bakeries', layout: 'title', keyPoints: [], visual: 'none', sourceRefs: [] }
+    if (i === 1) return { title: 'Bills before and after', layout: 'title-content', keyPoints: ['Bills fall after solar', 'Savings each month'], visual: 'chart', sourceRefs: ['S1'] }
+    if (i === 2) return { title: 'How the panels work', layout: 'title-content', keyPoints: ['Panels on the roof', 'An inverter feeds the grid'], visual: 'none', sourceRefs: ['S2'] }
+    return { title: `Point ${i + 1}`, layout: 'title-content', keyPoints: ['A short point'], visual: 'none', sourceRefs: [] }
+  })
+  return { title: 'Rooftop solar for bakeries', slides }
+}
+
+/** One wizard slide. A chart comes from the table the prompt names (sourceId and tableIndex), never from invented numbers. */
+function wizardSlide(system, userText) {
+  const index = Number(/write slide (\d+) of/.exec(system)?.[1] ?? 1)
+  const reply = { layout: index === 1 ? 'title' : 'title-content', title: index === 1 ? 'Rooftop solar for bakeries' : `Slide ${index}`, bullets: ['Solar lowers the monthly bill'], notes: 'Walk through the point plainly.' }
+  if (index === 2) {
+    const table = /sourceId ([0-9a-f-]{36}), tableIndex (\d+)\)\. Columns: ([^\n]+)/.exec(userText)
+    if (table) {
+      const columns = table[3].split(' | ').map((c) => c.trim())
+      reply.bullets = ['Bills fall after solar', 'Savings each month']
+      reply.notes = 'The bills fell after the panels were fitted [1].'
+      reply.chartFromTable = { title: 'Monthly bills', chartType: 'bar', sourceId: table[1], tableIndex: Number(table[2]), categoryColumn: columns[0], valueColumns: columns.slice(1, 3) }
+    }
+  }
+  if (index === 3) reply.notes = 'The panels feed the inverter, then the grid [2].'
+  return reply
+}
+
 /** The JSON a structured call should return, by schema name. */
 function structuredReply(name, system, userText) {
   switch (name) {
+    case 'queries':
+      return { queries: ['rooftop solar bakery', 'solar bills savings'] }
+    case 'outline':
+      return wizardOutline(system)
     case 'slide':
+      if (/write slide \d+ of/.test(system)) return wizardSlide(system, userText)
       return {
         layout: 'title-content',
         title: 'Our three pricing plans',
@@ -120,7 +155,11 @@ export function respond(body) {
   return { kind: 'stream', text: 'I can add slides, charts and themes. Tell me what you need.' }
 }
 
-export async function startFakeOpenAI(port = 0) {
+/**
+ * Starts the fake server. options.wizardSlideDelayMs makes each wizard slide reply wait, so a browser check can watch the
+ * slides arrive one by one (the default is no delay).
+ */
+export async function startFakeOpenAI(port = 0, options = {}) {
   const seen = []
   const server = createServer(async (req, res) => {
     let raw = ''
@@ -132,6 +171,8 @@ export async function startFakeOpenAI(port = 0) {
       res.end(JSON.stringify({ error: { message: 'not found' } }))
       return
     }
+    const isWizardSlide = body.response_format?.json_schema?.name === 'slide' && /write slide \d+ of/.test((body.messages ?? []).find((m) => m.role === 'system')?.content ?? '')
+    if (isWizardSlide && options.wizardSlideDelayMs) await new Promise((resolve) => setTimeout(resolve, options.wizardSlideDelayMs))
     const reply = respond(body)
     if (reply.kind === 'json') {
       res.writeHead(200, { 'content-type': 'application/json' })

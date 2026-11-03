@@ -27,6 +27,9 @@ export const wizardRuns = pgTable(
     total: integer('total').notNull().default(0),
     error: text('error'),
     providerId: uuid('provider_id'),
+    /** Last time the worker made progress on this run (a slide written, a source ingested). A run that is still
+     * `generating` or `ingesting` with no heartbeat for five minutes lost its worker, and is marked failed on startup. */
+    heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

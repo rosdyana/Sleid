@@ -30,6 +30,15 @@ export function normaliseContentType(value: string | null): string {
   return (value ?? '').split(';')[0]!.trim().toLowerCase()
 }
 
+/**
+ * Test-only: lets the wizard's URL references point at loopback and private addresses (the browser e2e serves its page
+ * locally). Honoured only when SLEID_TEST_AUTH=1 and NODE_ENV is not production, the same gate as the test login.
+ * Production never sets it, and the policy in fetchPublicUrl is otherwise unchanged.
+ */
+export function testPrivateWizardUrls(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.SLEID_TEST_AUTH === '1' && env.NODE_ENV !== 'production' && env.SLEID_TEST_PRIVATE_WIZARD_URLS === '1'
+}
+
 export async function fetchPublicUrl(input: string, options: FetchUrlOptions = {}): Promise<FetchedUrl> {
   const doFetch = options.fetch ?? createPinnedFetch(options.policy ?? PUBLIC_URL_POLICY)
   const maxBytes = options.maxBytes ?? LIMITS.maxUrlBytes

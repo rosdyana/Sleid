@@ -146,6 +146,8 @@ export interface WriteSlideInput {
   theme: Theme
   /** The deck as it is now, for id and op checks. */
   deck: Deck
+  /** Chart data keys already placed on earlier slides (from chartDataKey). The same chart is not placed twice. */
+  placedCharts?: ReadonlySet<string>
 }
 
 export interface WriteSlideResult {
@@ -155,9 +157,80 @@ export interface WriteSlideResult {
   model: string
   /** Reference numbers the slide cites (from its notes and sources). */
   cited: number[]
+  /** The data key of the chart this slide placed, for the caller's placedCharts set. */
+  chartKey?: string
 }
 
-const TEXT_LAYOUT_OK = new Set<SlideLayout>(['title-content', 'two-column', 'blank'])
+// Slide geometry on the 1920×1080 stage. The safe area is 96..1824 wide and 96..984 high.
+const SAFE_X = 96
+const SAFE_W = 1728
+const SAFE_BOTTOM = 1080 - 96
+/** Left column beside a chart or diagram. */
+const BODY_BESIDE_W = 680
+/** Right column for the visual: starts after the body column and runs to the safe edge (58% of the safe width). */
+const VISUAL_X = 816
+const VISUAL_W = 1008
+/** Bullets above a full-width diagram. */
+const BODY_ABOVE_H = 300
+const SOURCES_PER_SLIDE = 8
+/** A chart title longer than this is left off the chart; the slide's own title says what it shows. */
+const CHART_TITLE_MAX = 40
+
+/** Plain text of a rich-text value (the paragraphs and runs of a text element). */
+function plainText(node: unknown): string {
+  if (!node || typeof node !== 'object') return ''
+  const n = node as { text?: unknown; content?: unknown[] }
+  if (typeof n.text === 'string') return n.text
+  return Array.isArray(n.content) ? n.content.map(plainText).join(' ') : ''
+}
+
+/**
+ * Ids of body text boxes whose text repeats an earlier body box on the same slide. Two columns that hold the same
+ * bullets is a defect (it came from a live run), so the caller drops the repeat.
+ */
+export function findDuplicateBodies(elements: Element[]): string[] {
+  const seen = new Set<string>()
+  const repeats: string[] = []
+  for (const el of elements) {
+    if (el.type !== 'text' || el.role !== 'body') continue
+    const text = plainText(el.content).replace(/\s+/g, ' ').trim().toLowerCase()
+    if (!text) continue
+    if (seen.has(text)) repeats.push(el.id)
+    else seen.add(text)
+  }
+  return repeats
+}
+
+/** Splits bullets across body columns in order, so no two columns repeat each other. */
+export function splitBullets(bullets: string[], columns: number): string[][] {
+  if (columns <= 1) return [bullets]
+  const per = Math.ceil(bullets.length / columns)
+  return Array.from({ length: columns }, (_, c) => bullets.slice(c * per, (c + 1) * per))
+}
+
+const MERMAID_KEYWORDS = new Set(['graph', 'flowchart', 'subgraph', 'end', 'direction', 'LR', 'RL', 'TD', 'TB', 'BT'])
+
+/** Number of distinct nodes in a Mermaid flowchart (labels and edge text are not counted). */
+export function mermaidNodeCount(source: string): number {
+  const ids = new Set<string>()
+  for (const raw of source.split('\n').slice(1)) {
+    const line = raw.trim()
+    if (!line || /^%%/.test(line) || /^(style|classDef|class|linkStyle|click)\b/.test(line)) continue
+    const bare = line
+      .replace(/%%.*$/, '')
+      .replace(/\|[^|]*\|/g, ' ')
+      .replace(/"[^"]*"/g, ' ')
+      .replace(/\[[^\]]*\]|\([^)]*\)|\{[^}]*\}/g, ' ')
+    for (const m of bare.matchAll(/[A-Za-z][\w-]*/g)) if (!MERMAID_KEYWORDS.has(m[0])) ids.add(m[0])
+  }
+  return ids.size
+}
+
+/** A left-to-right flowchart with four or more nodes. Such a diagram needs the full width to stay readable. */
+export function isWideFlow(source: string): boolean {
+  const header = source.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('%%')) ?? ''
+  return /^(graph|flowchart)\s+LR\b/i.test(header) && mermaidNodeCount(source) >= 4
+}
 
 /** Builds the slide's elements: text from the placeholders, then one chart or diagram in the free column. */
 export function buildSlideElements(
@@ -171,20 +244,32 @@ export function buildSlideElements(
   const title = elements.find((e) => e.type === 'text' && e.role === 'title')
   const titleBottom = title && title.type === 'text' ? title.y + title.h : 200
   const top = Math.max(titleBottom + 24, 260)
+  const bodyCount = elements.filter((e) => e.type === 'text' && e.role === 'body').length
+  const groups = splitBullets(content.bullets, bodyCount)
+  let bodyIndex = 0
   const filled = elements
     .map((el): Element | null => {
       if (el.type !== 'text') return el
       if (el.role === 'title') return { ...el, content: richFromParagraphs([content.title]) }
       if (el.role === 'subtitle') return content.subtitle ? { ...el, content: richFromParagraphs([content.subtitle]) } : null
-      if (el.role === 'body') return content.bullets.length ? { ...el, content: richFromParagraphs(content.bullets, true) } : null
+      if (el.role === 'body') {
+        const items = groups[bodyIndex++] ?? []
+        // Bullets are always left-aligned, whatever the layout's body style says.
+        return items.length ? { ...el, style: { ...el.style, align: 'left' }, content: richFromParagraphs(items, true) } : null
+      }
       return el
     })
     .filter((e): e is Element => e !== null)
+
   const hasVisual = !!(extras.chart || extras.diagram)
-  const shaped = hasVisual
-    ? filled.map((el) => (el.type === 'text' && el.role === 'body' ? { ...el, x: 96, y: top, w: 760, h: 1080 - 96 - top } : el))
-    : filled
-  const visualBox = { x: 920, y: top, w: 904, h: 1080 - 96 - top }
+  const fullWidthDiagram = !!extras.diagram && !extras.chart && isWideFlow((extras.diagram as { source?: string }).source ?? '')
+  const bodyBox = fullWidthDiagram
+    ? { x: SAFE_X, y: top, w: SAFE_W, h: BODY_ABOVE_H }
+    : { x: SAFE_X, y: top, w: BODY_BESIDE_W, h: SAFE_BOTTOM - top }
+  const shaped = hasVisual ? filled.map((el) => (el.type === 'text' && el.role === 'body' ? { ...el, ...bodyBox } : el)) : filled
+  const visualBox = fullWidthDiagram
+    ? { x: SAFE_X, y: top + BODY_ABOVE_H + 24, w: SAFE_W, h: SAFE_BOTTOM - (top + BODY_ABOVE_H + 24) }
+    : { x: VISUAL_X, y: top, w: VISUAL_W, h: SAFE_BOTTOM - top }
   const visuals = [extras.chart, extras.diagram].filter((e): e is Element => !!e)
   const placed = visuals.map((el) => ({ ...el, x: visualBox.x, y: visualBox.y, w: visualBox.w, h: visualBox.h }) as Element)
   const guardedInput = [...shaped, ...placed]
@@ -195,7 +280,26 @@ export function buildSlideElements(
     const g = byId.get(el.id)
     return g ? ({ ...el, x: g.x, y: g.y, w: g.w, h: g.h } as Element) : el
   })
-  return { elements: out.map((el, i) => ({ ...el, id: crypto.randomUUID(), z: i }) as Element), warnings }
+  // Validator: a body box must not repeat another one on the same slide. The repeat is dropped, not shown twice.
+  const repeats = new Set(findDuplicateBodies(out))
+  if (repeats.size) warnings.push('Two text boxes on one slide held the same text; the repeat was left out.')
+  return {
+    elements: out.filter((el) => !repeats.has(el.id)).map((el, i) => ({ ...el, id: crypto.randomUUID(), z: i }) as Element),
+    warnings,
+  }
+}
+
+/**
+ * The layout a wizard slide actually uses. Slide 1 is always the cover. Every other slide has a title box and
+ * left-aligned bullets: cover, quote and blank layouts become title-content. A section divider only stays a divider
+ * when it has no bullets and no visual. Two columns need two bullets and no visual.
+ */
+export function resolveWizardLayout(requested: SlideLayout, slideIndex: number, visual: boolean, bulletCount: number): SlideLayout {
+  if (slideIndex === 0) return 'title'
+  let layout: SlideLayout = requested === 'title' || requested === 'quote' || requested === 'blank' ? 'title-content' : requested
+  if (layout === 'section' && (visual || bulletCount > 0)) layout = 'title-content'
+  if (layout === 'two-column' && (visual || bulletCount < 2)) layout = 'title-content'
+  return layout
 }
 
 /**
@@ -224,8 +328,13 @@ export function chartFromTable(
   return { data: { columns, rows }, title: spec.title, warnings }
 }
 
+/** Identity of a chart's data: two charts with the same columns and rows are the same chart. */
+export function chartDataKey(data: ChartData): string {
+  return JSON.stringify({ columns: data.columns, rows: data.rows })
+}
+
 export async function writeWizardSlide(call: ModelCall, input: WriteSlideInput): Promise<WriteSlideResult> {
-  const { brief, outline, slideIndex, slide, context, theme, deck } = input
+  const { brief, outline, slideIndex, slide, context, theme, deck, placedCharts } = input
   const refList = context.refs.map((r) => `[${r.number}] ${r.title} (${r.origin})`).join('\n') || 'No references.'
   const chunkBlock = context.chunks.map((c) => `[${c.number}] ${c.text}`).join('\n\n') || 'No reference text for this slide.'
   const tableBlock = context.tables
@@ -237,9 +346,10 @@ export async function writeWizardSlide(call: ModelCall, input: WriteSlideInput):
     system: systemPrompt(
       `Task: write slide ${slideIndex + 1} of ${outline.slides.length} of a deck titled "${outline.title}". Write in ${languageName(brief.language)}. ` +
         `Use only the reference text below for facts and figures. Keep bullets short (under 15 words each, at most 6). ` +
+        `The slide title is short (under 8 words). ` +
         `Speaker notes say what the presenter says aloud, 2 to 5 sentences, and cite sources by their number in brackets, for example [1]. ` +
         `${brief.includeNotes ? '' : 'Leave notes empty. '}` +
-        `${wantChart ? 'If a table in the references holds numbers for this slide, set chartFromTable with its sourceId, tableIndex, the category column and value columns, using the exact column names. Do not write numbers yourself for the chart. Only if no table fits, set chartIllustrative with made-up numbers. ' : ''}` +
+        `${wantChart ? 'If a table in the references holds numbers for this slide, set chartFromTable with its sourceId, tableIndex, the category column and value columns, using the exact column names. Keep the chart title under 40 characters. Do not write numbers yourself for the chart. Only if no table fits, set chartIllustrative with made-up numbers. ' : ''}` +
         `${wantDiagram ? 'Set diagram to a Mermaid flowchart (graph LR) with short node ids and labels in brackets, for example A[Label]. No code fences. ' : ''}` +
         `Layout for this slide: ${slide.layout}. Pick "title" only for the first slide and "section" only for a divider.`,
     ),
@@ -258,51 +368,50 @@ export async function writeWizardSlide(call: ModelCall, input: WriteSlideInput):
   })
   const out = result.value
   const warnings: string[] = []
-  let usage = result.usage
-  let model = result.model
-
-  // Layout: charts and diagrams need a body layout. Cover and divider layouts take text only.
-  let layout = out.layout
-  if ((wantChart || wantDiagram) && !TEXT_LAYOUT_OK.has(layout)) layout = 'title-content'
-  // Two bodies would both be moved into the one left column (they would overlap), and a blank slide has no title box,
-  // so a slide with text needs title-content.
-  if (layout === 'two-column' && (wantChart || wantDiagram)) layout = 'title-content'
-  if (layout === 'blank' && (out.title || out.bullets.length)) layout = 'title-content'
-  if (slideIndex === 0) layout = 'title'
+  const usage = result.usage
+  const model = result.model
+  // The first slide is the cover: it takes no chart or diagram.
+  const visualsAllowed = slideIndex > 0
 
   let chart: Element | undefined
+  let chartKey: string | undefined
   let illustrative = false
-  if (wantChart && out.chartFromTable) {
+  if (wantChart && visualsAllowed && out.chartFromTable) {
     const built = chartFromTable(out.chartFromTable, context.tables)
     if (built) {
       warnings.push(...built.warnings)
-      chart = chartElement(built.data, built.title, out.chartFromTable.chartType, false)
+      const key = chartDataKey(built.data)
+      if (placedCharts?.has(key)) {
+        warnings.push(`The chart on slide ${slideIndex + 1} repeats a chart from an earlier slide, so it was left out.`)
+      } else {
+        chartKey = key
+        chart = chartElement(built.data, built.title.length <= CHART_TITLE_MAX ? built.title : undefined, out.chartFromTable.chartType, false)
+      }
     } else {
       warnings.push(`The chart on slide ${slideIndex + 1} did not match a reference table, so it was left out.`)
     }
-  } else if (wantChart && out.chartIllustrative) {
+  } else if (wantChart && visualsAllowed && out.chartIllustrative) {
     const { categories, series } = out.chartIllustrative
     const columns = ['Category', ...series.map((s) => s.name || 'Value')]
     const rows = categories.map((c, i) => [c, ...series.map((s) => s.values[i] ?? null)])
-    const badTitle = `${out.chartIllustrative.title} (illustrative)`
-    chart = chartElement({ columns, rows }, badTitle, out.chartIllustrative.chartType, true)
+    chart = chartElement({ columns, rows }, `${out.chartIllustrative.title} (illustrative)`, out.chartIllustrative.chartType, true)
     illustrative = true
     warnings.push('The chart numbers are illustrative: they are not in the references. Check them before you present.')
-  } else if (wantChart) {
+  } else if (wantChart && visualsAllowed) {
     warnings.push(`No chart for slide ${slideIndex + 1}: the outline asked for one, but no reference table or figure fits.`)
   }
 
   let diagram: Element | undefined
-  if (wantDiagram && out.diagram) {
+  if (wantDiagram && visualsAllowed && out.diagram) {
     const check = await validateMermaid(out.diagram.mermaid)
     if (check.ok) {
       // Every common element field is set here; buildSlideElements fills the id and the stacking order.
       diagram = { id: 'pending', type: 'diagram', source: out.diagram.mermaid, x: 0, y: 0, w: 0, h: 0, rotation: 0, z: 0, locked: false, opacity: 1 } as Element
-    }
-    else warnings.push(`The diagram on slide ${slideIndex + 1} did not parse, so it was left out.`)
+    } else warnings.push(`The diagram on slide ${slideIndex + 1} did not parse, so it was left out.`)
   }
 
-  const built = buildSlideElements(layout, theme, { title: out.title, ...(out.subtitle ? { subtitle: out.subtitle } : {}), bullets: out.bullets }, {
+  const layout = resolveWizardLayout(out.layout, slideIndex, !!(chart || diagram), out.bullets.length)
+  const built = buildSlideElements(layout, theme, { title: out.title || slide.title, ...(out.subtitle ? { subtitle: out.subtitle } : {}), bullets: out.bullets }, {
     ...(chart ? { chart } : {}),
     ...(diagram ? { diagram } : {}),
   })
@@ -331,18 +440,31 @@ export async function writeWizardSlide(call: ModelCall, input: WriteSlideInput):
     },
   ]
   const ops = checkOps(deck, raw, allowlist('addSlide'), 'wizard')
-  usage = addUsage(ZERO_USAGE, usage)
-  model = result.model
-  return { ops, warnings, usage, model, cited }
+  return { ops, warnings, usage: addUsage(ZERO_USAGE, usage), model, cited, ...(chartKey ? { chartKey } : {}) }
 }
 
-function chartElement(data: ChartData, title: string, chartType: ChartElementType, illustrative: boolean): Element {
+/** A "Sources" list for the end of the deck: one slide per eight references, numbered as the notes cite them. */
+export function sourcesSlideOps(theme: Theme, refs: Array<{ number: number; title: string; origin: string }>): Op[] {
+  const lines = refs.map((r) => `[${r.number}] ${r.title}${r.origin ? ` — ${r.origin}` : ''}`)
+  const ops: Op[] = []
+  for (let p = 0; p * SOURCES_PER_SLIDE < lines.length; p++) {
+    const part = lines.slice(p * SOURCES_PER_SLIDE, (p + 1) * SOURCES_PER_SLIDE)
+    const title = p === 0 ? 'Sources' : `Sources (${p + 1})`
+    const built = buildSlideElements('title-content', theme, { title, bullets: part }, {})
+    ops.push({ op: 'addSlide', layout: 'title-content', slide: { id: crypto.randomUUID(), notes: 'The numbers in the notes refer to this list.', elements: built.elements } } as Op)
+  }
+  return ops
+}
+
+/** A chart from the data, with an optional title. Charts from the model never get a title over 40 characters. */
+function chartElement(data: ChartData, title: string | undefined, chartType: ChartElementType, illustrative: boolean): Element {
+  const label = title ?? (illustrative ? 'Illustrative' : '')
   return {
     id: 'pending',
     type: 'chart',
     chartType,
     data,
-    options: { title, legend: data.columns.length > 2 },
+    options: { ...(title ? { title } : {}), legend: data.columns.length > 2 },
     x: 0,
     y: 0,
     w: 0,
@@ -351,7 +473,7 @@ function chartElement(data: ChartData, title: string, chartType: ChartElementTyp
     z: 0,
     locked: false,
     opacity: 1,
-    alt: illustrative ? `${title} (illustrative numbers)` : title,
+    alt: illustrative ? `${label} (illustrative numbers)` : label,
   } as Element
 }
 

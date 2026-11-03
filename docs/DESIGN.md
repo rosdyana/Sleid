@@ -13,7 +13,7 @@ Living document. Update it as decisions change.
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON, asset storage, publish to web | **Done** (checks run, see M3 below; open gaps listed there) |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | **Done** (checks run, see M4 below; open gaps and unverified items listed there) |
 | 5. MCP server + access tokens | **Done** (checks run, see M5 below; open gaps and unverified items listed there) |
-| 6. Wizard + reference ingestion + research | **Partly done** (backend, worker, live model path and unit/integration checks done; browser e2e, live PNG review and the re-run of the browser suites are **not done**, see M6 below) |
+| 6. Wizard + reference ingestion + research | **Done** (checks run, see M6 below; open items listed there, including the research check on a live search provider and the visual defects of live run 3) |
 | 7. Comments, version history, presenter + phone remote | Pending |
 | 8. Import: PPTX, Google Slides, Markdown | Pending |
 | 9. Templates and brand kits | Pending |
@@ -927,7 +927,7 @@ Scope: the prompt-to-deck wizard end to end (brief, references, research, outlin
 - **Deck creation before the first slide.** A run that fails before its first slide leaves an empty deck titled from the outline. Deleting it is manual.
 - **The run waits for references, in the MCP tool only.** The web flow asks the user to press Draft outline when the references are ready.
 - **Two copies of provider resolution** (web and worker), described above.
-- **One worker process.** The wizard queues have no per-run lock beyond the generate queue's concurrency of 1. Two worker processes would work on different runs, but a restart in the middle of a run leaves it `generating` with no job (pg-boss expires the job; the row is not reaped). The same reaper gap as M3's exports.
+- **One worker process.** The wizard queues have no per-run lock beyond the generate queue's concurrency of 1. Two worker processes would work on different runs. A restart in the middle of a run is now recovered: on startup the worker marks any `generating` or `ingesting` run with no heartbeat for five minutes as `failed`, with the message "The worker stopped before this run finished" (the slides written so far are kept, and the run is not resumed). The M3 export reaper gap is unchanged.
 
 ### M6 verification
 
@@ -958,14 +958,62 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
   The first run also had a blank closing slide (`blank` layout, text only in the notes), which is fixed. The slide JSON from the second run is in the session scratchpad (`live-wizard2/deck.json`).
 - **Quality notes from the live output (honest).** The Indonesian is fluent and on-topic. The English hits are proper nouns and some terms ("solar rooftop"), not whole sentences. The first slide's title is a reasonable pitch line. The notes repeat points from the bullets more than they add. The charts are plausible, but the numbers came from the CSV and were not checked against any other source. Layout was checked only by the geometry code and the overlap warnings, **not by looking at a render**.
 
-### Unverified in M6
+### M6 completion: live run 3, the fixes, recovery and browser coverage
 
-- **Browser e2e (`apps/web/tests/wizard.mjs`) and its screenshots** (`wizard-brief.png`, `wizard-outline.png`, `wizard-live.png`). Not written or run in this milestone. The UI (routes, banner, outline editor) is typechecked and built, but has not been clicked through.
-- **Live PNG renders and visual review** of the live deck (overlaps, text fit, chart appearance). Not done. The live script writes `deck.json` and `report.json` only.
-- **Re-run of the existing browser suites** (`smoke`, `collab`, `export`, `ai`, `mcp`) against the dev stack. Not run in this milestone. The unit and integration suites that cover the same server code (collab, worker export, MCP) passed.
-- **Research on a live search provider.** No SearXNG, Brave or Tavily instance was run. The adapters are tested against fake servers and injected transports. The compose service has not been started.
-- **Generation through the collab service in a browser.** The worker's tests apply ops to an in-memory Yjs document, not to the collab service. The live broadcast to an open editor, and the banner's progress updates, are not exercised.
-- **Restart of a worker in the middle of a run** (the run stays `generating`), and concurrent runs on two workers.
-- **Multi-process wizard load, large references** (the 10-file and 50 MB limits are tested only on the refusal paths), and PDF or DOCX text quality on real documents beyond the generated fixtures.
+This pass closes the M6 gaps: the defects seen in the live deck, the heartbeat recovery, the browser e2e and the re-run of the browser suites.
+
+**Live run 3** (`apps/web/scripts/live-wizard-check.ts`, the same brief, CSV and Wikipedia page as run 2, research off, `qwen3.8-flash-next-q2_0` at `https://gpt.knowhub.my.id/v1`). Output in the session scratchpad under `live-wizard3/` (deck.json, outline.json, report.json, run.log, slide-1..9.png, contact.png). Timings: fetch page 0.8 s, outline 29.1 s, slides 1 to 5: 15.5 s, 62.2 s, 11.7 s, 16.5 s, 15.6 s. **Slides 6 to 8 were placeholders**: the model endpoint answered "fetch failed" about 0.5 s into each, so the run did not reach the model for them. The run was not repeated (one run was the instruction). Tokens: 51.7k in, 6.4k out. Warnings: one (the chart repeat below).
+
+Visual review of every slide (contact sheet, and each slide at full size where needed):
+- Slide 1 (cover): fine.
+- Slide 2 (chart, two-line bullets on the left): the chart title "Tagihan Bulanan Sebelum dan Sesudah" sits whole inside the chart. The live run 2 clipped title is fixed.
+- Slide 3: three bullets, text only, most of the slide empty. Acceptable, not a defect of the code.
+- Slide 4 (five-node left-to-right flowchart): bullets above, diagram full width below, labels readable at 1920 px. Was a small diagram in run 2.
+- Slide 5: the chart was left out because it repeated slide 2's data (the warning says so). The bullet "Penghematan dari Data S1" leaks the outline's reference label, see the remaining defects.
+- Slides 6 to 8: the placeholders had no elements (a script defect, now fixed in the script: placeholders carry the outline's points, as the worker does). The shipped run's slides are blank.
+- Slide 9 (Sources): lists the CSV and the Wikipedia page with their numbers. Present for the first time.
+
+**Defects from run 2, each fixed with a unit test:**
+1. **Chart titles clipped** (`packages/render/src/chart.ts`). The ECharts title had no width, so a long title ran off both sides of a narrow chart. The title now has the chart width minus 48 px padding and `overflow: 'break'`, wrapped to at most two lines (`fitTitle`, with an ellipsis for the rest), and the grid starts below the real title height. The wizard drops a table chart's own title when it is longer than 40 characters (the slide's title says what it shows); an illustrative chart keeps its "(illustrative)" marker. Tests: `packages/render/src/chart.test.ts` (6, including an SVG with a narrow chart and a long title, at most two title lines), `packages/llm/src/wizard.test.ts`.
+2. **Duplicate content in two columns.** Cause: `buildSlideElements` gave the full bullet list to every body box, so both columns of a two-column slide held the same text. Fix: the bullets are split across the columns in order (`splitBullets`); a two-column slide with fewer than two bullets becomes title-content. A validator (`findDuplicateBodies`) drops any body box that repeats another on the slide, with a warning. Tests: `wizard.test.ts` (four).
+3. **Closing slide without a title and with centred bullets.** Cause: the `quote` layout has a centred body box and no title box (the `blank` layout has no title either). Fix: `resolveWizardLayout` turns cover, quote, blank and title layouts into title-content on every slide but the first, and a section divider stays a divider only with no bullets and no visual. Bullets are always left-aligned. The title falls back to the outline's title when the model's is empty. Tests: `wizard.test.ts` (three).
+4. **The same chart twice.** Cause: nothing tracked the charts already placed. Fix: the worker (and the live script) keep a set of chart data keys (columns and rows); a slide whose chart has the same data is left out, with a warning, and the set is updated only after the batch is applied. Test: `wizard.test.ts` (two-run check with one shared set).
+5. **Small diagram in the right half.** Cause: the visual column was 904 px wide and the diagram's height limited its size. Fix: the visual column is now 1008 px (58% of the 1728 px safe width). A left-to-right flowchart with four or more nodes goes full width below the bullets (`isWideFlow`, `mermaidNodeCount`). Tests: `wizard.test.ts` (three).
+6. **No Sources slide.** Cause, two parts: the brief's `includeSources` defaulted to false (in the schema and in the new-brief checkbox), and the live script never built the Sources slide (only the worker did). Fix: the default is now on (schema and form). The Sources slides come from one helper, `sourcesSlideOps`, which the worker and the script both use. Tests: `wizard.test.ts` (the default; the Sources helper, eight per slide).
+7. **Theme.** The live script set `theme: 'Sheets Light'` on the brief but never applied a `setTheme` op, so the deck kept the empty deck's default theme. Sheets Light is that default, so the output looked the same. The script now applies the brief's built-in theme as the worker does. The "AI from brand colours" theme was not exercised by any live run.
+
+**Remaining defects in live run 3 (not fixed in this pass):**
+- **Invented figures in bullets.** Slide 2's bullets say "Tagihan sebelum rata-rata Rp3,38 juta" and "sesudah rata-rata Rp2,08 juta". The CSV's averages are Rp4,175,000 and about Rp2,447,000. The rule "numbers come from the references" is enforced for charts only; bullet text is model-written. A check that every figure in a bullet appears in the references would catch it.
+- **Reference label leaked into a title.** Slide 5's title "Penghematan dari Data S1" shows the outline's internal label "S1".
+- **Editor banner covers the editor header.** The wizard banner is `fixed` at the top of the editor and hides the deck title row while it runs (seen in `shots-m6/wizard-live.png`). Cosmetic; a layout change in the editor was out of scope.
+- **Three slides lost to the endpoint.** Not a code defect, but the run has no retry for an unreachable endpoint between slides.
+
+**Recovery (B3).** `wizard_runs.heartbeat_at` (migration `0008_freezing_leo.sql`) is set on every run status change and each time an ingest finishes (`touchWizardRun`). `recoverStaleRuns` runs when the worker starts: a run in `generating` or `ingesting` with no heartbeat for five minutes (or with no update at all) becomes `failed` with the message in `STALE_RUN_MESSAGE`. The generate job also does nothing for a run that is already cancelled, failed or done, so a retried job cannot rewrite it. Tests (real Postgres, `apps/worker/src/wizard/wizard.integration.test.ts`): a stale, a fresh, a finished and a no-heartbeat run, checked at two times; a late generate job writes nothing. The test uses timestamps, not a process kill.
+
+**Browser e2e (B1), `apps/web/tests/wizard.mjs` (25 checks).** Dashboard, New from prompt, the brief, a CSV file and a web address (served by the local fake SearXNG), research on, the outline (rename, move, delete, reload keeps the change), generate, slides arriving through the collab service (the slide count rose 2 → 3 → 5 in the run), the banner's "Slide n of m", done, and the Sources list. No page or console errors. Screenshots (in `SCREENSHOT_DIR`): `wizard-brief.png`, `wizard-outline.png`, `wizard-live.png`.
+- Fakes: `apps/web/tests/fake-openai-server.mjs` answers the wizard's `queries`, `outline` and `slide` calls (the slide reply takes its chart's columns and sourceId from the prompt's table block; `wizardSlideDelayMs` slows the slides so progress can be watched). `apps/web/tests/fake-searxng.mjs` answers `/search` and serves its own pages.
+- Bug found and fixed: the run page imported `LIMITS` from the `@sleid/ingest` root, which loads happy-dom (Node only), so the browser showed "Something went wrong". Fixed with a `./limits` subpath export, and the route uses that.
+- **Test-only private URL override.** The wizard's URL references may point at a loopback address only when `SLEID_TEST_PRIVATE_WIZARD_URLS=1` and `SLEID_TEST_AUTH=1` and `NODE_ENV` is not production (`testPrivateWizardUrls` in `packages/ingest/src/url.ts`). It is read in two places: the web `addUrl` pre-check and the worker's fetch. This is the one exception to "the policy is a parameter, not a flag"; the production policy is unchanged when the variable is unset. The e2e needs it because its page is local.
+- The MCP suite also found a test-isolation bug: its wizard jobs shared the queue with the running dev worker, so the dev worker took them. The test queue now has a prefix (the option existed for this).
+
+**MCP (B2).** `create_deck_from_prompt` then `get_wizard_status` until done, in `apps/web/src/lib/mcp/mcp.integration.test.ts`, with an in-process wizard worker, the real collab service and a fake model answering by schema name. The deck has three slides, and the first and last titles are the outline's.
+
+**Verification (this pass).**
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm test` (root): **51 files, 614 tests, all passing, none skipped.** The M6 entry above had 50 files and 592 tests.
+- Browser suites against the dev stack (`SLEID_TEST_AUTH=1`, `LLM_USER_ALLOW_PRIVATE_URLS=1`, `SLEID_TEST_PRIVATE_WIZARD_URLS=1`, a scratch `LLM_SECRET_KEY`, `SEARXNG_URL` at the fake, collab secrets, `CHROME_PATH` for the worker): `smoke.mjs` 22 checks, `collab.mjs` 24, `export.mjs` 21, `ai.mjs` 32, `mcp.mjs` 19, `wizard.mjs` 25. All pass, no page or console errors. The first run failed for setup reasons (no `CHROME_PATH` in the worker, no collab secrets in the suite's environment), not for product reasons, and was rerun in full.
+
+**Decisions taken in this pass.**
+- A chart repeated from an earlier slide is left out (not replaced by a different view). The wording allowed either; leaving it out is the simpler rule.
+- A visual's width floor is 55% of the safe width; the rule is in code (1008 px of 1728 px), not in the model's prompt.
+- The Sources slide is on by default, in the schema and in the form.
+
+### Unverified after the M6 completion pass
+
+- **Research on a live search provider.** SearXNG, Brave and Tavily were not run against a real service. The browser e2e uses the fake SearXNG (`apps/web/tests/fake-searxng.mjs`), and the research adapters are tested against fake servers.
+- **Worker crash by a real process kill.** The recovery is tested with timestamps in Postgres, not by killing a worker process mid-run.
+- **Concurrent runs on two workers.** Not tested.
+- **Large references** (the 10-file and 50 MB limits are tested only on the refusal paths) and PDF or DOCX text quality beyond the generated fixtures.
+- **Images are not read** by the model (see the known gaps above).
+- **Live run 3 slides 6 to 8**: not produced by the model (endpoint outage). Their rendering was checked only as placeholders.
 - **Firefox and Safari.** Chrome only, as before.
-

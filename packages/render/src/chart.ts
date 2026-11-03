@@ -12,6 +12,41 @@ export function paletteFor(chart: ChartElement, theme: Theme): string[] {
   return [theme.colors.accent, theme.colors.accent2, theme.colors.accent3, theme.colors.accent4]
 }
 
+const CHART_PAD = 24
+const CANVAS_FALLBACK_W = 1728
+const TITLE_MAX_LINES = 2
+
+/**
+ * Wraps a chart title into at most `maxLines` lines of `maxWidth` pixels (estimated for a bold sans face), breaking at
+ * spaces. Text past the last line is cut with an ellipsis. Returns the text with explicit line breaks and the line count.
+ */
+export function fitTitle(text: string, maxWidth: number, fontSize: number, maxLines: number): { text: string; lines: number } {
+  const perChar = fontSize * 0.6
+  const perLine = Math.max(1, Math.floor(maxWidth / perChar))
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word
+    if (next.length <= perLine) {
+      current = next
+      continue
+    }
+    if (current) lines.push(current)
+    current = word
+  }
+  if (current) lines.push(current)
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines)
+    const last = kept[maxLines - 1]!
+    kept[maxLines - 1] = `${last.slice(0, Math.max(0, perLine - 1)).trimEnd()}…`
+    return { text: kept.join('\n'), lines: maxLines }
+  }
+  // A single word longer than a line is cut too.
+  const fitted = lines.map((l) => (l.length > perLine ? `${l.slice(0, Math.max(1, perLine - 1))}…` : l))
+  return { text: fitted.join('\n'), lines: fitted.length }
+}
+
 // Column 0 is the category (or x for scatter). Every other column is a series.
 // Pie and donut use the first value column only.
 export function chartToEchartsOption(chart: ChartElement, theme: Theme): EChartsOption {
@@ -26,7 +61,11 @@ export function chartToEchartsOption(chart: ChartElement, theme: Theme): ECharts
   // Sizes are slide-space pixels on the 1920×1080 stage; ECharts' 12px defaults are unreadable there.
   const small = theme.sizes.small
   const titleSize = Math.round(theme.sizes.heading * 0.6)
-  const titleH = chart.options.title ? titleSize + 24 : 0
+  const titleLineH = Math.round(titleSize * 1.25)
+  // The title wraps inside the chart (minus padding) and never takes more than two lines. The grid starts below it.
+  const titleWidth = Math.max(40, (chart.w > 0 ? chart.w : CANVAS_FALLBACK_W) - 2 * CHART_PAD)
+  const title = chart.options.title ? fitTitle(chart.options.title, titleWidth, titleSize, TITLE_MAX_LINES) : null
+  const titleH = title ? title.lines * titleLineH + 24 : 0
   const legendH = chart.options.legend ? small + 24 : 0
   const label = { color: muted, fontSize: small }
 
@@ -35,8 +74,14 @@ export function chartToEchartsOption(chart: ChartElement, theme: Theme): ECharts
     backgroundColor: 'transparent',
     color: palette,
     textStyle: { color: text, fontFamily: bodyFont, fontSize: small },
-    title: chart.options.title
-      ? { text: chart.options.title, left: 'center', top: 0, textStyle: { color: text, fontSize: titleSize } }
+    title: title
+      ? {
+          text: title.text,
+          left: 'center',
+          top: 0,
+          width: titleWidth,
+          textStyle: { color: text, fontSize: titleSize, lineHeight: titleLineH, width: titleWidth, overflow: 'break' },
+        }
       : { show: false },
     legend: chart.options.legend
       ? { show: true, top: titleH, itemWidth: small * 1.2, itemHeight: small * 0.7, itemGap: small, textStyle: { color: text, fontSize: small } }

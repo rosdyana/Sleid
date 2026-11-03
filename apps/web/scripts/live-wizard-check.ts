@@ -7,9 +7,9 @@
 // It does NOT render PNGs or run the browser. Those checks are separate (see docs/DESIGN.md, M6).
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { applyOps, createDeck, deckToYDoc, yDocToDeck, type Deck, type Element, type Op } from '@sleid/model'
+import { applyOps, BUILT_IN_THEMES, createDeck, DEFAULT_THEME, deckToYDoc, yDocToDeck, type Deck, type Element, type Op } from '@sleid/model'
 import { buildIngested, chunksOf, extractFile, extractUrl, fetchPublicUrl, relevantChunks, type IngestedSource } from '@sleid/ingest'
-import { createProvider, createPinnedFetch, draftOutline, withKnownSources, writeWizardSlide, WizardBrief, type WizardBrief as Brief } from '@sleid/llm'
+import { buildSlideElements, createProvider, createPinnedFetch, draftOutline, sourcesSlideOps, writeWizardSlide, WizardBrief, type WizardBrief as Brief } from '@sleid/llm'
 
 const baseUrl = process.env.LIVE_WIZARD_BASE_URL
 const model = process.env.LIVE_WIZARD_MODEL
@@ -74,6 +74,10 @@ writeFileSync(join(outDir, 'outline.json'), JSON.stringify(outline, null, 2))
 let deck: Deck = createDeck('Pitch deck')
 const doc = deckToYDoc(deck)
 const initialSlideIds = deck.slides.map((s) => s.id)
+// The worker applies the brief's theme before the first slide (a built-in name, or the AI theme; the AI theme is not run here).
+const briefTheme = BUILT_IN_THEMES.find((t) => t.name === brief.theme) ?? DEFAULT_THEME
+applyOps(doc, [{ op: 'setTheme', theme: briefTheme as unknown as Record<string, unknown> } as Op], 'server:wizard')
+const placedCharts = new Set<string>()
 const numbered = sources.map((s, i) => ({ number: i + 1, ...s }))
 const chunkList = chunksOf(sources)
 const slideReports: Array<Record<string, unknown>> = []
@@ -94,15 +98,18 @@ for (let i = 0; i < outline.slides.length; i++) {
   let status = 'ok'
   let error = ''
   try {
-    const result = await writeWizardSlide(call, { brief, outline, slideIndex: i, slide, context, theme: current.theme, deck: current })
+    const result = await writeWizardSlide(call, { brief, outline, slideIndex: i, slide, context, theme: current.theme, deck: current, placedCharts })
     ops = result.ops
+    if (result.chartKey) placedCharts.add(result.chartKey)
     slideWarnings.push(...result.warnings)
     totalInput += result.usage.inputTokens
     totalOutput += result.usage.outputTokens
   } catch (err) {
     status = 'placeholder'
     error = err instanceof Error ? err.message.slice(0, 200) : String(err)
-    ops = [{ op: 'addSlide', layout: 'title-content', slide: { id: crypto.randomUUID(), notes: 'Placeholder: the slide could not be written.', elements: [] } } as Op]
+    // The worker's placeholder: the outline's title and points, with a note (see placeholderOps in apps/worker/src/wizard/jobs.ts).
+    const built = buildSlideElements('title-content', current.theme, { title: slide.title, bullets: slide.keyPoints }, {})
+    ops = [{ op: 'addSlide', layout: 'title-content', slide: { id: crypto.randomUUID(), notes: `Slide ${i + 1} could not be written. Its outline points are shown instead.`, elements: built.elements } } as Op]
   }
   const cleanup: Op[] = i === 0 ? initialSlideIds.map((slideId) => ({ op: 'deleteSlide', slideId }) as Op) : []
   applyOps(doc, [...ops, ...cleanup], 'server:wizard')
@@ -110,6 +117,13 @@ for (let i = 0; i < outline.slides.length; i++) {
   timings[`slide ${i + 1}`] = ms
   slideReports.push({ index: i + 1, title: slide.title, visual: slide.visual, status, ms, error })
   console.log(`slide ${i + 1} (${slide.visual}): ${status} in ${ms} ms${error ? ` - ${error}` : ''}`)
+}
+// The Sources slide, as the worker adds it when the brief asks for one and references were used.
+const refsForSources = numbered.map((s) => ({ number: s.number, title: s.ingested.title, origin: s.ingested.url ?? s.ingested.fileName ?? 'web' }))
+let sourcesSlideAdded = false
+if (brief.includeSources && refsForSources.length) {
+  applyOps(doc, sourcesSlideOps(briefTheme, refsForSources), 'server:wizard')
+  sourcesSlideAdded = true
 }
 deck = yDocToDeck(doc)
 writeFileSync(join(outDir, 'deck.json'), JSON.stringify(deck, null, 2))
@@ -139,6 +153,8 @@ const report = {
   chartChecks,
   language: { indonesianWordHits: indonesianHits, englishWordHits: englishHits },
   slidesWithCitationsInNotes: citations,
+  sourcesSlideAdded,
+  theme: deck.theme.name,
   slideWarnings,
   tokens: { input: totalInput, output: totalOutput },
   timingsMs: timings,

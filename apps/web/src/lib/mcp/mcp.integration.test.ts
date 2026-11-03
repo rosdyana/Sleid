@@ -4,6 +4,7 @@
 // export_deck completion) skip with a message when CHROME_PATH does not point at a file.
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -27,6 +28,8 @@ import { createLocalStorage, type StorageDriver } from '@sleid/storage'
 import { createCollabServer, type CollabServer } from '../../../../collab/src/server.ts'
 import { createBrowserPool, type BrowserPool } from '../../../../worker/src/browser.ts'
 import { startExportService } from '../../../../worker/src/service.ts'
+import { startWizardService } from '../../../../worker/src/wizard/service.ts'
+import { createWizardCollab } from '../../../../worker/src/wizard/collab.ts'
 import { createCollabInternalClient, type CollabInternalClient } from '~/lib/collab-client.server'
 import { handleExportDownload } from '~/lib/http-handlers.server'
 import { handleMcpRequest } from './http.ts'
@@ -154,7 +157,9 @@ beforeAll(async () => {
   const live = { baseUrl: collabServer.internalUrl, secret: INTERNAL_SECRET }
   collab = createCollabInternalClient({ baseUrl: live.baseUrl, secret: live.secret })
 
-  queue = createJobQueue(TEST_DATABASE_URL, { queueName: `export-deck-mcp-${randomUUID().slice(0, 8)}` })
+  // A test-only queue name and wizard prefix: a dev worker on the same database must not take this test's jobs.
+  const suffix = randomUUID().slice(0, 8)
+  queue = createJobQueue(TEST_DATABASE_URL, { queueName: `export-deck-mcp-${suffix}`, prefix: `mcp-${suffix}-` })
   await queue.start()
   browser = createBrowserPool(BROWSER_OK ? CHROME : undefined)
   const service = await startExportService({
@@ -511,3 +516,123 @@ async function waitForExport(exportId: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 200))
   }
 }
+
+// ---- create_deck_from_prompt and get_wizard_status ----
+// A fake OpenAI-compatible model answers the wizard's structured calls (queries, outline, one slide) by schema name, and
+// the in-process wizard worker writes the slides through the collab service. No live model is involved.
+interface FakeModel {
+  url: string
+  close(): Promise<void>
+}
+
+function wizardAnswer(body: { response_format?: { json_schema?: { name?: string } }; messages?: Array<{ role: string; content?: string }> }): Record<string, unknown> {
+  const name = body.response_format?.json_schema?.name
+  const system = body.messages?.find((m) => m.role === 'system')?.content ?? ''
+  if (name === 'queries') return { queries: ['rooftop solar bakery'] }
+  if (name === 'outline') {
+    const count = Number(/exactly (\d+) slides/.exec(system)?.[1] ?? 3)
+    return {
+      title: 'Solar for bakeries',
+      slides: Array.from({ length: count }, (_, i) => ({
+        title: i === 0 ? 'Solar for bakeries' : `Point ${i + 1}`,
+        layout: i === 0 ? 'title' : 'title-content',
+        keyPoints: ['Solar cuts the bill'],
+        visual: 'none',
+        sourceRefs: [],
+      })),
+    }
+  }
+  if (name === 'slide') {
+    const index = Number(/write slide (\d+) of/.exec(system)?.[1] ?? 1)
+    return { layout: index === 1 ? 'title' : 'title-content', title: index === 1 ? 'Solar for bakeries' : `Point ${index}`, bullets: ['Solar cuts the bill'], notes: 'Say it plainly.' }
+  }
+  return { paragraphs: ['OK'] }
+}
+
+async function startFakeModel(): Promise<FakeModel> {
+  const server = createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    const body = raw ? (JSON.parse(raw) as Parameters<typeof wizardAnswer>[0] & { stream?: boolean }) : {}
+    if (!req.url?.endsWith('/chat/completions')) {
+      res.writeHead(404).end()
+      return
+    }
+    const content = JSON.stringify(wizardAnswer(body))
+    if (body.stream) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(
+        `data: ${JSON.stringify({ model: 'fake-local', choices: [{ index: 0, delta: { content } }] })}\n\n` +
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n` +
+          'data: [DONE]\n\n',
+      )
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ id: 'fake', object: 'chat.completion', model: 'fake-local', choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  httpServers.push(server)
+  const port = (server.address() as AddressInfo).port
+  return {
+    url: `http://127.0.0.1:${port}/v1`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
+describe('MCP create_deck_from_prompt', () => {
+  it('makes a deck from a prompt through the wizard worker, and get_wizard_status follows the run to done', async () => {
+    if (!db || !baseDeps) return
+    const owner = await person('mcp-wizard')
+    const token = await tokenFor(owner.id, ['decks:create', 'decks:read', 'decks:write', 'ai'])
+    const model = await startFakeModel()
+    const saved = baseDeps.env
+    // The server-default provider from the environment (the environment scope may use a local address).
+    const env = { ...process.env, SLEID_LLM_KIND: 'openai-compatible', SLEID_LLM_ENDPOINT: model.url, SLEID_LLM_MODEL: 'fake-local' }
+    baseDeps.env = env
+    const wizard = await startWizardService({
+      db,
+      queue: queue!,
+      uploads: assetsStorage,
+      collab: createWizardCollab({ baseUrl: collabServer!.internalUrl, secret: INTERNAL_SECRET }),
+      search: null,
+      env,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    try {
+      const mcp = await client(token)
+      const created = jsonOf(await tool(mcp, 'create_deck_from_prompt', { prompt: 'Pitch: rooftop solar for bakeries', slideCount: 3, language: 'en' }))
+      expect(typeof created.runId).toBe('string')
+      expect(typeof created.deckId).toBe('string')
+      const runId = created.runId as string
+      const deckId = created.deckId as string
+
+      let status: Record<string, unknown> = {}
+      const started = Date.now()
+      for (;;) {
+        status = jsonOf(await tool(mcp, 'get_wizard_status', { runId }))
+        if (status.status === 'done' || status.status === 'failed') break
+        if (Date.now() - started > 90_000) throw new Error(`the wizard run did not finish: ${JSON.stringify(status)}`)
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
+      expect(status.status).toBe('done')
+      expect(status.progress).toBe(3)
+      expect(status.total).toBe(3)
+      expect(status.deckId).toBe(deckId)
+
+      const outline = jsonOf(await tool(mcp, 'get_deck', { deckId }))
+      expect(outline.slideCount).toBe(3)
+      const deckJson = jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'json' }))
+      const slides = deckJson.slides as Array<{ elements: Array<{ role?: string; content?: unknown }> }>
+      expect(slides).toHaveLength(3)
+      const titles = slides.map((s) => JSON.stringify(s.elements.find((e) => e.role === 'title')?.content ?? ''))
+      expect(titles[0]).toContain('Solar for bakeries')
+      expect(titles[2]).toContain('Point 3')
+      await mcp.close()
+    } finally {
+      baseDeps.env = saved
+      await wizard.stop()
+      await model.close()
+    }
+  }, 120_000)
+})

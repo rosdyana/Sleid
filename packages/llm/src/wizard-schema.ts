@@ -22,7 +22,7 @@ export const WizardBrief = z.object({
   brandColors: z.array(z.string().regex(/^#[0-9a-fA-F]{6}$/)).max(4).optional(),
   includeNotes: z.boolean().default(true),
   includeCharts: z.boolean().default(true),
-  includeSources: z.boolean().default(false),
+  includeSources: z.boolean().default(true),
   research: z.boolean().default(false),
 })
 export type WizardBrief = z.infer<typeof WizardBrief>

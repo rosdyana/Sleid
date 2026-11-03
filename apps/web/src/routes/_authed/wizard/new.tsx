@@ -28,7 +28,7 @@ function NewFromPrompt() {
   const [brandColors, setBrandColors] = useState('')
   const [notes, setNotes] = useState(true)
   const [charts, setCharts] = useState(true)
-  const [sources, setSources] = useState(false)
+  const [sources, setSources] = useState(true)
 
   async function submit(event: FormEvent) {
     event.preventDefault()

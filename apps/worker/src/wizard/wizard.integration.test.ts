@@ -16,7 +16,7 @@ import { fetchPublicUrl } from '@sleid/ingest'
 import { Outline, WizardBrief, withKnownSources } from '@sleid/llm'
 import { scriptedProvider } from '@sleid/llm/testing'
 import type { SearchProvider } from '@sleid/research'
-import { runGenerate, runIngest, runResearch, type WizardEnv } from './jobs.ts'
+import { recoverStaleRuns, runGenerate, runIngest, runResearch, STALE_RUN_MESSAGE, type WizardEnv } from './jobs.ts'
 import type { WizardCollab } from './collab.ts'
 
 const db: Db | null = await connectOrNull()
@@ -294,5 +294,50 @@ describe.skipIf(!db)('wizard jobs (real Postgres)', () => {
     const after = await getWizardSource(database, row.id)
     expect(after!.status).toBe('failed')
     expect(after!.error).toMatch(/could not be fetched|blocked|resolve|not allowed/i)
+  }, 60_000)
+  it('a run whose worker stopped (no heartbeat for five minutes) is failed on startup; fresh and finished runs are left alone', async () => {
+    const { user } = await setup('wizard-recover')
+    const brief = WizardBrief.parse({ prompt: 'x' }) as unknown as Record<string, unknown>
+    const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000)
+    const stale = await insertWizardRun(database, { userId: user.id, brief })
+    await updateWizardRun(database, stale.id, { status: 'generating', heartbeatAt: minutesAgo(10) })
+    const fresh = await insertWizardRun(database, { userId: user.id, brief })
+    await updateWizardRun(database, fresh.id, { status: 'generating', heartbeatAt: new Date() })
+    const finished = await insertWizardRun(database, { userId: user.id, brief })
+    await updateWizardRun(database, finished.id, { status: 'done', heartbeatAt: minutesAgo(60) })
+    // No heartbeat yet (the run was ingesting when the worker stopped): its last update is the clock.
+    const noBeat = await insertWizardRun(database, { userId: user.id, brief })
+    await updateWizardRun(database, noBeat.id, { status: 'ingesting' })
+
+    // A minute on, only the run with a ten-minute-old heartbeat is stale.
+    const first = await recoverStaleRuns({ db: database, logger: silent }, new Date(Date.now() + 60_000))
+    expect(first).toContain(stale.id)
+    expect(first).not.toContain(fresh.id)
+    expect(first).not.toContain(finished.id)
+    const failed = await getWizardRun(database, stale.id)
+    expect(failed!.status).toBe('failed')
+    expect(failed!.error).toBe(STALE_RUN_MESSAGE)
+    expect((await getWizardRun(database, fresh.id))!.status).toBe('generating')
+    expect((await getWizardRun(database, finished.id))!.status).toBe('done')
+
+    // Six minutes on, the fresh run has gone quiet too, and the run with no heartbeat is stale.
+    const second = await recoverStaleRuns({ db: database, logger: silent }, new Date(Date.now() + 6 * 60_000))
+    expect(second).toEqual(expect.arrayContaining([fresh.id, noBeat.id]))
+    expect((await getWizardRun(database, noBeat.id))!.status).toBe('failed')
+    expect((await getWizardRun(database, finished.id))!.status).toBe('done')
+  }, 60_000)
+
+  it('a late generate job for a run that already failed writes nothing', async () => {
+    const { user, deckId } = await setup('wizard-late')
+    const brief = WizardBrief.parse({ prompt: 'x', slideCount: 3 })
+    const run = await insertWizardRun(database, { userId: user.id, brief: brief as unknown as Record<string, unknown> })
+    const outline = Outline.parse({ title: 'Late', slides: [{ title: 'One', layout: 'title-content', keyPoints: ['a'], visual: 'none', sourceIds: [] }] })
+    await updateWizardRun(database, run.id, { status: 'failed', deckId, outline: outline as unknown as Record<string, unknown> })
+    const fake = fakeCollab('Late')
+    const provider = scriptedProvider([slideReply({ layout: 'title', title: 'x', bullets: [], notes: '' })])
+    await runGenerate(envFor(provider, fake.collab), run.id)
+    expect(provider.requests).toHaveLength(0)
+    expect((await getWizardRun(database, run.id))!.status).toBe('failed')
+    expect(yDocToDeck(fake.doc).slides.map((s) => s.id)).toEqual(fake.initialSlideIds)
   }, 60_000)
 })

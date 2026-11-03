@@ -4,7 +4,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { LlmError, assertAllowedEndpoint, draftOutline, withKnownSources, Outline, WizardBrief, type WizardBrief as Brief, type Outline as OutlineT } from '@sleid/llm'
 import { decks, deckMembers, getWizardRunFor, insertWizardRun, insertWizardSource, listWizardSources, recordLlmUsage, updateWizardRun, updateWizardSource, wizardRuns, wizardSources, type Db, type WizardRunRow, type WizardSourceRow } from '@sleid/db'
-import { detectFileKind, IngestError, LIMITS, baseName, type IngestedSource } from '@sleid/ingest'
+import { detectFileKind, IngestError, LIMITS, baseName, testPrivateWizardUrls, type IngestedSource } from '@sleid/ingest'
 import { researchFromEnv } from '@sleid/research'
 import type { StorageDriver } from '@sleid/storage'
 import type { ResolvedProvider } from './llm-settings.server'
@@ -190,7 +190,7 @@ export async function addUrl(deps: WizardDeps, user: WizardUser, runId: string, 
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new WizardError('Use an http:// or https:// address.')
   try {
-    await assertAllowedEndpoint(parsed.href, { allowPrivate: false }, deps.lookup)
+    await assertAllowedEndpoint(parsed.href, { allowPrivate: testPrivateWizardUrls(deps.env) }, deps.lookup)
   } catch (err) {
     throw new WizardError(err instanceof Error ? err.message : 'That address is not allowed.')
   }

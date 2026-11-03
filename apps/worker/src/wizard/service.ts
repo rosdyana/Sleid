@@ -3,10 +3,11 @@ import type { JobQueue } from '@sleid/jobs'
 import type { StorageDriver } from '@sleid/storage'
 import type { SearchProvider } from '@sleid/research'
 import type { Logger } from '../logger.ts'
-import { runGenerate, runIngest, runResearch, type WizardEnv } from './jobs.ts'
+import { recoverStaleRuns, runGenerate, runIngest, runResearch, type WizardEnv } from './jobs.ts'
 import { resolveWizardProvider } from './provider.ts'
 import type { WizardCollab } from './collab.ts'
 import type { Db } from '@sleid/db'
+import { fetchPublicUrl, testPrivateWizardUrls } from '@sleid/ingest'
 
 export interface WizardServiceOptions {
   db: Db
@@ -30,6 +31,8 @@ export async function startWizardService(options: WizardServiceOptions): Promise
       await options.queue.enqueueWizard('ingest', { runId, sourceId })
     },
     logger: options.logger,
+    // Test-only (SLEID_TEST_PRIVATE_WIZARD_URLS, see testPrivateWizardUrls): URL references may be on a local server.
+    ...(testPrivateWizardUrls(options.env) ? { fetchUrl: (url: string) => fetchPublicUrl(url, { policy: { allowPrivate: true } }) } : {}),
   }
   await options.queue.start()
   // Research and generation run one at a time per worker: a run's slides must come in order.

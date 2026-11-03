@@ -17,6 +17,7 @@ import {
   buildSlideElements,
   draftResearchQueries,
   Outline,
+  sourcesSlideOps,
   WizardBrief,
   writeWizardSlide,
   runAbility,
@@ -28,8 +29,10 @@ import {
   getWizardSource,
   insertWizardSource,
   listWizardSources,
+  reapStaleWizardRuns,
   recordLlmUsage,
   setWizardStatusUnlessCancelled,
+  touchWizardRun,
   updateWizardRun,
   updateWizardSource,
   type Db,
@@ -43,8 +46,10 @@ import type { WizardCollab } from './collab.ts'
 
 export const MAX_RESEARCH_URLS = 8
 const RESEARCH_RESULTS_PER_QUERY = 5
-const SOURCES_PER_SLIDE = 8
 export const AI_THEME = 'AI from brand colours'
+/** A run that has made no progress for this long lost its worker. */
+export const STALE_RUN_MS = 5 * 60_000
+export const STALE_RUN_MESSAGE = 'The worker stopped before this run finished (no progress for 5 minutes). The slides written so far are kept. Start the run again from its outline.'
 
 export interface WizardEnv {
   db: Db
@@ -68,6 +73,13 @@ function messageOf(err: unknown): string {
 
 async function isCancelled(db: Db, runId: string): Promise<boolean> {
   return (await getWizardRun(db, runId))?.status === 'cancelled'
+}
+
+/** Marks runs whose worker stopped (no heartbeat for STALE_RUN_MS) as failed. Called once when the worker starts. */
+export async function recoverStaleRuns(env: { db: Db; logger: Logger }, now?: Date): Promise<string[]> {
+  const reaped = await reapStaleWizardRuns(env.db, { staleMs: STALE_RUN_MS, message: STALE_RUN_MESSAGE, ...(now ? { now } : {}) })
+  if (reaped.length) env.logger.warn(`[wizard] ${reaped.length} run(s) had no progress for 5 minutes and were marked failed: ${reaped.join(', ')}`)
+  return reaped
 }
 
 /** Ingests one source: reads its file or fetches its URL, extracts the text, and stores the result on the row. */
@@ -107,6 +119,8 @@ export async function runIngest(env: WizardEnv, sourceId: string): Promise<void>
   } catch (err) {
     env.logger.warn(`[wizard] source ${sourceId} failed: ${err instanceof Error ? err.message : String(err)}`)
     await updateWizardSource(env.db, sourceId, { status: 'failed', error: messageOf(err) })
+  } finally {
+    await touchWizardRun(env.db, source.runId)
   }
 }
 
@@ -173,10 +187,6 @@ export async function runResearch(env: WizardEnv, runId: string): Promise<void> 
   }
 }
 
-function sourceLine(number: number, title: string, origin: string): string {
-  return `[${number}] ${title}${origin ? ` — ${origin}` : ''}`
-}
-
 /** One slide that stands in for a slide the model could not write: the outline's points, and a note. */
 function placeholderOps(deck: Deck, slide: OutlineSlide, theme: Theme, slideIndex: number): { ops: Op[]; notes: string } {
   const built = buildSlideElements('title-content', theme, { title: slide.title, bullets: slide.keyPoints }, {})
@@ -190,7 +200,8 @@ function placeholderOps(deck: Deck, slide: OutlineSlide, theme: Theme, slideInde
 /** Generates the deck from the outline. The deck exists already (created by the web app); slides land in it live. */
 export async function runGenerate(env: WizardEnv, runId: string): Promise<void> {
   const run = await getWizardRun(env.db, runId)
-  if (!run || run.status === 'cancelled') return
+  // A retried job for a run that already ended (cancelled, failed by the recovery, or done) does nothing.
+  if (!run || ['cancelled', 'failed', 'done'].includes(run.status)) return
   const deckId = run.deckId
   if (!deckId || !run.outline) {
     await updateWizardRun(env.db, runId, { status: 'failed', error: 'The run has no deck or outline.' })
@@ -240,6 +251,8 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
 
     let defaultsDeleted = false
     let written = 0
+    // Chart data already on the deck: the same chart is not placed on a second slide.
+    const placedCharts = new Set<string>()
     for (let i = 0; i < outline.slides.length; i++) {
       if (await isCancelled(env.db, runId)) break
       const slide = outline.slides[i]!
@@ -251,6 +264,7 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
         tables: slideTables.map((t) => ({ number: t.number, sourceId: t.sourceId, tableIndex: t.tableIndex, name: t.table.name, columns: t.table.columns, rows: t.table.rows })),
       }
       let ops: Op[]
+      let slideChartKey: string | undefined
       try {
         deck = await env.collab.getDeck(deckId)
         const result = await writeWizardSlide({ provider: resolved.provider, compact: resolved.compact }, {
@@ -261,8 +275,10 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
           context,
           theme,
           deck,
+          placedCharts,
         })
         ops = result.ops
+        slideChartKey = result.chartKey
         warnings.push(...result.warnings)
         await recordLlmUsage(env.db, {
           userId: run.userId,
@@ -283,6 +299,7 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
       const batch = [...pending.splice(0), ...ops, ...cleanup]
       try {
         await env.collab.applyOps(deckId, 'wizard', batch)
+        if (slideChartKey) placedCharts.add(slideChartKey)
       } catch (err) {
         // A batch that the collab service refuses is replaced by the placeholder, so the run goes on.
         env.logger.warn(`[wizard] slide ${i + 1} of run ${runId} was refused: ${messageOf(err)}`)
@@ -301,14 +318,7 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
     }
 
     if (brief.includeSources && refs.length) {
-      const lines = refs.map((r) => sourceLine(r.number, r.title, r.origin))
-      const sourceOps: Op[] = []
-      for (let p = 0; p * SOURCES_PER_SLIDE < lines.length; p++) {
-        const part = lines.slice(p * SOURCES_PER_SLIDE, (p + 1) * SOURCES_PER_SLIDE)
-        const title = p === 0 ? 'Sources' : `Sources (${p + 1})`
-        const built = buildSlideElements('title-content', theme, { title, bullets: part }, {})
-        sourceOps.push({ op: 'addSlide', layout: 'title-content', slide: { id: crypto.randomUUID(), notes: 'The numbers in the notes refer to this list.', elements: built.elements } } as Op)
-      }
+      const sourceOps = sourcesSlideOps(theme, refs.map((r) => ({ number: r.number, title: r.title, origin: r.origin })))
       const cleanup: Op[] = !defaultsDeleted ? initialSlides.map((slideId) => ({ op: 'deleteSlide', slideId }) as Op) : []
       await env.collab.applyOps(deckId, 'wizard', [...sourceOps, ...cleanup])
       if (cleanup.length) defaultsDeleted = true
