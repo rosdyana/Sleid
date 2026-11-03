@@ -256,9 +256,9 @@ function renderNode(node: RichNode, key: number): ReactNode {
   const children = renderNodes(node.content)
   switch (node.type) {
     case 'bulletList':
-      return <ul key={key} className="m-0 pl-[1.2em]">{children}</ul>
+      return <ul key={key} className="m-0 list-disc pl-[1.2em]">{children}</ul>
     case 'orderedList':
-      return <ol key={key} className="m-0 pl-[1.2em]">{children}</ol>
+      return <ol key={key} className="m-0 list-decimal pl-[1.2em]">{children}</ol>
     case 'listItem':
       return <li key={key}>{children}</li>
     case 'heading':

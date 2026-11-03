@@ -48,6 +48,9 @@ export const BASE_CSS = `
 .sleid-text { display: flex; flex-direction: column; width: 100%; height: 100%; overflow-wrap: anywhere; color: var(--sleid-text); font-size: var(--sleid-size-body); }
 .sleid-text p { margin: 0 0 0.4em; }
 .sleid-text ul, .sleid-text ol { margin: 0 0 0.4em; padding-left: 1.2em; }
+.sleid-text ul { list-style: disc outside; }
+.sleid-text ol { list-style: decimal outside; }
+.sleid-text ul ul { list-style-type: circle; }
 .sleid-text h1, .sleid-text h2, .sleid-text h3, .sleid-text h4, .sleid-text h5, .sleid-text h6 { margin: 0 0 0.3em; font-family: var(--sleid-font-heading); line-height: 1.15; }
 .sleid-text[data-role="title"] { font-family: var(--sleid-font-heading); }
 .sleid-shape .sleid-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
