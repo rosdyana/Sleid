@@ -4,9 +4,19 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./node": "./src/render-node.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "vitest": "^5.0.3"
+  },
+  "dependencies": {
+    "@sleid/model": "workspace:^",
+    "echarts": "^6.1.0",
+    "reveal.js": "^5.2.1"
   }
 }

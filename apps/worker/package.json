@@ -7,6 +7,29 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "dev": "node --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --env-file-if-exists=../../.env src/index.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sleid/db": "workspace:^",
+    "@sleid/ingest": "workspace:^",
+    "@sleid/jobs": "workspace:^",
+    "@sleid/llm": "workspace:^",
+    "@sleid/model": "workspace:^",
+    "@sleid/pptx": "workspace:^",
+    "@sleid/render": "workspace:^",
+    "@sleid/research": "workspace:^",
+    "@sleid/storage": "workspace:^",
+    "jszip": "^3.10.2",
+    "mermaid": "^12.2.0",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "pdf-lib": "^1.17.1",
+    "vitest": "^5.0.3",
+    "yjs": "^13.6.33"
   }
 }

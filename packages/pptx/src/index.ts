@@ -1,2 +1,400 @@
-// Placeholder: no implementation yet (see docs/DESIGN.md milestones).
-export {}
+// deck to PPTX. Built with pptxgenjs, then post-processed with JSZip for the parts pptxgenjs cannot write
+// (hidden slides). Output is a 16:9 (13.333 x 7.5 in) presentation with native text, shapes, tables and charts.
+import PptxGenJS from 'pptxgenjs'
+import JSZip from 'jszip'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, readableTextOn, type Deck, type DiagramElement, type Element, type GradientFill, type Shadow, type ShapeElement, type TableElement, type VectorElement } from '@sleid/model'
+import { chartPalette, chartSeries, pptxChartKind } from './charts.ts'
+import { letterSpacingPoints, monospaceRuns, richTextRuns, type PptxRun } from './text.ts'
+import { inches, pptxColor, pptxFontFace, points, transparencyFor } from './units.ts'
+import { vectorDataUri } from './vector.ts'
+
+export { chartSeries, pptxChartKind, chartPalette } from './charts.ts'
+export { richTextRuns, monospaceRuns } from './text.ts'
+
+/** Shown in place of a diagram that could not be drawn. Matches the HTML renderer's placeholder text. */
+export const DIAGRAM_PLACEHOLDER = 'Diagram could not be drawn'
+export { inches, points, pptxColor, pptxFontFace, transparencyFor } from './units.ts'
+
+export interface PptxAsset {
+  data: Uint8Array
+  mime: string
+}
+
+export interface DeckToPptxOptions {
+  /** Bytes for an image or background src (an asset URL or a data URL). Null leaves the picture out. */
+  resolveAsset?: (src: string) => Promise<PptxAsset | null>
+  /** A PNG of a rendered Mermaid diagram at the element's size. Null falls back to the source text. */
+  rasterizeDiagram?: (element: DiagramElement) => Promise<PptxAsset | null>
+}
+
+function dataUri(asset: PptxAsset): string {
+  return `${asset.mime};base64,${Buffer.from(asset.data).toString('base64')}`
+}
+
+function firstGradientColor(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const hex = /#[0-9a-fA-F]{3,6}\b/.exec(value)
+  return hex ? pptxColor(hex[0]) : undefined
+}
+
+export async function deckToPptx(deck: Deck, options: DeckToPptxOptions = {}): Promise<Uint8Array> {
+  const pptx = new PptxGenJS()
+  pptx.layout = 'LAYOUT_WIDE'
+  pptx.title = deck.title
+  pptx.author = 'Sleid'
+  pptx.company = 'Sleid'
+
+  const theme = deck.theme
+  const bodyFace = pptxFontFace(theme.fonts.body, 'Arial')
+  const headingFace = pptxFontFace(theme.fonts.heading, bodyFace)
+  const monoFace = pptxFontFace(theme.fonts.mono, 'Consolas')
+  const textColor = pptxColor(theme.colors.text) ?? '202124'
+  const mutedColor = pptxColor(theme.colors.muted) ?? '5F6368'
+  const surfaceColor = pptxColor(theme.colors.surface) ?? 'F8F9FA'
+  const hiddenIndexes: number[] = []
+
+  for (const slide of deck.slides) {
+    const s = pptx.addSlide()
+    if (slide.hidden) hiddenIndexes.push(deck.slides.indexOf(slide))
+
+    // Background: explicit slide colour, else the theme colour. Gradients use their first colour.
+    const bg = slide.background
+    const themeBg = theme.backgroundStyle === 'gradient' ? firstGradientColor(theme.backgroundValue) : undefined
+    const fallbackBg = pptxColor(theme.colors.background) ?? 'FFFFFF'
+    if (bg?.type === 'color') s.background = { color: pptxColor(bg.value) ?? fallbackBg }
+    else if (bg?.type === 'gradient') s.background = { color: firstGradientColor(bg.value) ?? fallbackBg }
+    else if (bg?.type === 'image' || theme.backgroundStyle === 'image') {
+      const src = bg?.type === 'image' ? bg.value : (theme.backgroundValue ?? '')
+      const asset = options.resolveAsset ? await options.resolveAsset(src) : null
+      s.background = asset ? { data: dataUri(asset) } : { color: fallbackBg }
+    } else s.background = { color: themeBg ?? fallbackBg }
+
+    const ordered = [...slide.elements].sort((a, b) => a.z - b.z)
+    for (const el of ordered) {
+      await addElement(pptx, s, el, { bodyFace, headingFace, monoFace, textColor, mutedColor, surfaceColor, theme, options })
+    }
+    if (logoAppliesToSlide(slide, deck)) await addBrandLogo(s, deck, options)
+    if (slide.notes) s.addNotes(slide.notes)
+  }
+
+  const out = (await pptx.write({ outputType: 'uint8array' })) as Uint8Array
+  return postProcess(out, hiddenIndexes)
+}
+
+/** Width and height of a PNG from its header. Other formats return undefined (the logo then keeps a square box). */
+function pngAspect(asset: PptxAsset): number | undefined {
+  const d = asset.data
+  if (asset.mime !== 'image/png' || d.byteLength < 24) return undefined
+  const view = new DataView(d.buffer, d.byteOffset, d.byteLength)
+  const w = view.getUint32(16)
+  const h = view.getUint32(20)
+  return w > 0 && h > 0 ? w / h : undefined
+}
+
+/**
+ * The brand logo as a picture on the slide, at the placement's corner, width and margin (M9).
+ * The slide master is not used: each slide carries its own copy, so every slide matches the render.
+ */
+async function addBrandLogo(s: ReturnType<PptxGenJS['addSlide']>, deck: Deck, options: DeckToPptxOptions): Promise<void> {
+  const logo = deck.brand?.logo
+  if (!logo || !options.resolveAsset) return
+  const asset = await options.resolveAsset(logo.src)
+  if (!asset) return
+  const { corner, widthPct, margin } = logo.placement
+  const width = (CANVAS_WIDTH * widthPct) / 100
+  const height = width / (pngAspect(asset) ?? 1)
+  const x = corner.endsWith('l') ? margin : CANVAS_WIDTH - margin - width
+  const y = corner.startsWith('t') ? margin : CANVAS_HEIGHT - margin - height
+  s.addImage({ data: dataUri(asset), x: inches(x), y: inches(y), w: inches(width), h: inches(height), altText: 'Logo' })
+}
+
+interface Ctx {
+  bodyFace: string
+  headingFace: string
+  monoFace: string
+  textColor: string
+  mutedColor: string
+  surfaceColor: string
+  theme: Deck['theme']
+  options: DeckToPptxOptions
+}
+
+/** The box a pptxgenjs call needs, from a canvas element. */
+function box(el: Element) {
+  return { x: inches(el.x), y: inches(el.y), w: inches(el.w), h: inches(el.h), rotate: el.rotation || undefined }
+}
+
+function shapeTransparency(el: Element): number | undefined {
+  const t = transparencyFor(el.opacity)
+  return t > 0 ? t : undefined
+}
+
+async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>, el: Element, ctx: Ctx): Promise<void> {
+  const transparency = shapeTransparency(el)
+  switch (el.type) {
+    case 'text': {
+      const style = el.style
+      const fontSize = typeof style.fontSize === 'number' ? style.fontSize : ctx.theme.sizes.body
+      const runs = richTextRuns(el.content, {
+        fontFace: pptxFontFace(style.fontFamily, el.role === 'title' ? ctx.headingFace : ctx.bodyFace),
+        monoFace: ctx.monoFace,
+        fontSize,
+        color: pptxColor(style.color) ?? ctx.textColor,
+        align: style.align,
+        // M10 typography: weight 600+ is bold, letter spacing in em scales with the font size, transform goes into the text.
+        bold: typeof style.fontWeight === 'number' && style.fontWeight >= 600,
+        charSpacing: letterSpacingPoints(style.letterSpacing !== undefined ? `${style.letterSpacing}em` : undefined, fontSize),
+        textTransform: style.textTransform,
+      })
+      s.addText(runs as never, {
+        ...box(el),
+        valign: style.valign,
+        align: style.align === 'justify' ? 'left' : style.align,
+        margin: 0,
+        transparency,
+        fit: 'none',
+      })
+      return
+    }
+    case 'shape': {
+      const fill = gradientPaint(el.gradient) ?? pptxColor(el.fill)
+      const line = pptxColor(el.stroke)
+      const dash = dashType(el.strokeDash)
+      const shadow = shadowOptions(el.shadow)
+      const rectRadius = el.shape === 'roundRect' && el.radius !== undefined ? roundRectRadius(el) : undefined
+      const common = {
+        ...box(el),
+        fill: fill ? { color: fill, transparency } : { type: 'none' as const },
+        line: line && el.strokeWidth > 0 ? { color: line, width: points(el.strokeWidth), ...(dash ? { dashType: dash } : {}) } : { type: 'none' as const },
+        ...(shadow ? { shadow } : {}),
+        ...(rectRadius ? { rectRadius } : {}),
+      }
+      if (el.shape === 'line') {
+        const y = inches(el.y + el.h / 2)
+        s.addShape(pptx.ShapeType.line, {
+          x: inches(el.x),
+          y,
+          w: inches(el.w),
+          h: 0,
+          line: { color: line ?? ctx.textColor, width: Math.max(points(el.strokeWidth), 1), ...(dash ? { dashType: dash } : {}) },
+          rotate: el.rotation || undefined,
+        })
+        return
+      }
+      const type = SHAPE_TYPE[el.shape]!(pptx)
+      const text = el.text ? richTextRuns(el.text, { fontFace: ctx.bodyFace, monoFace: ctx.monoFace, fontSize: ctx.theme.sizes.body, color: ctx.textColor, align: 'center' }) : []
+      if (text.length > 0) {
+        s.addText(text as never, { ...common, shape: type as never, valign: 'middle', align: 'center', margin: 4 })
+      } else {
+        s.addShape(type, common)
+      }
+      return
+    }
+    case 'image': {
+      const asset = ctx.options.resolveAsset && el.src ? await ctx.options.resolveAsset(el.src) : null
+      if (!asset) return
+      s.addImage({
+        data: dataUri(asset),
+        ...box(el),
+        sizing: el.crop ? undefined : { type: el.fit === 'contain' ? 'contain' : 'cover', w: inches(el.w), h: inches(el.h) },
+        transparency,
+        altText: el.alt,
+        // M10. PowerPoint can only crop a picture to an ellipse here, so a radius counts only when it reaches half
+        // the short side (a circle or oval). Smaller corner radii are left out rather than drawn wrong.
+        ...(el.radius !== undefined && el.radius > 0 && el.radius >= Math.min(el.w, el.h) / 2 ? { rounding: true } : {}),
+      })
+      return
+    }
+    case 'vector': {
+      // Exported as an SVG picture built from the same paths the renderer draws. See vector.ts for the caveat.
+      const data = vectorDataUri(el)
+      if (data) s.addImage({ data, ...box(el), altText: el.alt ?? 'Vector icon', transparency })
+      return
+    }
+    case 'chart': {
+      const kind = pptxChartKind(el)
+      const type = CHART_TYPE[kind]!(pptx)
+      const colors = chartPalette(el, ctx.theme)
+      const opts: Record<string, unknown> = {
+        ...box(el),
+        showLegend: el.options.legend,
+        legendPos: 'b',
+        showTitle: !!el.options.title,
+        title: el.options.title,
+        titleFontFace: ctx.headingFace,
+        titleColor: ctx.textColor,
+        chartColors: colors,
+        catAxisLabelColor: ctx.mutedColor,
+        valAxisLabelColor: ctx.mutedColor,
+        legendColor: ctx.textColor,
+        valGridLine: { color: 'D9D9D9', style: 'solid', size: 0.5 },
+        catGridLine: { style: 'none' },
+        showValue: false,
+      }
+      if (kind === 'bar') {
+        opts.barDir = 'col'
+        opts.barGrouping = el.chartType === 'stacked-bar' || el.options.stacked ? 'stacked' : 'clustered'
+      }
+      if (kind === 'doughnut') opts.holeSize = 50
+      if (kind === 'line') {
+        opts.lineSize = 2
+        opts.lineDataSymbol = 'circle'
+      }
+      s.addChart(type as never, chartSeries(el) as never, opts as never)
+      return
+    }
+    case 'diagram': {
+      const png = ctx.options.rasterizeDiagram ? await ctx.options.rasterizeDiagram(el) : null
+      if (png) {
+        s.addImage({ data: dataUri(png), ...box(el), altText: 'Diagram' })
+      } else {
+        // Same neutral placeholder as the HTML renderer. The source is never shown on a slide.
+        const runs: PptxRun[] = [{ text: DIAGRAM_PLACEHOLDER, options: { fontFace: ctx.bodyFace, fontSize: 28, color: ctx.mutedColor } }]
+        s.addText(runs as never, { ...box(el), fill: { color: ctx.surfaceColor }, margin: 12, valign: 'middle', align: 'center' })
+      }
+      return
+    }
+    case 'table':
+      addTable(s, el, ctx)
+      return
+    case 'code':
+      s.addText(monospaceRuns(el.code, { fontFace: ctx.bodyFace, monoFace: ctx.monoFace, fontSize: 28, color: ctx.textColor, align: 'left' }) as never, {
+        ...box(el),
+        fill: { color: ctx.surfaceColor },
+        margin: 24,
+        valign: 'top',
+        transparency,
+      })
+      return
+    case 'embed': {
+      // Embeds are not fetched in the export. The slide gets a labelled link instead.
+      const runs: PptxRun[] = [
+        { text: 'Embedded page: ', options: { fontFace: ctx.bodyFace, fontSize: 28, color: ctx.mutedColor } },
+        { text: el.url, options: { fontFace: ctx.bodyFace, fontSize: 28, color: pptxColor(ctx.theme.colors.accent) ?? '0B57D0', hyperlink: { url: el.url }, breakLine: true } },
+      ]
+      s.addText(runs as never, { ...box(el), fill: { color: ctx.surfaceColor }, margin: 16, valign: 'middle', align: 'center' })
+      return
+    }
+  }
+}
+
+// PowerPoint has no gradient in pptxgenjs's shape options, so a gradient exports as a flat fill in its last
+// colour that PowerPoint can read. The gradient itself is lost; the flat colour is the closest single value.
+function gradientPaint(g: GradientFill | undefined): string | undefined {
+  if (!g) return undefined
+  let last: string | undefined
+  for (const stop of g.stops) last = pptxColor(stop.color) ?? last
+  return last
+}
+
+// Dashed and dotted outlines. pptxgenjs writes these as DrawingML preset dashes.
+function dashType(dash: ShapeElement['strokeDash']): 'dash' | 'sysDot' | undefined {
+  if (dash === 'dashed') return 'dash'
+  if (dash === 'dotted') return 'sysDot'
+  return undefined
+}
+
+// Canvas px radius to the inches pptxgenjs expects (it turns this into the roundRect adjust value). Clamped to half the short side.
+function roundRectRadius(el: ShapeElement): number {
+  return inches(Math.max(0, Math.min(el.radius ?? 0, el.w / 2, el.h / 2)))
+}
+
+// A CSS box-shadow as a DrawingML outer shadow. The offset becomes a distance and an angle (clockwise from
+// the x axis, as in DrawingML). The spread has no equivalent here and is left out.
+function shadowOptions(shadow: Shadow | undefined): PptxGenJS.ShadowProps | undefined {
+  if (!shadow) return undefined
+  const angle = ((Math.round((Math.atan2(shadow.y, shadow.x) * 180) / Math.PI) % 360) + 360) % 360
+  const alpha = /^rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(shadow.color.trim())
+  const opacity = alpha ? Math.min(Math.max(Number(alpha[1]), 0), 1) : 0.35
+  return {
+    type: 'outer',
+    blur: Math.min(Math.max(points(shadow.blur), 0), 100),
+    offset: Math.min(Math.max(points(Math.hypot(shadow.x, shadow.y)), 0), 200),
+    angle,
+    color: pptxColor(shadow.color) ?? '000000',
+    opacity,
+  }
+}
+
+const SHAPE_TYPE: Record<string, (pptx: PptxGenJS) => PptxGenJS.ShapeType> = {
+  rect: (p) => p.ShapeType.rect,
+  roundRect: (p) => p.ShapeType.roundRect,
+  ellipse: (p) => p.ShapeType.ellipse,
+  triangle: (p) => p.ShapeType.triangle,
+  arrow: (p) => p.ShapeType.rightArrow,
+  line: (p) => p.ShapeType.line,
+  star: (p) => p.ShapeType.star5,
+}
+
+const CHART_TYPE: Record<string, (pptx: PptxGenJS) => PptxGenJS.CHART_NAME> = {
+  bar: (p) => p.ChartType.bar,
+  line: (p) => p.ChartType.line,
+  area: (p) => p.ChartType.area,
+  pie: (p) => p.ChartType.pie,
+  doughnut: (p) => p.ChartType.doughnut,
+  scatter: (p) => p.ChartType.scatter,
+}
+
+function addTable(s: ReturnType<PptxGenJS['addSlide']>, el: TableElement, ctx: Ctx): void {
+  const cols = Math.max(1, ...el.rows.map((r) => r.length))
+  const headerFill = typeof el.style?.headerFill === 'string' ? pptxColor(el.style.headerFill) : undefined
+  const border = typeof el.style?.borderColor === 'string' ? pptxColor(el.style.borderColor) : undefined
+  const fontPx = typeof el.style?.fontSize === 'number' ? el.style.fontSize : ctx.theme.sizes.small
+  // The header text is picked to read on the header fill (the same rule as the HTML render and the editor).
+  const headerText = headerFill ? (pptxColor(readableTextOn(`#${headerFill}`, ctx.theme.colors.text)) ?? ctx.textColor) : ctx.textColor
+  const rows = el.rows.map((row, r) => {
+    const isHeader = el.header && r === 0
+    return Array.from({ length: cols }, (_, c) => ({
+      text: row[c] ?? '',
+      options: {
+        bold: isHeader,
+        fill: isHeader && headerFill ? { color: headerFill } : undefined,
+        color: isHeader && headerFill ? headerText : ctx.textColor,
+        fontFace: ctx.bodyFace,
+        fontSize: points(fontPx),
+      },
+    }))
+  })
+  const colW = Array.from({ length: cols }, () => inches(el.w) / cols)
+  s.addTable(rows as never, {
+    x: inches(el.x),
+    y: inches(el.y),
+    w: inches(el.w),
+    colW,
+    border: { type: 'solid', pt: 0.75, color: border ?? 'BDBDBD' },
+    margin: 0.05,
+  })
+}
+
+/**
+ * Fixes two things pptxgenjs gets wrong, on each slide part:
+ * - It repeats <a:pPr> inside a paragraph whenever a run inherits alignment. Only the first one is valid, so the rest go.
+ * - It cannot write hidden slides. A hidden slide keeps its place and gets show="0" on <p:sld>.
+ */
+async function postProcess(pptxBytes: Uint8Array, hiddenIndexes: number[]): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(pptxBytes)
+  const hidden = new Set(hiddenIndexes)
+  for (const name of Object.keys(zip.files)) {
+    if (!/^ppt\/slides\/slide\d+\.xml$/.test(name)) continue
+    const number = Number(/slide(\d+)\.xml$/.exec(name)![1])
+    let xml = keepFirstParagraphProps(await zip.file(name)!.async('string'))
+    if (hidden.has(number - 1)) xml = xml.replace(/<p:sld(\s|>)/, (_m, tail: string) => `<p:sld show="0"${tail}`)
+    zip.file(name, xml)
+  }
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })
+}
+
+export function keepFirstParagraphProps(xml: string): string {
+  return xml.replace(/<a:p>([\s\S]*?)<\/a:p>/g, (_m, body: string) => {
+    let seen = false
+    const cleaned = body.replace(/<a:pPr\b[^>]*?(?:\/>|>[\s\S]*?<\/a:pPr>)/g, (pPr: string) => {
+      if (seen) return ''
+      seen = true
+      return pPr
+    })
+    return `<a:p>${cleaned}</a:p>`
+  })
+}
+
+export { pptxToDeck, PptxImportError, MAX_IMPORT_IMAGE_BYTES, DEFAULT_IMPORT_LIMITS } from './import/index.ts'
+export type { PptxToDeckOptions, PptxToDeckResult, ImportLimits } from './import/index.ts'

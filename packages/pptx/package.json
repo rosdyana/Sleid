@@ -8,5 +8,16 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sleid/model": "workspace:^",
+    "fast-xml-parser": "5.11.2",
+    "fast-xml-validator": "1.4.2",
+    "jszip": "^3.10.2",
+    "pptxgenjs": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "vitest": "^5.0.3"
   }
 }

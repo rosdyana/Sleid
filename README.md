@@ -1,42 +1,104 @@
 # Sleid
 
-A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, and (planned) live co-editing, export, and an AI assistant. Design and milestones: [docs/DESIGN.md](docs/DESIGN.md).
+A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), import (PowerPoint, Google Slides, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 0** (scaffold, Google login, schema, Blank deck, editor shell skeleton). No slide editing yet.
+Status: **milestone 9** done (templates and brand kits: built-in templates, user templates and the gallery, brand kits with a logo overlay, the AI brand constraint, the wizard's template and kit, thumbnails, and the settings pages). Milestone 8 (import) is also done. See the status table and the M9 section in DESIGN.md.
 
 ## Layout
 
 ```
-apps/web        TanStack Start app (UI, server functions, /api/auth, /api/health)
-apps/collab     placeholder (Hocuspocus, milestone 2)
-apps/worker     placeholder (pg-boss jobs, milestone 3)
-packages/*      placeholders: model, render, pptx, llm, ui
-compose.yml     local Postgres 17 on 127.0.0.1:5433
+apps/web        TanStack Start app: UI, server functions, /api/auth, /api/health
+apps/collab     Hocuspocus WebSocket server (Yjs), auth, persistence, internal API
+apps/worker     export worker: pg-boss consumer, Chrome for PDF/PNG/diagrams, PPTX, HTML zip
+packages/db     @sleid/db: Drizzle schema, DB client, deck persistence, roles, sharing, collab tokens, assets, exports, publish
+packages/storage @sleid/storage: storage driver (local disk; S3 stub), data directory resolution
+packages/jobs   @sleid/jobs: pg-boss queue wrapper (export jobs)
+packages/pptx   @sleid/pptx: deck to PPTX (pptxgenjs, native text, shapes, tables, charts)
+packages/model  deck schema, Yjs binding, deck-ops
+packages/render deck to reveal.js HTML
+packages/llm    @sleid/llm: provider adapters (Claude on Foundry, Azure OpenAI, local OpenAI-compatible), structured output, assistant abilities
+packages/*      placeholders: ui
+compose.yml     local Postgres 17 on 127.0.0.1:5433 (no collab container yet, see below)
 ```
 
 ## Prerequisites
 
 - Node 24, pnpm 10.4.1 (`corepack enable` or `npm i -g pnpm@10.4.1`)
 - Docker (for local Postgres)
-- Chromium for the smoke test: `pnpm exec playwright install chromium`, or point `CHROME_PATH` at an installed Chrome
+- Chromium for the browser checks: `pnpm exec playwright install chromium`, or point `CHROME_PATH` at an installed Chrome
 
 ## Setup
 
 ```bash
 pnpm install
 cp .env.example .env
-openssl rand -base64 32     # paste the output as BETTER_AUTH_SECRET in .env
+openssl rand -base64 32     # BETTER_AUTH_SECRET
+openssl rand -base64 48     # COLLAB_TOKEN_SECRET (at least 32 characters)
+openssl rand -hex 24        # COLLAB_INTERNAL_SECRET (at least 16 characters)
 ```
 
-Fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (see below), then:
+Paste those values into `.env`. Fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (see below), then:
 
 ```bash
 docker compose up -d db     # Postgres on 127.0.0.1:5433
 pnpm db:migrate             # applies apps/web/drizzle/*.sql
-pnpm dev                    # http://localhost:3000
+pnpm dev                    # web on http://localhost:3000, collab on ws://localhost:3001, export worker
 ```
 
-Open http://localhost:3000, sign in with Google, and click **Blank deck**.
+Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open the same deck in a second browser profile (or a private window) to see live co-editing.
+
+`pnpm dev` runs all three services. If `COLLAB_TOKEN_SECRET` or `COLLAB_INTERNAL_SECRET` is missing, the collab service exits at startup with a message that names the variable.
+
+## Environment variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `DATABASE_URL` | web, collab | Postgres connection |
+| `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` | web | Session signing and the public origin |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | web | Google sign-in |
+| `SLEID_TEST_AUTH` | web | `1` enables email+password sign-in for the browser checks. Refused when `NODE_ENV=production`. |
+| `COLLAB_TOKEN_SECRET` | web (signs), collab (verifies) | HMAC key for the 5-minute collab tokens. At least 32 characters. Must match in both. |
+| `MCP_RATE_LIMIT_PER_MINUTE` | web | Calls to `/mcp` per token per minute (default 120). Counted per process, in memory. |
+| `MCP_MAX_BODY_BYTES` | web | Largest request body accepted by `/mcp` (default 16777216, 16 MB). The body is held in memory. Through `import_deck` that is a pptx of about 12 MB. |
+| `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | web | Google Drive Picker for Slides import (M8). Both set: the **Choose from Google Drive** button shows. The key is a browser key and is sent to the browser on purpose. |
+| `SLEID_TEST_GOOGLE_EXPORT_ORIGIN` | web | Test only. Sends the Google Slides export to a local fake server (`tests/m8.mjs`). Honoured only with `SLEID_TEST_AUTH=1`, refused when `NODE_ENV=production`. |
+| `COLLAB_INTERNAL_SECRET` | web, collab | Sent as `x-sleid-internal` on every internal API call. At least 16 characters. |
+| `COLLAB_PORT` | collab | WebSocket port, default `3001` |
+| `COLLAB_HOST` | collab | WebSocket bind address, default `127.0.0.1`. Use `0.0.0.0` only in a container. |
+| `COLLAB_INTERNAL_PORT`, `COLLAB_INTERNAL_HOST` | collab | Internal API listener, default `127.0.0.1:3002`. It is never on the WebSocket port. |
+| `COLLAB_INTERNAL_URL` | web | Where web reaches the internal API, default `http://127.0.0.1:3002` |
+| `VITE_COLLAB_URL` | web (browser) | WebSocket URL the editor connects to, default `ws://localhost:3001` |
+| `STORAGE_DRIVER` | web, worker | `local` (default). `s3` is a stub and refuses to start. |
+| `ASSET_DIR` | web, worker | Uploaded images. Default `data/assets` under the repository root. |
+| `EXPORT_DIR` | web, worker | Finished exports. Default `data/exports` under the repository root. |
+| `CHROME_PATH` | worker | Chrome for PDF, PNG/JPG and PPTX diagrams. Empty uses Playwright's bundled Chromium. |
+| `EXPORT_CONCURRENCY` | worker | Export jobs at once, 1 to 32. Default 2. |
+| `EXPORT_TMP_DIR` | worker | Scratch folder for export work. Default: the OS temp directory. |
+| `LLM_SECRET_KEY` | web | 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts saved provider keys (AES-256-GCM). Without it a key cannot be saved. |
+| `ADMIN_EMAILS` | web | Comma-separated administrator emails. Only they can add or change workspace providers. |
+| `SLEID_LLM_KIND`, `SLEID_LLM_ENDPOINT`, `SLEID_LLM_API_KEY`, `SLEID_LLM_MODEL`, `SLEID_LLM_API_VERSION`, `SLEID_LLM_STRUCTURED`, `SLEID_LLM_SUPPORTS_IMAGES`, `SLEID_LLM_NAME` | web | Optional server-wide default provider (see AI assistant below). |
+| `AI_RATE_LIMIT_MAX`, `AI_RATE_LIMIT_WINDOW_SECONDS` | web | Assistant requests per user in a sliding window. Default 30 per 600 seconds. |
+| `LLM_USER_ALLOW_PRIVATE_URLS` | web | `1` lets a user's own AI provider use loopback and private addresses (a local Ollama or LM Studio). Off by default. See the note below. |
+
+**AI provider endpoints.** Every provider endpoint is checked when it is saved and before each request. A user's own provider may not point at loopback, private, shared (CGNAT) or other non-public addresses, so the server cannot be used to reach its own services (for example the collab internal API on `127.0.0.1:3002`). Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) are refused for every provider, always. Workspace providers (added by an administrator) and the server default may use private addresses.
+
+- **Local, single-user setup:** set `LLM_USER_ALLOW_PRIVATE_URLS=1` in `.env`, then add the local server (for example `http://127.0.0.1:11434/v1`) as your own provider.
+- **Shared setup:** leave the flag off, and have an administrator (`ADMIN_EMAILS`) add the local server as a workspace provider.
+
+Anyone who can set the flag, or who uses a user provider on a private network, can probe that network through the error messages, so keep it off on a multi-user server.
+
+## Import (M8)
+
+**New ▸ Import file…** on the dashboard, or **File ▸ Import slides…** in the editor (the new deck opens in a new tab). Both open the same dialog:
+
+- **File**: a `.pptx`, `.md` / `.markdown` or `.json`, by drop or by choice. The server checks the content (the zip signature for pptx, UTF-8 and no NUL bytes for text, valid JSON for json), not the file name. PowerPoint up to 50 MB; Markdown and JSON up to 5 MB.
+- **Google Slides**: paste a link of the form `https://docs.google.com/presentation/d/<id>/…`. The presentation must be shared as **Anyone with the link**; a private one is refused with a message that says so. With `GOOGLE_PICKER_API_KEY` and `GOOGLE_CLOUD_PROJECT_NUMBER` set, **Choose from Google Drive** opens the Picker, after you connect Drive once (incremental consent for the `drive.file` scope).
+
+The import runs in the worker (`pnpm dev` runs it). The dialog polls its progress, then shows the new deck with a list of warnings (things that were left out, such as an unsupported shape or a picture that was too large). Each import counts toward a limit of 10 an hour per user.
+
+Markdown splits on `---` lines, and the title comes from the front matter or the first slide. JSON is the deck format the editor downloads. Speaker notes, charts (as native charts), tables and images come across from PowerPoint; theme colours and fonts are best effort (see DESIGN.md, M8).
+
+**MCP.** `import_deck` makes a deck from a file sent as base64 (pptx) or as text (markdown, json). Through MCP a pptx can be about 12 MB at most, because the request body is capped at 16 MB (`MCP_MAX_BODY_BYTES`) and base64 adds a third. Larger files: use the editor's import.
 
 ## Google OAuth client
 
@@ -47,41 +109,265 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**.
 5. Under **Authorized redirect URIs** add `http://localhost:3000/api/auth/callback/google`.
 6. Copy the client ID and secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
 
+**Google Drive Picker (optional, for Slides import from Drive).** In the same Google Cloud project:
+
+1. Enable the **Google Picker API** and the **Google Drive API**.
+2. Under **Credentials**, create an **API key**. Restrict it to the Picker API and to your origin (`http://localhost:3000`). It is a browser key: the page loads Google's Picker with it, so it is visible to the browser. Put it in `.env` as `GOOGLE_PICKER_API_KEY`.
+3. Copy the project **number** (not the project id) into `GOOGLE_CLOUD_PROJECT_NUMBER`.
+4. The consent screen must list the scope `https://www.googleapis.com/auth/drive.file`. Sleid asks for it only when you connect Drive, and then reads only the presentations you pick.
+
+Restart `pnpm dev` after changing `.env`. Without these two values the Drive button does not show.
+
 Without these values the Google button will fail at sign-in. The server logs a warning at startup.
 
 ## Scripts
 
 | Command | What it does |
 |---|---|
-| `pnpm dev` | Dev server for apps/web (port 3000) |
+| `pnpm dev` | Web (port 3000), collab (port 3001) and the export worker together |
 | `pnpm build` | Build every workspace that has a build script (apps/web) |
 | `pnpm typecheck` | `tsc --noEmit` in every workspace |
-| `pnpm test` | Vitest unit tests across apps/* and packages/* |
-| `pnpm db:generate` | Generate a Drizzle migration from `apps/web/src/db/schema` |
+| `pnpm test` | Vitest across apps/* and packages/*. DB tests need Postgres on 127.0.0.1:5433 and skip with a message when it is down. |
+| `pnpm db:generate` | Generate a Drizzle migration from `packages/db/src/schema` into `apps/web/drizzle` |
 | `pnpm db:migrate` | Apply migrations using `DATABASE_URL` |
-| `pnpm --filter @sleid/web test:e2e` | Playwright smoke test (needs the dev server, see below) |
+| `pnpm --filter @sleid/web test:e2e` | Smoke test (single user, needs the dev servers) |
+| `pnpm --filter @sleid/web test:e2e:collab` | Two-browser co-editing check (needs the dev servers) |
+| `pnpm --filter @sleid/web test:e2e:export` | Export, publish and public page check (needs the dev servers and Chrome) |
+| `pnpm --filter @sleid/web test:e2e:ai` | Assistant check against a fake local model server (needs the dev servers, `LLM_SECRET_KEY` and Chrome) |
+| `pnpm --filter @sleid/web test:e2e:mcp` | MCP check over HTTP against the live editor (needs the dev servers and a token) |
+| `pnpm --filter @sleid/web test:e2e:wizard` | Prompt-to-deck check with a fake model and fake SearXNG (needs `node tests/fake-searxng.mjs 4412` and `SEARXNG_URL=http://127.0.0.1:4412`) |
+| `pnpm --filter @sleid/web test:e2e:m7` | Comments, version history, presenter and phone remote (needs the dev servers and Chrome; uses `COLLAB_INTERNAL_SECRET`) |
+| `pnpm --filter @sleid/web test:e2e:m9` | Templates and brand kits: the built-in Quarterly review (six slides, chart, table header), Save as template (everyone, and private), the gallery with thumbnails and what a second user sees, a kit with a PNG logo applied in the editor (live for a collaborator), present mode, the PNG export's logo pixels, an AI proposal snapped to the kit palette, and the wizard with a template and a kit (needs the dev servers with `SLEID_TEST_AUTH=1`, `LLM_SECRET_KEY`, `SEARXNG_URL` and the fake SearXNG on 4412, the worker, Chrome and `COLLAB_INTERNAL_SECRET`) |
+| `pnpm --filter @sleid/web test:e2e:m8` | Import: PPTX (from a seeded deck), Markdown, JSON, a public Google Slides link (fake server), a private link, a text file named .pptx (needs the dev servers started with `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413`, Chrome and `COLLAB_INTERNAL_SECRET`) |
 
-## Smoke test (end to end)
+## Browser checks
 
-The smoke test uses a test-only email+password login. It is enabled only when `SLEID_TEST_AUTH=1` and `NODE_ENV` is not `production`. The server refuses to serve when both are set.
+Both checks use the test-only email+password login, so start the stack with `SLEID_TEST_AUTH=1`:
 
 ```bash
 docker compose up -d db
 pnpm db:migrate
 SLEID_TEST_AUTH=1 pnpm dev          # terminal 1
 CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  pnpm --filter @sleid/web test:e2e  # terminal 2
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e           # terminal 2: smoke
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e:collab    # terminal 2: co-editing
 ```
 
-The script checks that `/` redirects to `/login` when signed out, signs up and in through `/api/auth`, creates a deck from **Blank deck**, and asserts the editor shell (menu bar with "Extensions", Share button, title field). It also checks `/api/health`.
+The import check (`test:e2e:m8`) starts a fake Google server itself, on port 4413, so the dev stack must run with the Google test override:
+
+```bash
+SLEID_TEST_AUTH=1 SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413 pnpm dev
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e:m8
+```
+
+The templates and brand kits check (`test:e2e:m9`) needs the same stack as the wizard and assistant checks, with the fake SearXNG on port 4412, and the worker (thumbnails and exports):
+
+```bash
+SLEID_TEST_AUTH=1 SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413 \
+LLM_SECRET_KEY=<32 random bytes, base64> SEARXNG_URL=http://127.0.0.1:4412 pnpm dev
+node apps/web/tests/fake-searxng.mjs 4412          # terminal 2
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e:m9
+```
+
+The check starts its own fake OpenAI-compatible server and cleans up the brand kit and templates it made. The decks it makes keep unique names.
+
+The export check (`test:e2e:export`) builds a deck with text, a chart, an uploaded image and a Mermaid diagram, exports PDF and PPTX from the menus, verifies both files, publishes the deck, opens the public page logged out, unpublishes it, and writes PNG renders of the outputs (macOS `sips`, and LibreOffice if `soffice` is installed). It needs the worker, so it runs under `pnpm dev`.
+
+The smoke test signs up, creates a deck, and checks the editor and the present view. The co-editing check uses three accounts. Owner A shares the deck with B by email and turns on "anyone with the link: viewer". B edits live with A. C opens the link and must stay read-only, including against a forced write with a valid viewer token. Screenshots go to `SCREENSHOT_DIR`.
+
+The test runs need `COLLAB_TOKEN_SECRET` and `COLLAB_INTERNAL_SECRET` in the environment, because the co-editing check signs a viewer token and reads the internal API.
+
+The assistant check (`test:e2e:ai`) needs `LLM_SECRET_KEY` as well. It starts a fake OpenAI-compatible server (`apps/web/tests/fake-openai-server.mjs`), adds it in Settings › AI, and runs the flows: generate a slide with Preview, Apply and Undo; shorten a text box; a chart from a prompt; a theme with a brand colour; a collaborator who sees the change live; and a viewer who sees no AI. It writes `ai-settings.png`, `ai-preview.png` and `ai-panel.png` to `SCREENSHOT_DIR`.
+
+## Export
+
+File ▸ Download in the editor:
+
+| Item | Made by | Notes |
+|---|---|---|
+| PDF | worker (Chrome) | One page per visible slide, 1920 × 1080. Options: speaker notes (one extra page after each slide with notes), hidden slides. |
+| PowerPoint | worker (pptxgenjs) | 16:9. Text, shapes, tables and charts are native and editable. Hidden slides are kept and marked hidden. See the fidelity table in DESIGN.md. |
+| PNG / JPG | worker (Chrome) | All visible slides in a zip, or the current slide alone. Scale 0.5, 1 or 2. |
+| HTML (zip) | worker | Standalone `index.html` with reveal.js inlined and the images next to it. Works offline. |
+| Markdown, JSON | browser | Same as before M3. |
+
+A worker export appears in the progress tray at the bottom right. Its download link is only offered to the person who asked for it. Exports run in `apps/worker`, so `pnpm dev` must be running for them to finish. Exports read the live document from the collab service and fall back to the saved state when it is down.
+
+Exports never load anything from the open internet. The worker blocks every request except its own bundle server on 127.0.0.1 and `data:` URLs. Embeds and images that point at external URLs therefore come out blank in PDF and PNG, and are not fetched for PPTX.
+
+**Publish to web** (Share dialog, owner and editor): a link like `/p/<token>` shows the presentation read-only, with no sign-in and a "Made with Sleid" footer. Search engines are asked not to index it unless you tick the option. Turning publish off clears the link.
+
+**Images** are uploaded to `/api/decks/<deckId>/assets` (10 MB, PNG, JPEG, GIF, WebP or SVG) and stored under `ASSET_DIR`. SVG files with scripts or event handlers are refused, and SVG responses carry `Content-Security-Policy: sandbox`.
+
+## AI assistant
+
+Open the **AI** tab in the right panel, press **✨ Ask AI** in the formula bar, or use **Tools ▸ AI** items. Editors and owners can use it. Viewers and commenters do not see it.
+
+Every request sends the relevant part of the deck (the theme, the slide outline, the selection, and the text you asked about) to the provider you pick. Deck text is treated as data, not as instructions. The assistant never changes the deck itself. It proposes a change as a card:
+
+- **Preview** shows the deck with the change, on a throwaway copy, with a "Preview" ribbon. Nothing is saved.
+- **Apply** makes the change like any edit, through the live document. Undo (Ctrl+Z) reverts it, and collaborators see it.
+- **Discard** drops it.
+
+Each card shows the provider, the model, token counts and any warnings (for example, a colour adjusted for contrast, or alt text written without seeing the picture).
+
+### Set up a provider
+
+Open **Settings › AI** from the dashboard (the **AI settings** link). **Add provider** takes these fields. **Test connection** sends one short request and reports OK with the model and the latency, or the reason it failed. The key is stored encrypted and is never shown again; the page shows `••••• set`. To change it, type a new key. To keep it, leave the field empty.
+
+Set `LLM_SECRET_KEY` in `.env` before you add a key (`openssl rand -base64 32`). Restart `pnpm dev` after changing `.env`.
+
+**Claude on Microsoft Foundry** (the same deployment papereview uses)
+
+- In Settings › AI choose *Claude on Microsoft Foundry*. For **Resource name or endpoint URL** enter your resource name (for example `my-resource`), or the portal URL `https://my-resource.services.ai.azure.com/anthropic/`. For **Deployment name** enter `claude-opus-5-5` (or your deployment). Paste the resource's API key. Keep *Structured output* on Automatic.
+- Or set it for the whole deployment:
+
+  ```bash
+  SLEID_LLM_KIND=foundry-claude
+  SLEID_LLM_ENDPOINT=my-resource          # or https://my-resource.services.ai.azure.com/anthropic/
+  SLEID_LLM_API_KEY=...                   # the Foundry resource key
+  SLEID_LLM_MODEL=claude-opus-5-5         # your deployment name
+  SLEID_LLM_SUPPORTS_IMAGES=true          # alt text can look at pictures
+  ```
+
+**Azure OpenAI** (or any Foundry OpenAI-compatible deployment)
+
+- Choose *Azure OpenAI*. **Endpoint**: `https://<resource>.openai.azure.com`. **Deployment name**: the name you gave the model deployment. **API version** is optional (default `2024-10-21`). Paste the key from *Keys and Endpoint*.
+- Or set it for the whole deployment:
+
+  ```bash
+  SLEID_LLM_KIND=azure-openai
+  SLEID_LLM_ENDPOINT=https://<resource>.openai.azure.com
+  SLEID_LLM_API_KEY=...
+  SLEID_LLM_MODEL=<deployment-name>
+  SLEID_LLM_API_VERSION=2024-10-21
+  ```
+
+**Ollama** (local)
+
+1. Install Ollama and run `ollama pull qwen2.5:7b` (any chat model works). Ollama serves on port 11434.
+2. In Settings › AI choose *Local model*. **Base URL**: `http://127.0.0.1:11434/v1`. **Model name**: `qwen2.5:7b`. Leave the key empty.
+3. Or: `SLEID_LLM_KIND=openai-compatible`, `SLEID_LLM_ENDPOINT=http://127.0.0.1:11434/v1`, `SLEID_LLM_MODEL=qwen2.5:7b`.
+
+**LM Studio** (local)
+
+1. In LM Studio load a model, open the Developer tab and start the server. It serves on port 1234 by default.
+2. In Settings › AI choose *Local model*. **Base URL**: `http://127.0.0.1:1234/v1`. **Model name**: the identifier LM Studio shows for the loaded model. The key is optional (LM Studio's default is none).
+
+**llama.cpp** and **vLLM** use the same *Local model* choice with `http://127.0.0.1:8080/v1` (`llama-server -m model.gguf --port 8080`) or `http://<host>:8000/v1` (vLLM).
+
+Small local models sometimes ignore the JSON schema. If a proposal fails with "not the expected format", set *Structured output* to *JSON-only prompt*, or set `SLEID_LLM_STRUCTURED=prompt`. A model that does not accept pictures must leave *This model accepts pictures* off (or `SLEID_LLM_SUPPORTS_IMAGES=false`).
+
+**Provider options** (Settings › AI, per provider)
+
+- **Compact prompts** sends smaller schemas (no descriptions) and is on by default for *Local model* providers and off for Claude on Foundry and Azure OpenAI. Turn it off for a large local model that follows the full schema better. The server default (`SLEID_LLM_*`) follows the same kind default, and has no switch of its own.
+- **Turn off thinking** (*Local model* only) sends `chat_template_kwargs: {"enable_thinking": false}`, for reasoning models such as Qwen3 served with thinking on. **Reasoning effort** (*Local model* only) sends `reasoning_effort` (low, medium or high). Each one is tried on the first request; if the server rejects the parameter, it is dropped for that provider and the request is sent again without it. Both are off by default.
+- Reasoning models send their thinking separately from the answer, and the thinking uses the same token budget. If a reply runs out of budget with no answer, the assistant retries once with a bigger budget. If that is still empty, the message says to raise the budget or to turn thinking off for this provider.
+- Structured requests to a *Local model* server stream the reply and collect it before it is checked. This keeps a proxy in front of a slow server from closing the connection. If the server refuses streaming, the assistant sends a plain request instead.
+
+Usage counts are kept per request. A user can make `AI_RATE_LIMIT_MAX` requests per `AI_RATE_LIMIT_WINDOW_SECONDS` (default 30 per 10 minutes). The limit is checked in the database, so it holds across processes.
+
+Status of the live runs: the adapters are tested against fake HTTP servers. A live run against Foundry or a local server has **not** been done for this milestone. See DESIGN.md (M4, unverified).
+
+## Prompt-to-deck wizard and research (M6)
+
+From the dashboard, **✨ New from prompt** (or File ▸ From prompt…) makes a whole deck: brief, optional references (files and web addresses), optional research, an outline you can edit, then slides written into the editor as they are made. The wizard uses your AI provider (see AI assistant above). It needs the collab service (`pnpm dev` runs it) and the worker (`pnpm dev` runs it too, when `COLLAB_INTERNAL_SECRET` is set).
+
+**References.** Up to 10 files (PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, PNG, JPG; 20 MB each, 50 MB in all) and 10 web addresses. Text is extracted on the worker. Images are listed by name only (no OCR).
+
+**Research (optional).** "Let AI research this topic" needs a search provider. Set one of these in `.env`; the first one set is used:
+
+| Provider | Variable | Notes |
+|---|---|---|
+| SearXNG (self-hosted, recommended) | `SEARXNG_URL=http://127.0.0.1:8888` | Its host is the one private address research may reach. Start it with `docker compose --profile research up -d searxng`. The compose service uses `deploy/searxng/settings.yml`, which turns on JSON output. Set `SEARXNG_SECRET` first for anything but local use. |
+| Brave Search API | `BRAVE_API_KEY` | Hosted. The key is sent only to `api.search.brave.com`. |
+| Tavily | `TAVILY_API_KEY` | Hosted. The key is sent only to `api.tavily.com`. |
+
+The AI settings page (Settings › AI) shows which provider is active, never the key. With none set, the research box is disabled and says why.
+
+**Safety.** User-supplied web addresses always go through the SSRF-safe fetch: loopback, private, link-local and metadata addresses are refused on every redirect hop, with a 5 MB cap, a 15 s timeout, and only HTML, PDF, text and CSV read. Reference text is untrusted: it is wrapped as data for the model, and the model's answer can only become an `addSlide` operation. Robots.txt is not checked (see docs/DESIGN.md).
+
+**MCP.** `create_deck_from_prompt` (scopes `decks:create` and `ai`) and `get_wizard_status` (scope `decks:read`).
+
+## MCP (AI agents)
+
+Sleid runs an MCP server at `/mcp` (Streamable HTTP). An agent can create decks, add slides, insert charts and diagrams, look at a slide as a PNG, export the deck and share it, using the same deck operations as the editor. Open editors see every change live.
+
+**1. Create a token.** Open **Extensions ▸ MCP access tokens** (or `/settings/tokens`). Choose a name, the scopes, an expiry (30 days to 1 year, 90 by default) and whether the token reaches all your decks or only some. The token is shown once. Copy it then.
+
+**2. Connect a client.**
+
+- **Claude Code** (run in a terminal):
+
+  ```sh
+  claude mcp add --transport http sleid http://localhost:3000/mcp --header "Authorization: Bearer <token>"
+  claude mcp list   # sleid should show ✔ Connected
+  ```
+
+  Use your public origin in place of `http://localhost:3000` on a deployed server. The settings page shows this command with your token filled in.
+
+- **Other clients that speak HTTP MCP** with custom headers: use the JSON on the settings page. The entry is `{"type": "http", "url": "<origin>/mcp", "headers": {"Authorization": "Bearer <token>"}}`.
+
+- **Claude Desktop and clients without header support:** they need a bridge that carries the header. For example `npx -y mcp-remote <origin>/mcp --header "Authorization: Bearer <token>"`. This has not been run against Sleid, so check it on your machine. Desktop's own "custom connector" flow expects OAuth, which Sleid does not offer yet.
+
+**Scopes.** A token can do only what its scopes allow. Each call also checks your current role on the deck, so removing someone's access takes effect on their next call.
+
+| Scope | Allows |
+|---|---|
+| `decks:read` | `list_decks`, `get_deck`, `render_slide`, the deck resource |
+| `decks:write` | `apply_ops`, the slide, text, chart, diagram, image and theme tools, `share_deck`. Needs editor access on each deck. |
+| `decks:create` | `create_deck` |
+| `decks:read` (comments, versions) | `list_comments`, `list_versions`. Viewers and up. |
+| `decks:write` (comments, versions) | `add_comment` (commenters and up) and `restore_version` (editors and owners only). |
+| `exports` | `export_deck`. Viewers can export, as in the editor. |
+| `ai` | `generate_with_ai`. Needs editor access. Uses your AI provider and its limits. |
+
+**Tools.** `list_decks`, `create_deck`, `get_deck` (outline or JSON), `apply_ops`, `add_slide`, `update_text`, `set_notes`, `delete_slide`, `move_slide`, `insert_chart`, `insert_diagram` (Mermaid is parsed first, and a parse error comes back to the agent), `insert_image`, `set_theme`, `render_slide`, `export_deck`, `share_deck`, `generate_with_ai` (returns proposed ops and changes nothing; the agent then calls `apply_ops`), `list_comments`, `add_comment` (write `@[Name](userId)` to mention a member), `list_versions`, `restore_version`. Resources: `sleid://schema/deck`, `sleid://schema/ops`, `sleid://themes`, `sleid://decks/{deckId}`. Prompt: `build_deck`.
+
+**Exports from MCP.** `export_deck` returns a one-time link, valid for 15 minutes, to a file on the server. It carries its own secret, never the token. The link works once, after the export has finished (a request before that gets 409 and the link is kept). Do not share it.
+
+**Safety notes.** Tokens are stored as SHA-256 hashes. Every tool call is recorded in the `mcp_audit` table (user, token, tool, deck, outcome, time, and the short error text). Revoke a token in the same settings page; it stops working at once. The rate limit and the body cap are per process, so a deployment with several web processes gets the limit per process.
+
+## Sharing
+
+Open **Share** in the title bar. Owners and editors can invite by email as editor, commenter or viewer. Invites for an email that has no account yet wait until that email signs in. The owner changes roles, removes people, and sets general access (Restricted, or Anyone with the link at a chosen role). Links look like `/d/<deckId>?share=<token>`. A signed-out visitor is sent to `/login` and returns to the link after signing in.
+
+Commenters and viewers get a read-only editor. A commenter sees a "Commenting" badge and can start threads and reply; a viewer sees "View only". The server enforces this too: their connection cannot write to the document.
+
+## Comments, version history and presenting (M7)
+
+**Comments.** Select an element (or nothing, for the whole slide) and press **Ctrl/Cmd + Alt + M**, or use **Insert ▸ Comment**, or right-click an element and choose **Comment**. Type `@` and a name to mention someone in the deck. Each thread is a numbered pin on the slide, and the Comments tab lists the threads of this slide or of all slides. Commenters and up can start threads and reply, and edit or delete their own comments. Editors and owners resolve or reopen any thread (resolved threads are hidden until you tick **Resolved**). If an element is deleted, its thread stays and says "element removed". A mention shows as a badge on the Comments tab and on the dashboard, where **Mentions** lists them. There are no email notifications. Collaborators with the deck open see a new or changed thread within a second or two.
+
+**Version history.** The collab service keeps automatic checkpoints: two minutes after editing stops, or every ten minutes while someone keeps editing. Name a version with **File ▸ Version history ▸ Name current version…** (or the button in the History tab). Clicking a version in History shows it read-only, with a summary of how it differs from the current deck. **Restore this version** (editors and owners) makes the deck that version, live for everyone with it open. The state before a restore is kept as the version **Before restore**, so a restore can be undone with another restore.
+
+How long versions are kept: named versions and **Before restore** forever; automatic checkpoints in full for 24 hours, then one per hour for 7 days, then one per day for 90 days. A daily job in the worker applies this. Internal states (the first open and the log compaction) are not history: only the newest one is kept.
+
+**Presenting.** Press **F5** or **Present** for the audience window. Press **S** in that window, or choose **View ▸ Presenter view**, to open the presenter view: the current and next slide, the notes in large type, the elapsed time and clock, Prev and Next. The presenter view and the audience window talk over the browser's BroadcastChannel, so they must be in the same browser.
+
+**Phone remote.** In the presenter view, press **Phone remote** and scan the QR code, or open the link. The phone shows the current slide, its notes, and big Prev and Next buttons. The link works for 30 minutes, works without signing in, and stops working when you press **Close remote** or close the presenter view. **Follow presenter** (in the presenter view) gives a read-only link for viewers: their window follows the slide you are on.
+
+*Security of the remote.* The token is a signed value that names the deck, the presentation session and the presenter, and expires after 30 minutes. Closing the remote revokes it in the database. Each command checks that the presenter still has access to the deck, and the phone can send at most 20 commands in 10 seconds per session (per web process). The phone page sends no referrer and is not indexed. The token is in the page address, so it can appear in server logs and browser history; treat the QR code as a credential while it is open.
+
+**Checks.** `apps/web/tests/m7.mjs` runs the two-browser comment flow, the version flow, and the presenter and phone flow, with screenshots (`pnpm --filter @sleid/web test:e2e:m7`).
 
 ## Database
 
-- Schema: `apps/web/src/db/schema/` (Better Auth tables, `decks`, `deck_members`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`).
-- Migrations: `apps/web/drizzle/`. Regenerate with `pnpm db:generate` after schema changes and commit the SQL.
+- Schema: `packages/db/src/schema/` (Better Auth tables, `decks` with publish fields, `deck_members` with per-user `starred`, `share_links`, `invites`, `deck_snapshots`, `deck_updates`, `assets`, `exports`, `comment_threads`, `comments`, `comment_mention_reads`, `remote_sessions`).
+- Migration `0010` (M7) adds the comment tables, the phone-remote sessions, and `deck_snapshots.kind` and `editors`. Existing snapshots become `internal`.
+- Migrations: `apps/web/drizzle/`. The schema lives in `@sleid/db`, and drizzle-kit reads it from there. Regenerate with `pnpm db:generate` after schema changes and commit the SQL.
+- Migration `0001` moves `starred` from `decks` to `deck_members` and copies the value to every member. Its data copy is hand-written. Check it when you change the migration.
+- Migration `0002` adds `assets`, `exports`, and the publish columns on `decks`.
 - Migrations run as the compose user. There is no row-level security or separate app role yet.
 
 ## Notes
 
 - Port 5433 is used on purpose so this compose Postgres can run next to untumu's on 5432.
+- The collab service is not in `compose.yml` yet. It runs with `pnpm dev`. A container image is a follow-up (see DESIGN.md).
 - `apps/web/src/routeTree.gen.ts` is generated by the TanStack Start Vite plugin during `dev` and `build`. It is git-ignored.

@@ -1,0 +1,28 @@
+{
+  "name": "@sleid/ingest",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./limits": "./src/limits.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "@sleid/llm": "workspace:^",
+    "happy-dom": "^21.0.4",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
+    "unpdf": "^2.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "pdf-lib": "^1.17.1",
+    "vitest": "^5.0.3"
+  }
+}
