@@ -82,13 +82,15 @@ export interface NewBrandKitRow {
   tokens: BrandTokens
   logoPlacement: LogoPlacement
   defaultTemplateId: string | null
+  /** Footer line for slides (M11). Null when the kit has none. */
+  footerText?: string | null
 }
 
 export async function insertBrandKitRow(db: Db, row: NewBrandKitRow): Promise<void> {
   await db.insert(brandKits).values(row)
 }
 
-export type BrandKitPatch = Partial<Pick<NewBrandKitRow, 'name' | 'visibility' | 'tokens' | 'logoPlacement' | 'defaultTemplateId'>>
+export type BrandKitPatch = Partial<Pick<NewBrandKitRow, 'name' | 'visibility' | 'tokens' | 'logoPlacement' | 'defaultTemplateId' | 'footerText'>>
 
 export async function updateBrandKitRow(db: Db, ownerId: string, id: string, patch: BrandKitPatch): Promise<boolean> {
   const rows = await db
@@ -106,17 +108,31 @@ export interface BrandLogoRecord {
   sha256: string
 }
 
-/** Records the kit's logo (or clears it with null). The bytes themselves are in storage under `key`. */
-export async function setBrandKitLogo(db: Db, ownerId: string, id: string, logo: BrandLogoRecord | null): Promise<boolean> {
+/** Which logo of a kit: the one for light slides, or the one for dark slides (M11). */
+export type BrandLogoVariant = 'light' | 'dark'
+
+/**
+ * Records one of the kit's logos (or clears it with null). The bytes themselves are in storage under `key`.
+ * `variant` picks the light logo (the default) or the dark one.
+ */
+export async function setBrandKitLogo(db: Db, ownerId: string, id: string, logo: BrandLogoRecord | null, variant: BrandLogoVariant = 'light'): Promise<boolean> {
+  const columns =
+    variant === 'dark'
+      ? {
+          logoDarkKey: logo?.key ?? null,
+          logoDarkMime: logo?.mime ?? null,
+          logoDarkBytes: logo?.bytes ?? null,
+          logoDarkSha256: logo?.sha256 ?? null,
+        }
+      : {
+          logoKey: logo?.key ?? null,
+          logoMime: logo?.mime ?? null,
+          logoBytes: logo?.bytes ?? null,
+          logoSha256: logo?.sha256 ?? null,
+        }
   const rows = await db
     .update(brandKits)
-    .set({
-      logoKey: logo?.key ?? null,
-      logoMime: logo?.mime ?? null,
-      logoBytes: logo?.bytes ?? null,
-      logoSha256: logo?.sha256 ?? null,
-      updatedAt: new Date(),
-    })
+    .set({ ...columns, updatedAt: new Date() })
     .where(and(eq(brandKits.id, id), eq(brandKits.ownerId, ownerId)))
     .returning({ id: brandKits.id })
   return rows.length > 0

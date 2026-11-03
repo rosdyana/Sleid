@@ -9,18 +9,34 @@ export type ExportStatus = (typeof EXPORT_STATUSES)[number]
 
 export const EXPORT_SCALES = [0.5, 1, 2] as const
 
+/** The most slides one contact sheet, or one slideIds list, can hold. */
+export const MAX_MULTI_SLIDES = 40
+
+/** The file name of a contact sheet. It is always one PNG. */
+export const CONTACT_SHEET_FILE_NAME = 'contact-sheet.png'
+
 const PdfOptions = z.object({
   /** One extra page per slide that has speaker notes (reveal showNotes: 'separate-page'). */
   includeNotes: z.boolean().default(false),
   includeHidden: z.boolean().default(false),
 })
 
-const VisualOptions = z.object({
-  /** Export only this slide (one image, not a zip). Omit for every visible slide. */
-  slideId: z.string().min(1).max(100).optional(),
-  scale: z.union([z.literal(0.5), z.literal(1), z.literal(2)]).default(1),
-  includeHidden: z.boolean().default(false),
-})
+const VisualOptions = z
+  .object({
+    /** Export only this slide (one image, not a zip). Omit for every visible slide. */
+    slideId: z.string().min(1).max(100).optional(),
+    /** Export these slides in deck order: a zip of slide-NN files, or one PNG when only one slide is left. */
+    slideIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_MULTI_SLIDES).optional(),
+    /** One PNG with every chosen slide laid out in a grid of `columns` columns. */
+    contactSheet: z.boolean().default(false),
+    columns: z.number().int().min(1).max(8).default(4),
+    scale: z.union([z.literal(0.5), z.literal(1), z.literal(2)]).default(1),
+    includeHidden: z.boolean().default(false),
+  })
+  .refine((o) => o.slideId === undefined || o.slideIds === undefined, {
+    message: 'Use either slideId or slideIds, not both',
+    path: ['slideIds'],
+  })
 
 const Empty = z.object({})
 

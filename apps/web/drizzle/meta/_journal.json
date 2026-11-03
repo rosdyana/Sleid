@@ -99,6 +99,13 @@
       "when": 1793682180617,
       "tag": "0013_m9_templates_brand_kits",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793722584180,
+      "tag": "0014_m11_user_assets_brand_dark_logo",
+      "breakpoints": true
     }
   ]
 }

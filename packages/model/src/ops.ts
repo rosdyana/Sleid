@@ -19,12 +19,13 @@ import { nanoid } from 'nanoid'
 import { z } from 'zod'
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { layoutElements } from './defaults.ts'
-import { mergePatch, writeFields, type PlainObject } from './patch.ts'
+import { isPlainObject, mergePatch, writeFields, type PlainObject } from './patch.ts'
 import {
   ANIMATE_KEY_RE,
   BrandLogoSchema,
   ElementInputSchema,
   ElementSchema,
+  LANGUAGE_TAG_RE,
   SLIDE_LAYOUTS,
   SectionSchema,
   SlideBackgroundSchema,
@@ -34,6 +35,8 @@ import {
   type Element,
   type Theme,
 } from './schema.ts'
+import { darkColors, darkToLightMap, lightToDarkMap, orderedColors, recolorSlideElements, tokenColorMap } from './recolor.ts'
+import { deriveDarkVariant } from './tokens.ts'
 import {
   appendElement,
   getDeckMap,
@@ -107,6 +110,8 @@ export const OpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('renameSection'), sectionId: Id, name: z.string() }),
   z.object({ op: z.literal('deleteSection'), sectionId: Id }),
   z.object({ op: z.literal('setNotes'), slideId: Id, notes: z.string() }),
+  // M11. secondaryLanguage null removes the second language.
+  z.object({ op: z.literal('setDeckOptions'), secondaryLanguage: z.string().regex(LANGUAGE_TAG_RE).nullable() }),
 ])
 
 export type Op = z.infer<typeof OpSchema>
@@ -238,6 +243,8 @@ function orderAt(others: SlideEntry[], index: number): string {
   return generateKeyBetween(prev?.order ?? null, next?.order ?? null)
 }
 
+type Variant = 'light' | 'dark'
+
 function elementsOf(slideMap: Y.Map<unknown>): YElements {
   const elements = slideMap.get('elements')
   if (!(elements instanceof Y.Array)) fail('slide has no elements list')
@@ -282,6 +289,50 @@ function ok(id?: string): OpResult {
   return id === undefined ? { ok: true } : { ok: true, id }
 }
 
+// True when a stored background is the given background (same type and value).
+function sameBackground(stored: unknown, target: { type: string; value: string }): boolean {
+  return isPlainObject(stored) && stored.type === target.type && stored.value === target.value
+}
+
+function plainBackground(slideMap: Y.Map<unknown>): unknown {
+  const bg = slideMap.get('background')
+  return bg instanceof Y.Map ? bg.toJSON() : bg
+}
+
+// Writes the colour changes of one slide's elements. Only the fields whose JSON changed are written, and each
+// goes through writeFields, as updateElement does.
+function recolorSlideInPlace(slideMap: Y.Map<unknown>, colorMap: Record<string, string>): void {
+  if (Object.keys(colorMap).length === 0) return
+  for (const elMap of elementsOf(slideMap).toArray()) {
+    const before = elMap.toJSON() as PlainObject
+    const [after] = recolorSlideElements([before as unknown as Element], colorMap) as unknown as PlainObject[]
+    const patch: PlainObject = {}
+    for (const [key, next] of Object.entries(after!)) {
+      if (JSON.stringify(next) !== JSON.stringify(before[key])) patch[key] = next
+    }
+    if (Object.keys(patch).length > 0) writeFields(elMap, patch, opaqueElementKeys(String(before.type)))
+  }
+}
+
+// After the theme changes: light slides move from the old palette to the new one, and dark slides move from the old
+// dark variant to the new one. A dark slide that still has the old dark background takes the new one.
+function recolorDeckForThemeChange(doc: Y.Doc, before: Theme, after: Theme): void {
+  const lightMap = tokenColorMap(orderedColors(before.colors), orderedColors(after.colors))
+  const oldDark = deriveDarkVariant(before)
+  const newDark = deriveDarkVariant(after)
+  const darkMap = tokenColorMap(darkColors(oldDark), darkColors(newDark))
+  for (const slideMap of slidesOf(doc).values()) {
+    if (slideMap.get('variant') !== 'dark') {
+      recolorSlideInPlace(slideMap, lightMap)
+      continue
+    }
+    recolorSlideInPlace(slideMap, darkMap)
+    if (sameBackground(plainBackground(slideMap), oldDark.background)) {
+      writeFields(slideMap, { background: { ...newDark.background } })
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Op implementations. Each one validates before it writes.
 // ---------------------------------------------------------------------------
@@ -294,14 +345,18 @@ function addSlide(doc: Y.Doc, op: Extract<Op, { op: 'addSlide' }>): OpResult {
   if (slideIn.sectionId !== undefined) requireSection(doc, slideIn.sectionId)
 
   const theme = readTheme(doc)
-  const elements = (slideIn.elements ?? layoutElements(op.layout, theme, (i) => `${id}-${i}`)) as Element[]
+  const variant: Variant = slideIn.variant ?? 'light'
+  let elements = (slideIn.elements ?? layoutElements(op.layout, theme, (i) => `${id}-${i}`)) as Element[]
+  // M11. A dark slide's layout placeholders take the dark colours. Elements the caller gave are used as they are.
+  if (slideIn.elements === undefined && variant === 'dark') elements = recolorSlideElements(elements, lightToDarkMap(theme))
   const withZ = elements.map((el, i) => ({ ...el, z: el.z ?? i }))
 
   const slide = SlideSchema.parse({
     id,
     layout: op.layout,
     sectionId: slideIn.sectionId,
-    background: slideIn.background,
+    background: slideIn.background ?? (variant === 'dark' ? { ...deriveDarkVariant(theme).background } : undefined),
+    variant: slideIn.variant,
     notes: slideIn.notes ?? '',
     transition: slideIn.transition ?? 'none',
     autoAnimate: slideIn.autoAnimate ?? false,
@@ -372,15 +427,31 @@ function moveSlide(doc: Y.Doc, op: Extract<Op, { op: 'moveSlide' }>): OpResult {
   return ok()
 }
 
+// Switching variant recolours the slide's elements. Light to dark also sets the dark background, unless the patch
+// gives one. Dark to light removes the dark background, but keeps any other background.
 function updateSlide(doc: Y.Doc, op: Extract<Op, { op: 'updateSlide' }>): OpResult {
   const { map } = slideAt(doc, op.slideId)
   const { id: _id, elements: _elements, ...meta } = slideJson(map)
-  const patch = op.patch as PlainObject
+  const patch: PlainObject = { ...(op.patch as PlainObject) }
   if (typeof patch.sectionId === 'string') requireSection(doc, patch.sectionId)
+
+  const from = (meta.variant as Variant | undefined) ?? 'light'
+  const to = patch.variant as Variant | undefined
+  let colorMap: Record<string, string> = {}
+  if (to !== undefined && to !== from) {
+    const theme = readTheme(doc)
+    const dark = deriveDarkVariant(theme)
+    if (patch.background === undefined) {
+      if (to === 'dark') patch.background = { ...dark.background }
+      else if (sameBackground(meta.background, dark.background)) patch.background = null
+    }
+    colorMap = to === 'dark' ? lightToDarkMap(theme) : darkToLightMap(theme)
+  }
 
   const parsed = SlideMetaSchema.parse(mergePatch(meta, patch))
   assertKnownKeys(patch, parsed)
   writeFields(map, patch)
+  recolorSlideInPlace(map, colorMap)
   return ok()
 }
 
@@ -458,9 +529,11 @@ function reorderElement(doc: Y.Doc, op: Extract<Op, { op: 'reorderElement' }>): 
 
 function setTheme(doc: Y.Doc, op: Extract<Op, { op: 'setTheme' }>): OpResult {
   const themeMap = themeOf(doc)
+  const before = readTheme(doc)
   const parsed = ThemeSchema.parse(mergePatch(themeMap.toJSON() as PlainObject, op.theme))
   assertKnownKeys(op.theme, parsed)
   writeFields(themeMap, op.theme)
+  recolorDeckForThemeChange(doc, before, readTheme(doc))
   return ok()
 }
 
@@ -474,9 +547,11 @@ function setBrandKit(doc: Y.Doc, op: Extract<Op, { op: 'setBrandKit' }>): OpResu
     return ok()
   }
   if (!op.theme) fail('applying a brand kit needs its theme')
+  const before = readTheme(doc)
   const themeMap = themeOf(doc)
   for (const key of [...themeMap.keys()]) themeMap.delete(key)
   writeFields(themeMap, op.theme as PlainObject)
+  recolorDeckForThemeChange(doc, before, readTheme(doc))
 
   root.delete('brand')
   const brand = new Y.Map<unknown>()
@@ -533,6 +608,14 @@ function setNotes(doc: Y.Doc, op: Extract<Op, { op: 'setNotes' }>): OpResult {
   return ok()
 }
 
+// M11. Deck-level options. A null secondaryLanguage removes the second language.
+function setDeckOptions(doc: Y.Doc, op: Extract<Op, { op: 'setDeckOptions' }>): OpResult {
+  const root = getDeckMap(doc)
+  if (op.secondaryLanguage === null) root.delete('secondaryLanguage')
+  else root.set('secondaryLanguage', op.secondaryLanguage)
+  return ok()
+}
+
 function applyOne(doc: Y.Doc, op: Op): OpResult {
   switch (op.op) {
     case 'addSlide':
@@ -567,6 +650,8 @@ function applyOne(doc: Y.Doc, op: Op): OpResult {
       return deleteSection(doc, op)
     case 'setNotes':
       return setNotes(doc, op)
+    case 'setDeckOptions':
+      return setDeckOptions(doc, op)
   }
 }
 

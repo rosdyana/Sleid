@@ -28,6 +28,7 @@ const invalid: Array<[string, Record<string, unknown>]> = [
   ['renameSection', { op: 'renameSection', sectionId: 'missing', name: 'x' }],
   ['deleteSection', { op: 'deleteSection', sectionId: 'missing' }],
   ['setNotes', { op: 'setNotes', slideId: 'missing', notes: 'x' }],
+  ['setDeckOptions (not a language tag)', { op: 'setDeckOptions', secondaryLanguage: 'not a tag!' }],
 ]
 
 function fixture() {

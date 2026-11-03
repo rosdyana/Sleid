@@ -63,6 +63,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
+      '@sleid/compose':
+        specifier: workspace:^
+        version: link:../../packages/compose
       '@sleid/db':
         specifier: workspace:^
         version: link:../../packages/db
@@ -258,6 +261,25 @@ importers:
         specifier: ^13.6.33
         version: 13.6.33
 
+  packages/compose:
+    dependencies:
+      '@sleid/model':
+        specifier: workspace:^
+        version: link:../model
+      lucide:
+        specifier: ^1.67.0
+        version: 1.67.0
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.3
+        version: 26.6.6
+      vitest:
+        specifier: ^5.0.3
+        version: 5.0.5(@opentelemetry/api@1.10.0)(@types/node@26.6.6)(happy-dom@21.0.4)(vite@8.3.5(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   packages/db:
     dependencies:
       '@sleid/model':
@@ -288,6 +310,9 @@ importers:
       '@mozilla/readability':
         specifier: ^0.6.0
         version: 0.6.0
+      '@sleid/db':
+        specifier: workspace:^
+        version: link:../db
       '@sleid/llm':
         specifier: workspace:^
         version: link:../llm
@@ -3133,6 +3158,9 @@ packages:
     peerDependenciesMeta:
       '@types/react':
         optional: true
+
+  lucide@1.67.0:
+    resolution: {integrity: sha512-08U9yCSaUacMl9bZ6QbB9m1stArkwpn+qcL9I0EoHmNjkOFnrHK2vKD63zvdxzkLvFLw1gKIik/en1apdrDNMg==}
 
   luxon@3.7.2:
     resolution: {integrity: sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==}
@@ -6387,6 +6415,8 @@ snapshots:
       react: 19.3.1
     optionalDependencies:
       '@types/react': 19.3.0
+
+  lucide@1.67.0: {}
 
   luxon@3.7.2: {}
 

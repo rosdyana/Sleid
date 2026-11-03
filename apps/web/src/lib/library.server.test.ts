@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { and, eq, sql } from 'drizzle-orm'
 import * as Y from 'yjs'
 import { applyOps, builtInTemplateDeck, createDeck, deckToYDoc, yDocToDeck, type Deck } from '@sleid/model'
-import { assets, decks, deckMembers, grantMembership, readDeck, setTemplateThumbnail, templateThumbnailKey, templates, type Db } from '@sleid/db'
+import { assets, brandKits, decks, deckMembers, grantMembership, readDeck, setTemplateThumbnail, templateThumbnailKey, templates, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createLocalStorage, type StorageDriver } from '@sleid/storage'
 import { deleteTemplate, getTemplateFor, handleTemplateThumbnail, listTemplatesFor, newDeckFromTemplate, saveTemplateFromDeck, updateTemplateMeta, LibraryError, type TemplateDeps } from './templates.server.ts'
@@ -19,6 +19,7 @@ import {
   deleteBrandKit,
   handleBrandLogo,
   listBrandKitsFor,
+  logoVariantFrom,
   removeBrandKit,
   removeBrandLogo,
   updateBrandKit,
@@ -378,8 +379,17 @@ describe('template thumbnails (M9)', () => {
 // M9: a kit changes the theme, the brand and the logo, and nothing on the slides. A deck made from a built-in template
 // keeps every slide and element it was made with.
 describe('a kit on a deck with content (M9)', () => {
-  /** The slide content a kit must leave alone: ids, layouts and every element. */
-  const contentOf = (deck: Deck) => deck.slides.map((s) => ({ id: s.id, layout: s.layout, elements: s.elements }))
+  /**
+   * The slide content a kit must leave alone: ids, layouts and every element. Colours are left out: since M11 a theme
+   * change (and so a kit) recolours element colours that match the old theme's tokens onto the new tokens.
+   */
+  const COLOUR_KEYS = new Set(['color', 'fill', 'stroke', 'colors'])
+  const contentOf = (deck: Deck) =>
+    JSON.parse(
+      JSON.stringify(deck.slides.map((s) => ({ id: s.id, layout: s.layout, elements: s.elements })), (key, value) =>
+        COLOUR_KEYS.has(key) || (typeof value === 'string' && /^#[0-9a-f]{3,8}$/i.test(value)) ? undefined : value,
+      ),
+    )
 
   it('a deck made from the built-in Quarterly review keeps every slide and element through apply and remove', async () => {
     if (skipIfNoDb()) return
@@ -405,7 +415,9 @@ describe('a kit on a deck with content (M9)', () => {
     await removeBrandKit(deps(), owner, created.deckId)
     const removed = yDocToDeck(docs.get(created.deckId)!)
     expect(removed.brand).toBeUndefined()
-    expect(removed.theme).toEqual(applied.theme)
+    // The kit's theme stays. Only the chrome logos it added are removed (this kit has no footer, so no components block is left).
+    expect(removed.theme).toEqual({ ...applied.theme, components: undefined })
+    expect(removed.theme.components).toBeUndefined()
     expect(contentOf(removed)).toEqual(contentOf(before))
 
     await deleteBrandKit(deps(), owner, id)
@@ -461,6 +473,105 @@ describe('brand kit logo route (M9)', () => {
     expect(svg.headers.get('content-security-policy')).toBe('sandbox')
     await removeBrandLogo(deps(), owner, id)
     expect((await handleBrandLogo(id, { db: db!, storage, userId: outsider })).status).toBe(404)
+    await deleteBrandKit(deps(), owner, id)
+  })
+})
+
+describe('brand kit dark logo, footer text and chrome (M11)', () => {
+  it('reads the query variant: missing or light is the light logo, dark is the dark one, anything else is refused', () => {
+    expect(logoVariantFrom(null)).toBe('light')
+    expect(logoVariantFrom('light')).toBe('light')
+    expect(logoVariantFrom('dark')).toBe('dark')
+    expect(logoVariantFrom('neon')).toBeNull()
+  })
+
+  it('stores a dark logo beside the light one, serves it on ?variant=dark, and removes each variant on its own', async () => {
+    if (skipIfNoDb()) return
+    const { id } = await createBrandKit(deps(), owner, { name: 'Dark logo', visibility: 'private', tokens: KIT_TOKENS })
+    const route = (userId: string | null, variant: 'light' | 'dark' = 'light') => handleBrandLogo(id, { db: db!, storage, userId }, variant)
+
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/png', bytes: PNG, variant: 'dark' })
+    expect((await route(owner)).status).toBe(404) // no light logo yet
+    const dark = await route(owner, 'dark')
+    expect(dark.status).toBe(200)
+    expect(dark.headers.get('content-type')).toBe('image/png')
+    expect(new Uint8Array(await dark.arrayBuffer())).toEqual(PNG)
+    expect((await route(null, 'dark')).status).toBe(401)
+    expect((await route(outsider, 'dark')).status).toBe(404)
+    expect((await listBrandKitsFor(deps(), owner)).find((k) => k.id === id)).toMatchObject({ hasLogo: false, hasDarkLogo: true })
+
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/svg+xml', bytes: SVG_OK })
+    expect((await route(owner)).status).toBe(200)
+    expect((await route(owner, 'dark')).status).toBe(200)
+    const [row] = await db!.select().from(brandKits).where(eq(brandKits.id, id))
+    const darkKey = row!.logoDarkKey!
+    expect(darkKey).toBeTruthy()
+
+    await removeBrandLogo(deps(), owner, id, 'dark')
+    expect((await route(owner, 'dark')).status).toBe(404)
+    expect((await route(owner)).status).toBe(200)
+    expect(await storage.get(darkKey)).toBeNull()
+    expect((await listBrandKitsFor(deps(), owner)).find((k) => k.id === id)?.hasDarkLogo).toBe(false)
+    await expect(uploadBrandLogo(deps(), editor, id, { mime: 'image/png', bytes: PNG, variant: 'dark' })).rejects.toMatchObject({ status: 404 })
+    await deleteBrandKit(deps(), owner, id)
+  })
+
+  it('the footer text is trimmed, capped at 200 characters, and an empty one is stored as none', async () => {
+    if (skipIfNoDb()) return
+    const summary = async (kitId: string) => (await listBrandKitsFor(deps(), owner)).find((k) => k.id === kitId)
+    const { id } = await createBrandKit(deps(), owner, { name: 'Footer', tokens: KIT_TOKENS, footerText: '  Acme Ltd, confidential  ' })
+    expect((await summary(id))?.footerText).toBe('Acme Ltd, confidential')
+
+    await updateBrandKit(deps(), owner, id, { footerText: '   ' })
+    expect((await summary(id))?.footerText).toBeNull()
+    await updateBrandKit(deps(), owner, id, { footerText: 'Second line' })
+    expect((await summary(id))?.footerText).toBe('Second line')
+    await updateBrandKit(deps(), owner, id, { footerText: 'x'.repeat(200) })
+    expect((await summary(id))?.footerText).toHaveLength(200)
+    await expect(updateBrandKit(deps(), owner, id, { footerText: 'x'.repeat(201) })).rejects.toThrow()
+    await expect(createBrandKit(deps(), owner, { name: 'Long', tokens: KIT_TOKENS, footerText: 'y'.repeat(201) })).rejects.toThrow()
+
+    const { id: plain } = await createBrandKit(deps(), owner, { name: 'No footer', tokens: KIT_TOKENS })
+    expect((await summary(plain))?.footerText).toBeNull()
+    await deleteBrandKit(deps(), owner, id)
+    await deleteBrandKit(deps(), owner, plain)
+  })
+
+  it('applying a kit sets theme.components.chrome to the deck\'s own copies of both logos and the footer, and replaces them on the next apply', async () => {
+    if (skipIfNoDb()) return
+    const { id } = await createBrandKit(deps(), owner, { name: 'Chrome kit', tokens: KIT_TOKENS, footerText: 'Acme Ltd' })
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/png', bytes: PNG })
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/svg+xml', bytes: SVG_OK, variant: 'dark' })
+    await applyBrandKit(deps(), owner, deckId, id)
+
+    const deck = yDocToDeck(docs.get(deckId)!)
+    const chrome = deck.theme.components?.chrome
+    expect(chrome?.footerText).toBe('Acme Ltd')
+    expect(chrome?.logoLight).toMatch(/^\/api\/assets\/[0-9a-f-]{36}$/)
+    expect(chrome?.logoDark).toMatch(/^\/api\/assets\/[0-9a-f-]{36}$/)
+    expect(chrome?.logoDark).not.toBe(chrome?.logoLight)
+    expect(deck.brand?.logo?.src).toBe(chrome?.logoLight) // the light logo overlay is unchanged
+    const previous = [chrome!.logoLight!, chrome!.logoDark!].map((src) => src.split('/').pop()!)
+    for (const src of [chrome!.logoLight!, chrome!.logoDark!]) {
+      const assetId = src.split('/').pop()!
+      const [asset] = await db!.select().from(assets).where(and(eq(assets.id, assetId), eq(assets.deckId, deckId)))
+      expect(asset, src).toBeDefined()
+      expect(await storage.get(assetId)).not.toBeNull()
+    }
+
+    await applyBrandKit(deps(), owner, deckId, id)
+    const again = yDocToDeck(docs.get(deckId)!).theme.components?.chrome
+    expect(again?.logoLight).not.toBe(chrome?.logoLight)
+    expect(again?.logoDark).not.toBe(chrome?.logoDark)
+    for (const assetId of previous) expect(await storage.get(assetId)).toBeNull()
+
+    const latest = [again!.logoLight!, again!.logoDark!].map((src) => src.split('/').pop()!)
+    await removeBrandKit(deps(), owner, deckId)
+    const removed = yDocToDeck(docs.get(deckId)!).theme.components?.chrome
+    expect(removed?.logoLight).toBeUndefined()
+    expect(removed?.logoDark).toBeUndefined()
+    expect(removed?.footerText).toBe('Acme Ltd')
+    for (const assetId of latest) expect(await storage.get(assetId)).toBeNull()
     await deleteBrandKit(deps(), owner, id)
   })
 })

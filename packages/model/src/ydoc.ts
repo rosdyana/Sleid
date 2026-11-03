@@ -4,6 +4,7 @@
 //   id, title, version              primitives
 //   size, theme                     Y.Map (fields merge one by one)
 //   brand (optional, M9)            Y.Map { brandKitId, logo { src, placement } }; absent without a brand kit
+//   secondaryLanguage (optional, M11) string; absent for a deck with one language
 //   sections                        Y.Array<Y.Map { id, name }>
 //   slides                          Y.Map<slideId, Y.Map>. Each slide Y.Map has its
 //                                   meta fields, an `order` string (fractional index,
@@ -87,6 +88,9 @@ function writeDeckIntoRoot(root: Y.Map<unknown>, parsed: Deck): void {
     root.set('brand', brand)
     writeFields(brand, parsed.brand as PlainObject)
   }
+
+  // M11. Absent for a deck with one language. yDocToDeck reads the root map whole, so it comes back as stored.
+  if (parsed.secondaryLanguage !== undefined) root.set('secondaryLanguage', parsed.secondaryLanguage)
 
   const sections: YSections = new Y.Array<Y.Map<unknown>>()
   root.set('sections', sections)

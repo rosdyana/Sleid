@@ -1,0 +1,10 @@
+// @sleid/compose: pure layout helpers for slides. No I/O, no database, no network at runtime.
+export * from './measure.ts'
+export * from './icons.ts'
+export * from './regions.ts'
+export * from './rich.ts'
+export * from './color.ts'
+export * from './components/index.ts'
+export * from './lint.ts'
+export * from './style.ts'
+export * from './demo.ts'

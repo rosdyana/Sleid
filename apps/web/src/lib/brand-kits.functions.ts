@@ -31,6 +31,7 @@ export const updateBrandKitFn = createServerFn({ method: 'POST' })
           tokens: BrandTokensSchema.optional(),
           logoPlacement: LogoPlacementSchema.optional(),
           defaultTemplateId: Id.nullable().optional(),
+          footerText: z.string().max(200).nullable().optional(),
         }),
       })
       .parse(data),
@@ -57,21 +58,23 @@ export const uploadBrandLogoFn = createServerFn({ method: 'POST' })
         kitId: Id,
         mime: z.enum(['image/png', 'image/jpeg', 'image/svg+xml']),
         contentBase64: z.string().min(1).max(Math.ceil((2 * 1024 * 1024 * 4) / 3) + 16),
+        /** The logo for light slides (the default) or for dark slides. */
+        variant: z.enum(['light', 'dark']).optional(),
       })
       .parse(data),
   )
   .handler(async ({ data }) => {
     const user = await requireUser()
     const bytes = Uint8Array.from(Buffer.from(data.contentBase64, 'base64'))
-    await kits.uploadBrandLogo(brandDeps(), user.id, data.kitId, { mime: data.mime, bytes })
+    await kits.uploadBrandLogo(brandDeps(), user.id, data.kitId, { mime: data.mime, bytes, variant: data.variant ?? 'light' })
     return { ok: true as const }
   })
 
 export const removeBrandLogoFn = createServerFn({ method: 'POST' })
-  .validator((data: unknown) => z.object({ kitId: Id }).parse(data))
+  .validator((data: unknown) => z.object({ kitId: Id, variant: z.enum(['light', 'dark']).optional() }).parse(data))
   .handler(async ({ data }) => {
     const user = await requireUser()
-    await kits.removeBrandLogo(brandDeps(), user.id, data.kitId)
+    await kits.removeBrandLogo(brandDeps(), user.id, data.kitId, data.variant ?? 'light')
     return { ok: true as const }
   })
 

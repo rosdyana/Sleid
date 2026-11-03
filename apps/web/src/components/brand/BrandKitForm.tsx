@@ -50,13 +50,18 @@ export function BrandKitForm({
   const [body, setBody] = useState(kit?.tokens.fonts.body ?? 'Inter')
   const [placement, setPlacement] = useState<LogoPlacement>(kit?.logoPlacement ?? DEFAULT_PLACEMENT)
   const [defaultTemplateId, setDefaultTemplateId] = useState(kit?.defaultTemplateId ?? '')
+  const [footerText, setFooterText] = useState(kit?.footerText ?? '')
   const [logoFile, setLogoFile] = useState<File | null>(null)
   const [removeSaved, setRemoveSaved] = useState(false)
+  const [darkLogoFile, setDarkLogoFile] = useState<File | null>(null)
+  const [removeDarkSaved, setRemoveDarkSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const logoUrl = useObjectUrl(logoFile)
   /** The logo saved on the kit, read through the kit's logo route. Null when there is none or it is being removed. */
   const savedLogoSrc = kit?.hasLogo && !removeSaved ? `/api/brand-kits/${encodeURIComponent(kit.id)}/logo` : null
+  /** The dark-slide logo saved on the kit, read through the same route with ?variant=dark. */
+  const savedDarkLogoSrc = kit?.hasDarkLogo && !removeDarkSaved ? `/api/brand-kits/${encodeURIComponent(kit.id)}/logo?variant=dark` : null
 
   const fontOptions = [...new Set([...FONT_FAMILIES, heading, body])]
   const knownDefault = defaultTemplateId === '' || templates.some((t) => t.id === defaultTemplateId)
@@ -71,7 +76,7 @@ export function BrandKitForm({
       palette,
       fonts: { ...(kit?.tokens.fonts ?? {}), heading, body },
     } as BrandTokens
-    const input = { name: name.trim(), visibility, tokens, logoPlacement: placement, defaultTemplateId: defaultTemplateId || null }
+    const input = { name: name.trim(), visibility, tokens, logoPlacement: placement, defaultTemplateId: defaultTemplateId || null, footerText }
     try {
       let kitId: string
       if (kit) {
@@ -86,6 +91,13 @@ export function BrandKitForm({
         if (logoFile) {
           const contentBase64 = await readAsBase64(logoFile)
           await uploadBrandLogoFn({ data: { kitId, mime: logoFile.type as 'image/png' | 'image/jpeg' | 'image/svg+xml', contentBase64 } })
+        }
+        if (kit && removeDarkSaved && kit.hasDarkLogo) await removeBrandLogoFn({ data: { kitId, variant: 'dark' } })
+        if (darkLogoFile) {
+          const contentBase64 = await readAsBase64(darkLogoFile)
+          await uploadBrandLogoFn({
+            data: { kitId, variant: 'dark', mime: darkLogoFile.type as 'image/png' | 'image/jpeg' | 'image/svg+xml', contentBase64 },
+          })
         }
       } catch (logoErr) {
         notice = `Saved, but the logo was not: ${messageOf(logoErr)}`
@@ -170,6 +182,19 @@ export function BrandKitForm({
             onRemoveSaved={setRemoveSaved}
             onProblem={setError}
           />
+          <div className="space-y-2">
+            <p className="font-medium">Logo for dark slides</p>
+            <LogoField
+              variant="dark"
+              file={darkLogoFile}
+              hasSavedLogo={kit?.hasDarkLogo ?? false}
+              savedSrc={savedDarkLogoSrc}
+              removeSaved={removeDarkSaved}
+              onFile={setDarkLogoFile}
+              onRemoveSaved={setRemoveDarkSaved}
+              onProblem={setError}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="text-ink-muted">Corner</span>
@@ -219,6 +244,18 @@ export function BrandKitForm({
         </div>
         <PlacementPreview placement={placement} logoSrc={logoUrl ?? savedLogoSrc} />
       </fieldset>
+
+      <label className="block">
+        <span className="text-ink-muted">Footer text</span>
+        <input
+          data-testid="kit-footer-text"
+          className={inputClass}
+          value={footerText}
+          maxLength={200}
+          placeholder="For example: Acme Ltd, confidential"
+          onChange={(e) => setFooterText(e.target.value)}
+        />
+      </label>
 
       <label className="block">
         <span className="text-ink-muted">Default template for new decks with this kit</span>

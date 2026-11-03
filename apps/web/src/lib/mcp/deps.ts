@@ -1,6 +1,7 @@
 // What the MCP layer needs from the outside world. The route builds it from the environment (deps.server.ts);
 // the integration test builds it from in-process services. Nothing here is a global.
 import type { Db, LiveDeckSource } from '@sleid/db'
+import type { UrlPolicy } from '@sleid/llm'
 import type { JobQueue } from '@sleid/jobs'
 import type { StorageDriver } from '@sleid/storage'
 import type { CollabInternalClient } from '~/lib/collab-client.server'
@@ -28,5 +29,10 @@ export interface McpDeps {
   maxBodyBytes: number
   /** How long render_slide waits for the worker. */
   renderTimeoutMs: number
+  /**
+   * The address policy for insert_image URLs. Production leaves it out (public addresses only). Tests pass a policy that
+   * allows the local test server. Nothing else reads it.
+   */
+  imageFetchPolicy?: UrlPolicy | undefined
   logger: McpLogger
 }

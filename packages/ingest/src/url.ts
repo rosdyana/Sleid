@@ -1,6 +1,7 @@
 // Fetches a reference URL. Always through the SSRF-safe pinned fetch: scheme and address checks on every hop,
 // redirects followed here (max 5, each hop checked again), a size cap and a timeout.
 import { createPinnedFetch, type UrlPolicy } from '@sleid/llm'
+import { bytesMatchMime } from '@sleid/db'
 import { htmlToText, cleanText, stripMarkup } from './sanitize.ts'
 import { extractFile, type ExtractedTable } from './extract.ts'
 import { IngestError, LIMITS } from './limits.ts'
@@ -24,7 +25,43 @@ export interface FetchedUrl {
   body: Uint8Array
 }
 
-const ALLOWED_TYPES = ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain', 'text/markdown', 'text/csv']
+export interface FetchedImage {
+  /** The final address, after any redirects. */
+  url: string
+  /** The declared type, one of PNG, JPEG, WebP, GIF or SVG. The bytes have been checked against it. */
+  mime: string
+  body: Uint8Array
+}
+
+/** What one kind of fetch accepts. Pages and images share the same hop loop (see fetchWithHops). */
+interface FetchKind {
+  accept: string
+  types: readonly string[]
+  /** Used in messages: "The page is larger than…". */
+  noun: string
+  /** Used in the unsupported-type message, after "which is not read". */
+  hint: string
+  defaultMaxBytes: number
+}
+
+const PAGE_KIND: FetchKind = {
+  accept: 'text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown,text/csv;q=0.9',
+  types: ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain', 'text/markdown', 'text/csv'],
+  noun: 'page',
+  hint: 'HTML, PDF, text or CSV only',
+  defaultMaxBytes: LIMITS.maxUrlBytes,
+}
+
+/** Default cap for a fetched image (a logo or a picture referenced by URL). */
+export const MAX_IMAGE_URL_BYTES = 5 * 1024 * 1024
+
+const IMAGE_KIND: FetchKind = {
+  accept: 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml;q=0.9',
+  types: ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'],
+  noun: 'image',
+  hint: 'PNG, JPEG, WebP, GIF or SVG only',
+  defaultMaxBytes: MAX_IMAGE_URL_BYTES,
+}
 
 export function normaliseContentType(value: string | null): string {
   return (value ?? '').split(';')[0]!.trim().toLowerCase()
@@ -40,8 +77,25 @@ export function testPrivateWizardUrls(env: NodeJS.ProcessEnv = process.env): boo
 }
 
 export async function fetchPublicUrl(input: string, options: FetchUrlOptions = {}): Promise<FetchedUrl> {
+  return fetchWithHops(input, options, PAGE_KIND)
+}
+
+/**
+ * Fetches an image by URL with the same policy as fetchPublicUrl. Only the five raster and SVG types are accepted,
+ * and the bytes must match the declared type (bytesMatchMime), so a PNG header on an HTML body is refused.
+ */
+export async function fetchPublicImage(input: string, options: FetchUrlOptions = {}): Promise<FetchedImage> {
+  const fetched = await fetchWithHops(input, options, IMAGE_KIND)
+  if (!bytesMatchMime(fetched.contentType, fetched.body)) {
+    throw new IngestError('unsupported', `The image content does not match its declared type (${fetched.contentType}).`)
+  }
+  return { url: fetched.url, mime: fetched.contentType, body: fetched.body }
+}
+
+/** The redirect, status, type and size checks shared by pages and images. Each hop goes through the pinned fetch. */
+async function fetchWithHops(input: string, options: FetchUrlOptions, kind: FetchKind): Promise<FetchedUrl> {
   const doFetch = options.fetch ?? createPinnedFetch(options.policy ?? PUBLIC_URL_POLICY)
-  const maxBytes = options.maxBytes ?? LIMITS.maxUrlBytes
+  const maxBytes = options.maxBytes ?? kind.defaultMaxBytes
   const maxRedirects = options.maxRedirects ?? LIMITS.maxRedirects
   let current = input
   for (let hop = 0; ; hop++) {
@@ -50,7 +104,7 @@ export async function fetchPublicUrl(input: string, options: FetchUrlOptions = {
       response = await doFetch(current, {
         redirect: 'manual',
         signal: AbortSignal.timeout(options.timeoutMs ?? LIMITS.urlTimeoutMs),
-        headers: { accept: 'text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown,text/csv;q=0.9', 'user-agent': 'SleidWizard/1.0' },
+        headers: { accept: kind.accept, 'user-agent': 'SleidWizard/1.0' },
       })
     } catch (err) {
       throw new IngestError('blocked', `The address could not be fetched: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown error'}`)
@@ -68,21 +122,21 @@ export async function fetchPublicUrl(input: string, options: FetchUrlOptions = {
       throw new IngestError('fetch-failed', `The address answered HTTP ${response.status}.`)
     }
     const contentType = normaliseContentType(response.headers.get('content-type'))
-    if (!ALLOWED_TYPES.includes(contentType)) {
+    if (!kind.types.includes(contentType)) {
       await response.body?.cancel().catch(() => undefined)
-      throw new IngestError('unsupported', `The address returned ${contentType || 'no content type'}, which is not read (HTML, PDF, text or CSV only).`)
+      throw new IngestError('unsupported', `The address returned ${contentType || 'no content type'}, which is not read (${kind.hint}).`)
     }
     const declared = Number(response.headers.get('content-length') ?? 0)
     if (declared > maxBytes) {
       await response.body?.cancel().catch(() => undefined)
-      throw new IngestError('too-large', `The page is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`)
+      throw new IngestError('too-large', `The ${kind.noun} is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`)
     }
-    const body = await readCapped(response, maxBytes)
+    const body = await readCapped(response, maxBytes, kind.noun)
     return { url: current, status: response.status, contentType, body }
   }
 }
 
-async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array> {
+async function readCapped(response: Response, maxBytes: number, noun: string): Promise<Uint8Array> {
   if (!response.body) return new Uint8Array()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -93,7 +147,7 @@ async function readCapped(response: Response, maxBytes: number): Promise<Uint8Ar
     size += value.byteLength
     if (size > maxBytes) {
       await reader.cancel().catch(() => undefined)
-      throw new IngestError('too-large', `The page is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`)
+      throw new IngestError('too-large', `The ${noun} is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`)
     }
     chunks.push(value)
   }

@@ -1,6 +1,7 @@
 // Default deck, built-in themes and layout placeholders.
 import { nanoid } from 'nanoid'
 import { CANVAS_HEIGHT, CANVAS_WIDTH, DeckSchema, type Deck, type Element, type Slide, type SlideLayout, type Theme } from './schema.ts'
+import { NAVY_GRADIENT, NAVY_MUTED, NAVY_STROKE, NAVY_SURFACE, NAVY_TEXT } from './tokens.ts'
 
 const SHEETS_LIGHT: Theme = {
   name: 'Sheets Light',
@@ -18,6 +19,7 @@ const SHEETS_LIGHT: Theme = {
   sizes: { title: 120, heading: 72, body: 40, small: 28 },
   radius: 12,
   backgroundStyle: 'solid',
+  dark: { background: { type: 'gradient', value: NAVY_GRADIENT }, text: NAVY_TEXT, muted: NAVY_MUTED, accent: '#8ab4f8', surface: NAVY_SURFACE, stroke: NAVY_STROKE },
 }
 
 export const BUILT_IN_THEMES: readonly Theme[] = [
@@ -38,6 +40,14 @@ export const BUILT_IN_THEMES: readonly Theme[] = [
     sizes: { title: 120, heading: 72, body: 40, small: 28 },
     radius: 16,
     backgroundStyle: 'solid',
+    dark: {
+      background: { type: 'color', value: '#181b22' },
+      text: '#f5f7fa',
+      muted: '#9aa3b2',
+      accent: '#8ab4f8',
+      surface: '#22262f',
+      stroke: '#2e333d',
+    },
   },
   {
     name: 'Warm Paper',
@@ -55,6 +65,14 @@ export const BUILT_IN_THEMES: readonly Theme[] = [
     sizes: { title: 116, heading: 72, body: 42, small: 28 },
     radius: 8,
     backgroundStyle: 'solid',
+    dark: {
+      background: { type: 'color', value: '#2a2118' },
+      text: '#f6efe4',
+      muted: '#c9b9a3',
+      accent: '#e8a06a',
+      surface: '#3a2e22',
+      stroke: '#5a4a3a',
+    },
   },
   {
     name: 'High Contrast',
@@ -72,6 +90,55 @@ export const BUILT_IN_THEMES: readonly Theme[] = [
     sizes: { title: 124, heading: 76, body: 44, small: 32 },
     radius: 0,
     backgroundStyle: 'solid',
+    dark: {
+      background: { type: 'color', value: '#111111' },
+      text: '#ffffff',
+      muted: '#d0d0d0',
+      accent: '#ffd400',
+      surface: '#1c1c1c',
+      stroke: '#444444',
+    },
+  },
+  {
+    name: 'Paper Navy',
+    colors: {
+      background: '#f7f6f3',
+      surface: '#fdfdfc',
+      text: '#2f2e2a',
+      muted: '#6c6a64',
+      accent: '#2d62c9',
+      accent2: '#2d7a58',
+      accent3: '#93661d',
+      accent4: '#6953b3',
+    },
+    fonts: {
+      heading: 'ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, "PingFang TC", "Noto Sans TC", sans-serif',
+      body: 'ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, "PingFang TC", "Noto Sans TC", sans-serif',
+      mono: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    },
+    sizes: { title: 134, heading: 65, body: 34, small: 25 },
+    radius: 22,
+    backgroundStyle: 'solid',
+    dark: {
+      background: { type: 'gradient', value: NAVY_GRADIENT },
+      text: NAVY_TEXT,
+      muted: NAVY_MUTED,
+      accent: '#8fb0f0',
+      surface: NAVY_SURFACE,
+      stroke: NAVY_STROKE,
+    },
+    components: {
+      label: { size: 22, weight: 650, letterSpacing: 0.14, textTransform: 'uppercase', color: '#2d62c9' },
+      heading: { size: 65, weight: 700, letterSpacing: -0.02, lineHeight: 1.12 },
+      subtitle: { size: 32, weight: 500, color: '#6c6a64' },
+      card: {
+        fill: '#fdfdfc',
+        stroke: '#e6e4df',
+        strokeWidth: 1.2,
+        radius: 22,
+        shadow: { x: 0, y: 10, blur: 29, color: 'rgba(40,38,30,0.05)' },
+      },
+    },
   },
 ]
 

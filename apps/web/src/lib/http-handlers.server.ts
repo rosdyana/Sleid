@@ -1,48 +1,14 @@
 // HTTP handlers for uploads, asset reads and export downloads. The /api routes call these with the
 // database, the storage and the caller's user id. Keeping them free of request-context imports makes them testable.
-import { createHash, randomUUID } from 'node:crypto'
-import { attachmentDisposition, canEdit, consumeExportLink, findExportByLink, getAssetWithDeck, getDeckRole, getExportForUser, insertAsset, type Db } from '@sleid/db'
+import { attachmentDisposition, AssetError, canEdit, consumeExportLink, findExportByLink, getAssetWithDeck, getDeckRole, getExportForUser, storeDeckAsset, type Db } from '@sleid/db'
 import type { StorageDriver } from '@sleid/storage'
+
+// The image checks live in @sleid/db (image-bytes.ts), shared with the MCP tools and the import.
+export { bytesMatchMime, ASSET_MIME_EXTENSIONS } from '@sleid/db'
 
 export const ASSET_MAX_BYTES = 10 * 1024 * 1024
 
-export const ASSET_MIME_EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-}
-
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/** Checks the first bytes against the claimed type. SVG must be text with no active content. */
-export function bytesMatchMime(mime: string, bytes: Uint8Array): boolean {
-  const head = (n: number) => Array.from(bytes.subarray(0, n))
-  switch (mime) {
-    case 'image/png':
-      return head(8).join(',') === '137,80,78,71,13,10,26,10'
-    case 'image/jpeg':
-      return head(3).join(',') === '255,216,255'
-    case 'image/gif': {
-      const s = new TextDecoder().decode(bytes.subarray(0, 6))
-      return s === 'GIF87a' || s === 'GIF89a'
-    }
-    case 'image/webp': {
-      const riff = new TextDecoder().decode(bytes.subarray(0, 4))
-      const webp = new TextDecoder().decode(bytes.subarray(8, 12))
-      return riff === 'RIFF' && webp === 'WEBP'
-    }
-    case 'image/svg+xml': {
-      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).slice(0, 2_000_000)
-      if (!/<svg[\s>]/i.test(text)) return false
-      // Active content and external entities are refused. The response also carries a sandbox CSP.
-      return !/<script|<!entity|<!doctype[^>]*\[|javascript:|\son[a-z]+\s*=|<foreignobject|<iframe|<embed|<object/i.test(text)
-    }
-    default:
-      return false
-  }
-}
 
 function json(status: number, body: unknown): Response {
   return Response.json(body, { status, headers: { 'cache-control': 'no-store' } })
@@ -75,31 +41,34 @@ export async function handleAssetUpload(request: Request, deckId: string, deps: 
   const file = form.get('file')
   if (!(file instanceof File)) return json(400, { error: 'Send the image in a field named "file"' })
   if (file.size > ASSET_MAX_BYTES) return json(413, { error: 'Images are limited to 10 MB' })
-  const mime = file.type.toLowerCase()
-  if (!(mime in ASSET_MIME_EXTENSIONS)) {
-    return json(415, { error: 'Use a PNG, JPEG, GIF, WebP or SVG image' })
-  }
   const bytes = new Uint8Array(await file.arrayBuffer())
-  if (bytes.byteLength === 0) return json(400, { error: 'The file is empty' })
-  if (bytes.byteLength > ASSET_MAX_BYTES) return json(413, { error: 'Images are limited to 10 MB' })
-  if (!bytesMatchMime(mime, bytes)) return json(415, { error: 'The file content does not match its type' })
+  const mime = file.type.toLowerCase()
 
-  const id = randomUUID()
-  await deps.storage.put(id, bytes)
+  let stored: Awaited<ReturnType<typeof storeDeckAsset>>
   try {
-    await insertAsset(deps.db, {
-      id,
-      deckId,
-      ownerId: deps.userId,
-      mime,
-      bytes: bytes.byteLength,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-    })
+    stored = await storeDeckAsset(deps.db, deps.storage, { deckId, ownerId: deps.userId, mime, bytes, maxBytes: ASSET_MAX_BYTES })
   } catch (err) {
-    await deps.storage.delete(id).catch(() => undefined)
+    if (err instanceof AssetError) return json(assetErrorStatus(err), { error: err.message })
     throw err
   }
-  return json(201, { id, url: `/api/assets/${id}`, mime, bytes: bytes.byteLength })
+  return json(201, { id: stored.id, url: stored.url, mime, bytes: bytes.byteLength })
+}
+
+/** The HTTP status for a refused image: 415 for a type problem, 413 for size, 400 for an empty file. */
+function assetErrorStatus(err: AssetError): number {
+  switch (err.code) {
+    case 'type':
+    case 'mismatch':
+      return 415
+    case 'too-large':
+      return 413
+    case 'empty':
+      return 400
+    case 'limit':
+      return 409
+    case 'not-found':
+      return 404
+  }
 }
 
 /**

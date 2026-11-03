@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import * as Y from 'yjs'
-import { deckToYDoc, type Deck } from '@sleid/model'
+import { deckToYDoc, type Deck, type Slide } from '@sleid/model'
 import { fullDeck } from '../../../packages/model/src/fixtures.ts'
 import { assets as assetsTable, createExportJob, deckSnapshots, getExportJob, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers, TEST_DATABASE_URL } from '@sleid/db/testing'
@@ -25,6 +25,7 @@ let browser: BrowserPool | null = null
 let stop: (() => Promise<void>) | null = null
 let browserOk = false
 let deckId = ''
+let sheetDeckId = ''
 let ownerId = ''
 let assetId = ''
 const exportsStore = mkdtempSync(join(tmpdir(), 'sleid-export-test-exports-'))
@@ -64,6 +65,20 @@ beforeAll(async () => {
   }
   await db.insert(deckSnapshots).values({ deckId, ydoc: Buffer.from(Y.encodeStateAsUpdate(deckToYDoc(deck))) })
 
+  // A five-slide deck for the multi-slide exports: the three fixture slides, then two copies of slide-full.
+  sheetDeckId = await makeDeck(db, owner.id, 'Sheet fixture')
+  const five = fullDeck()
+  five.id = sheetDeckId
+  five.title = 'Sheet fixture'
+  for (const slide of five.slides) {
+    for (const el of slide.elements) {
+      if (el.type === 'image') el.src = `/api/assets/${assetId}`
+    }
+  }
+  const base = five.slides.find((s) => s.id === 'slide-full')!
+  five.slides.push(copySlide(base, 'sheet-4'), copySlide(base, 'sheet-5'))
+  await db.insert(deckSnapshots).values({ deckId: sheetDeckId, ydoc: Buffer.from(Y.encodeStateAsUpdate(deckToYDoc(five))) })
+
   browser = createBrowserPool(process.env.CHROME_PATH || undefined)
   try {
     await browser.get()
@@ -96,8 +111,17 @@ afterAll(async () => {
   rmSync(assetsStore, { recursive: true, force: true })
 }, 60_000)
 
-async function runJob(format: string, options: Record<string, unknown> = {}) {
-  const id = await createExportJob(db!, { deckId, userId: ownerId, format: format as never, options })
+/** A copy of a slide with a new id and new element ids, so the deck's ids stay unique. */
+function copySlide(base: Slide, id: string): Slide {
+  const copy = structuredClone(base)
+  copy.id = id
+  copy.hidden = false
+  copy.elements = copy.elements.map((el, i) => ({ ...el, id: `${id}-el-${i}` }))
+  return copy
+}
+
+async function runJob(format: string, options: Record<string, unknown> = {}, target = deckId) {
+  const id = await createExportJob(db!, { deckId: target, userId: ownerId, format: format as never, options })
   await queue!.enqueueExport({ exportId: id })
   const started = Date.now()
   for (;;) {
@@ -206,5 +230,35 @@ describe('export worker (pg-boss, Postgres, Chrome)', () => {
     const row = await runJob('png', { scale: 1, slideId: 'no-such-slide' })
     expect(row.status).toBe('failed')
     expect(row.error).toBe('That slide is not in the deck')
+  }, 180_000)
+
+  it('a contact sheet of five slides at 3 columns is one 1920-wide PNG with two rows of slides', async (ctx) => {
+    if (!db || !browserOk) return ctx.skip()
+    const row = await runJob('png', { contactSheet: true, columns: 3, includeHidden: true }, sheetDeckId)
+    expect(row.status, row.error ?? '').toBe('done')
+    expect(row.fileName).toBe('contact-sheet.png')
+    expect(row.contentType).toBe('image/png')
+    const bytes = await bytesOf(row.id)
+    const size = pngSize(bytes)
+    const s = (1920 - 24 * (3 + 1)) / 3 / 1920
+    expect(size.width).toBe(1920)
+    expect(size.height).toBeGreaterThan(2 * 1080 * s)
+    expect(size.height).toBeLessThan(3 * 1080 * s) // two rows, not three
+  }, 180_000)
+
+  it('slideIds exports those slides in deck order as a zip with one entry per slide', async (ctx) => {
+    if (!db || !browserOk) return ctx.skip()
+    const row = await runJob('png', { slideIds: ['sheet-5', 'slide-full'] }, sheetDeckId)
+    expect(row.status, row.error ?? '').toBe('done')
+    expect(row.fileName).toBe('Sheet fixture.png.zip')
+    const zip = await JSZip.loadAsync(await bytesOf(row.id))
+    expect(Object.keys(zip.files).sort()).toEqual(['slide-02.png', 'slide-05.png'])
+  }, 180_000)
+
+  it('an unknown id in slideIds fails the job and names the slide', async (ctx) => {
+    if (!db || !browserOk) return ctx.skip()
+    const row = await runJob('png', { slideIds: ['slide-full', 'no-such-slide'] }, sheetDeckId)
+    expect(row.status).toBe('failed')
+    expect(row.error).toBe('Slide "no-such-slide" is not in the deck')
   }, 180_000)
 })

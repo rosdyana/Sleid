@@ -12,6 +12,7 @@ import { generateTheme, GenerateThemeInput } from './generate-theme.ts'
 import { suggestEffects, SuggestEffectsInput } from './suggest-effects.ts'
 import { speakerNotes, SpeakerNotesInput } from './speaker-notes.ts'
 import { altText, AltTextInput } from './alt-text.ts'
+import { translate, TranslateInput } from './translate.ts'
 import { explain, ExplainInput } from './explain.ts'
 import { brandConstraintFor, constrainOpsToBrand } from '../brand-constraint.ts'
 
@@ -26,6 +27,7 @@ export const ABILITY_OPS: Record<string, readonly OpName[]> = {
   suggestEffects: ['updateSlide', 'updateElement'],
   speakerNotes: ['setNotes'],
   altText: ['updateElement'],
+  translate: ['updateElement'],
   explain: [],
   chat: ALL_OP_NAMES,
 }
@@ -43,6 +45,7 @@ const INPUTS = {
   suggestEffects: SuggestEffectsInput,
   speakerNotes: SpeakerNotesInput,
   altText: AltTextInput,
+  translate: TranslateInput,
   explain: ExplainInput,
 } as const
 
@@ -55,6 +58,7 @@ export type AbilityInputs = {
   suggestEffects: SuggestEffectsInput
   speakerNotes: SpeakerNotesInput
   altText: AltTextInput
+  translate: TranslateInput
   explain: ExplainInput
 }
 
@@ -91,6 +95,8 @@ async function runAbilityUnconstrained<N extends keyof AbilityInputs>(name: N, e
       return speakerNotes(env, parsed.data as SpeakerNotesInput)
     case 'altText':
       return altText(env, parsed.data as AltTextInput)
+    case 'translate':
+      return translate(env, parsed.data as TranslateInput)
     case 'explain':
       return explain(env, parsed.data as ExplainInput)
   }

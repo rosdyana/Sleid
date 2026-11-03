@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDeck, type Deck } from '@sleid/model'
 import { connectOrNull, makeUser, removeUsers } from '@sleid/db/testing'
 import { eq } from 'drizzle-orm'
-import { createImportedDeck } from './import-deck.ts'
+import { createImportedDeck, storeDataImages } from './import-deck.ts'
 import { assets as assetsTable } from './schema/index.ts'
 import type { Db } from './client.ts'
 
@@ -72,5 +72,47 @@ describe('createImportedDeck (real Postgres)', () => {
     expect(stored.size).toBe(0)
     const rows = await db.select().from(assetsTable).where(eq(assetsTable.ownerId, missingUser))
     expect(rows).toHaveLength(0)
+  })
+})
+
+const SVG_SHAPE = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>'
+const SVG_SCRIPT = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+const dataUrl = (mime: string, text: string) => `data:${mime};base64,${Buffer.from(text).toString('base64')}`
+
+/** A one-slide deck whose background is the given data URL. */
+function deckWithBackground(src: string): Deck {
+  const deck = createDeck('Background deck')
+  const slide = deck.slides[0]!
+  return { ...deck, slides: [{ ...slide, background: { type: 'image', value: src } }] }
+}
+
+describe('storeDataImages (no database)', () => {
+  it('keeps an SVG data URL, stores it as image/svg+xml and points the slide at the asset', async () => {
+    const stored: Array<{ id: string; mime: string }> = []
+    const moved = await storeDataImages(deckWithBackground(dataUrl('image/svg+xml', SVG_SHAPE)), 'deck-1', 'user-1', async (id, _bytes, mime) => {
+      stored.push({ id, mime })
+    })
+    expect(moved.dropped).toBe(0)
+    expect(moved.rows).toHaveLength(1)
+    expect(moved.rows[0]).toMatchObject({ deckId: 'deck-1', ownerId: 'user-1', mime: 'image/svg+xml' })
+    expect(stored).toEqual([{ id: moved.rows[0]!.id, mime: 'image/svg+xml' }])
+    expect(moved.slides[0]!.background).toMatchObject({ type: 'image', value: `/api/assets/${moved.rows[0]!.id}` })
+  })
+
+  it('drops an SVG with script and counts it, without storing anything', async () => {
+    const stored: string[] = []
+    const moved = await storeDataImages(deckWithBackground(dataUrl('image/svg+xml', SVG_SCRIPT)), 'deck-1', 'user-1', async (id) => {
+      stored.push(id)
+    })
+    expect(moved.dropped).toBe(1)
+    expect(moved.rows).toHaveLength(0)
+    expect(stored).toHaveLength(0)
+    expect(moved.slides[0]!.background).toBeUndefined()
+  })
+
+  it('drops a PNG data URL whose bytes are not a PNG', async () => {
+    const moved = await storeDataImages(deckWithBackground(dataUrl('image/png', 'not a png')), 'deck-1', 'user-1', async () => undefined)
+    expect(moved.dropped).toBe(1)
+    expect(moved.rows).toHaveLength(0)
   })
 })
