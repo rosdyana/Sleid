@@ -14,6 +14,8 @@ import {
   startWizardResearchFn,
 } from '~/lib/wizard.functions'
 import type { RunView } from '~/lib/wizard.server'
+import { AppHeader } from '~/components/AppHeader'
+import { ChevronDown, ChevronUp, X } from '~/components/icons'
 
 export const Route = createFileRoute('/_authed/wizard/$runId')({
   loader: ({ params }) => getWizardRunFn({ data: { runId: params.runId } }),
@@ -98,13 +100,7 @@ function WizardRun() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex h-14 items-center justify-between border-b border-rule bg-white px-4">
-        <div className="flex items-center gap-2">
-          <span className="grid size-8 place-items-center rounded bg-accent text-white font-semibold">S</span>
-          <span className="text-lg font-medium">{run.brief.prompt.slice(0, 60)}</span>
-        </div>
-        <Link to="/" className="rounded px-3 py-1.5 text-ink-muted hover:bg-hover">Dashboard</Link>
-      </header>
+      <AppHeader title={run.brief.prompt} />
       <main className="mx-auto max-w-3xl space-y-8 px-6 py-8">
         <section aria-label="Status" className="rounded border border-rule bg-white p-4">
           <p className="text-sm">
@@ -140,7 +136,7 @@ function WizardRun() {
                   {s.status === 'ready' ? `${s.wordCount} words${s.tables ? ` · ${s.tables} table${s.tables > 1 ? 's' : ''}` : ''}${s.images ? ` · ${s.images} image` : ''}` : s.status === 'failed' ? `failed: ${s.error ?? ''}` : s.status}
                 </span>
                 {draft && (
-                  <button type="button" aria-label={`Remove ${s.title}`} onClick={() => void act('Removing', () => removeWizardSourceFn({ data: { runId: run.id, sourceId: s.id } }).then(() => getWizardRunFn({ data: { runId: run.id } })))} className="text-ink-muted hover:text-red-700">×</button>
+                  <button type="button" aria-label={`Remove ${s.title}`} onClick={() => void act('Removing', () => removeWizardSourceFn({ data: { runId: run.id, sourceId: s.id } }).then(() => getWizardRunFn({ data: { runId: run.id } })))} className="text-ink-muted hover:text-red-700"><X size={14} /></button>
                 )}
               </li>
             ))}
@@ -254,9 +250,9 @@ function OutlineList({ outline, onChange, disabled }: { outline: Outline; onChan
             <select aria-label={`Slide ${i + 1} visual`} value={slide.visual} disabled={disabled} onChange={(e) => update(i, { visual: e.target.value as OutlineSlide['visual'] })} className="rounded border border-rule p-1">
               {VISUALS.map((v) => <option key={v} value={v}>{v}</option>)}
             </select>
-            <button type="button" aria-label={`Move slide ${i + 1} up`} disabled={disabled || i === 0} onClick={() => move(i, i - 1)} className="px-1">↑</button>
-            <button type="button" aria-label={`Move slide ${i + 1} down`} disabled={disabled || i === outline.slides.length - 1} onClick={() => move(i, i + 1)} className="px-1">↓</button>
-            <button type="button" aria-label={`Delete slide ${i + 1}`} disabled={disabled || outline.slides.length <= 1} onClick={() => onChange({ ...outline, slides: outline.slides.filter((_, j) => j !== i) })} className="px-1 text-red-700">✕</button>
+            <button type="button" aria-label={`Move slide ${i + 1} up`} disabled={disabled || i === 0} onClick={() => move(i, i - 1)} className="px-1"><ChevronUp size={14} /></button>
+            <button type="button" aria-label={`Move slide ${i + 1} down`} disabled={disabled || i === outline.slides.length - 1} onClick={() => move(i, i + 1)} className="px-1"><ChevronDown size={14} /></button>
+            <button type="button" aria-label={`Delete slide ${i + 1}`} disabled={disabled || outline.slides.length <= 1} onClick={() => onChange({ ...outline, slides: outline.slides.filter((_, j) => j !== i) })} className="px-1 text-red-700"><X size={14} /></button>
           </div>
           <textarea
             aria-label={`Slide ${i + 1} key points`}

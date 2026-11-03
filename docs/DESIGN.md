@@ -1413,3 +1413,17 @@ Scope: the deck schema gains text weight, letter spacing and case, text and box 
 - Shape text in the editor uses the body font through the app's default, not the renderer's section font.
 - Text box shadows are not in the inspector. Only the model and renderer have them.
 - The heading style in the editor (1.3em, bold) is the editor's own, not reveal's heading sizes.
+
+## Deck trash and navigation
+
+- Deleting a deck is a soft delete. `decks.deletedAt` is set. Every list and open path already skips deleted decks, so nothing is removed from the database.
+- Only the owner can move a deck to the trash or restore it. The check reads the owner's membership row (`packages/db/src/trash.ts`).
+- The dashboard card menu has Move to trash. It has no confirm dialog, because the undo toast restores the deck for 8 seconds.
+- The editor's File ▸ Move to trash… is for owners only. It asks first, then opens the dashboard with the same undo toast.
+- The dashboard has a Trash tab (`/?view=trash`) that lists the caller's own trashed decks, newest deletion first. Restore clears `deletedAt` and shows an "Open" toast. The row leaves the list at once.
+- Delete forever (`purgeDeck` in `packages/db/src/trash.ts`) is owner only and only works on a deck already in the trash. The user confirms in a dialog that cannot be undone. One transaction deletes the deck row. Members, comments, snapshots, updates, share links, invites, exports and asset rows cascade. Wizard runs and import jobs keep their rows with the deck cleared. The stored image files are then removed from the asset storage; a file that fails to delete is logged and skipped.
+- No automatic purge yet: a trashed deck stays in the Trash until its owner deletes it forever.
+- Icons are drawn SVGs from `apps/web/src/components/icons.tsx` (star, chevrons, close, plus, more, check, trash, restore), not font glyphs.
+- Settings pages and the wizard share `AppHeader`. The logo and the right-hand link both go back to the dashboard. The dashboard keeps its own header.
+- Delete forever also removes the deck's finished export files (export storage), not only its asset files. A deck that is not in Trash is refused with "This deck is not in Trash", and a non-owner with "Only the owner can delete this deck".
+- Checked in Chrome against a dev server with the test login: the card menu (Escape returns focus to its trigger), trash and Undo, File ▸ Move to trash… landing on the deck list with the Undo toast, the Trash tab, Restore with its Open toast, and the delete-forever dialog (Cancel focused first, Tab stays inside, Escape cancels and returns focus, Delete forever removes the row). The wizard header was checked at 390 px wide.

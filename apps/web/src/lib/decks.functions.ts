@@ -2,9 +2,10 @@ import { createServerFn } from '@tanstack/react-start'
 import { and, desc, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
 import { db } from '~/db/client'
-import { decks, deckMembers, setStarred } from '@sleid/db'
+import { decks, deckMembers, listTrashedDecks, purgeDeck, restoreDeck, setStarred, trashDeck } from '@sleid/db'
 import { getDeckRole, requireDeckRole } from '~/lib/deck-access.server'
 import { requireUser } from '~/lib/session.server'
+import { getAssetStorage, getExportStorage } from '~/lib/storage.server'
 
 const deckIdSchema = z.object({ deckId: z.uuid() })
 const starSchema = z.object({ deckId: z.uuid(), starred: z.boolean() })
@@ -63,5 +64,53 @@ export const setStarredFn = createServerFn({ method: 'POST' })
     const user = await requireUser()
     await requireDeckRole(user.id, data.deckId, 'viewer')
     await setStarred(db, user.id, data.deckId, data.starred)
+    return { ok: true as const }
+  })
+
+/** Moves a deck to the trash (soft delete). Only the owner may. The owner can restore it from the dashboard's undo toast. */
+export const moveDeckToTrashFn = createServerFn({ method: 'POST' })
+  .validator((data: unknown) => deckIdSchema.parse(data))
+  .handler(async ({ data }) => {
+    const user = await requireUser()
+    const ok = await trashDeck(db, user.id, data.deckId)
+    if (!ok) throw new Error('Only the owner can move this deck to trash')
+    return { ok: true as const }
+  })
+
+/** Brings a trashed deck back. Only the owner may. */
+export const restoreDeckFn = createServerFn({ method: 'POST' })
+  .validator((data: unknown) => deckIdSchema.parse(data))
+  .handler(async ({ data }) => {
+    const user = await requireUser()
+    const ok = await restoreDeck(db, user.id, data.deckId)
+    if (!ok) throw new Error('This deck could not be restored')
+    return { ok: true as const }
+  })
+
+/** The caller's own decks in the trash, newest deletion first. */
+export const listTrashedDecksFn = createServerFn({ method: 'GET' }).handler(async () => {
+  const user = await requireUser()
+  const rows = await listTrashedDecks(db, user.id)
+  return rows.map((r) => ({ ...r, deletedAt: r.deletedAt.toISOString() }))
+})
+
+/**
+ * Deletes a trashed deck for good. Only the owner may. The database rows go first; the stored image files follow, and a
+ * file that fails to delete is logged and skipped (the row is already gone, so nothing can point at it).
+ */
+export const deleteDeckForeverFn = createServerFn({ method: 'POST' })
+  .validator((data: unknown) => deckIdSchema.parse(data))
+  .handler(async ({ data }) => {
+    const user = await requireUser()
+    const result = await purgeDeck(db, user.id, data.deckId)
+    if (!result.ok) throw new Error(result.reason === 'not-owner' ? 'Only the owner can delete this deck' : 'This deck is not in Trash')
+    const storage = getAssetStorage()
+    for (const id of result.assetIds) {
+      await storage.delete(id).catch((err: unknown) => console.warn('[trash] could not delete asset file', id, err))
+    }
+    const exportStorage = getExportStorage()
+    for (const key of result.exportKeys) {
+      await exportStorage.delete(key).catch((err: unknown) => console.warn('[trash] could not delete export file', key, err))
+    }
     return { ok: true as const }
   })

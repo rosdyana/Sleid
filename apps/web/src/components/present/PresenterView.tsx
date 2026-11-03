@@ -8,6 +8,7 @@ import { CANVAS_W } from '~/components/editor/commands'
 import { SlideSurface } from '~/components/editor/ElementView'
 import { audienceUrl, openPresentChannel, type AudienceMessage, type PresentChannel, type PresenterMessage, type RemoteAction } from './present-channel'
 import { RemotePanel } from './RemotePanel'
+import { ChevronLeft, ChevronRight } from '~/components/icons'
 
 const CURRENT_WIDTH = 880
 const NEXT_WIDTH = 420
@@ -120,10 +121,12 @@ export function PresenterView({ deck, deckId, sid, startSlide, origin }: { deck:
             </div>
             <div className="flex flex-1 gap-2 self-end">
               <button type="button" onClick={() => send('prev')} className="rounded bg-white/15 px-5 py-3 text-[15px] font-medium hover:bg-white/25" aria-label="Previous slide">
-                ← Prev
+                <ChevronLeft size={18} className="mr-1.5 inline align-[-3px]" />
+                Prev
               </button>
               <button type="button" onClick={() => send('next')} className="rounded bg-accent px-5 py-3 text-[15px] font-medium hover:brightness-110" aria-label="Next slide">
-                Next →
+                Next
+                <ChevronRight size={18} className="ml-1.5 inline align-[-3px]" />
               </button>
             </div>
           </div>

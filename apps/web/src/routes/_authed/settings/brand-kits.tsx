@@ -1,7 +1,8 @@
-import { Link, createFileRoute } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { deleteBrandKitFn, listBrandKitsFn } from '~/lib/brand-kits.functions'
 import { listTemplatesFn } from '~/lib/templates.functions'
+import { AppHeader } from '~/components/AppHeader'
 import { SettingsNav } from '~/components/settings/SettingsNav'
 import { BrandKitForm, PALETTE_KEYS, type KitView } from '~/components/brand/BrandKitForm'
 
@@ -56,17 +57,7 @@ function BrandKitSettings() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex h-14 items-center justify-between border-b border-rule bg-white px-4">
-        <div className="flex items-center gap-2">
-          <Link to="/" className="grid size-8 place-items-center rounded bg-accent font-semibold text-white" aria-label="Back to decks">
-            S
-          </Link>
-          <h1 className="text-lg font-medium">Brand kits</h1>
-        </div>
-        <Link to="/" className="rounded px-3 py-1.5 text-ink-muted hover:bg-hover">
-          Back to decks
-        </Link>
-      </header>
+      <AppHeader title="Brand kits" />
 
       <main className="mx-auto max-w-4xl space-y-6 px-6 py-8">
         <SettingsNav />

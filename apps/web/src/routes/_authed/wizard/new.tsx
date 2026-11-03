@@ -1,9 +1,10 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useState, type FormEvent } from 'react'
 import { createWizardRunFn } from '~/lib/wizard.functions'
 import { listTemplatesFn } from '~/lib/templates.functions'
 import { listBrandKitsFn } from '~/lib/brand-kits.functions'
 import { THEME_CHOICES, WIZARD_GOALS, AI_THEME } from '@sleid/llm/wizard-schema'
+import { AppHeader } from '~/components/AppHeader'
 import { galleryTabOf, type TemplateItem } from '~/components/templates/TemplateCard'
 import type { GalleryTab } from '~/components/templates/TemplateGallery'
 
@@ -106,10 +107,7 @@ function NewFromPrompt() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex h-14 items-center gap-2 border-b border-rule bg-white px-4">
-        <span className="grid size-8 place-items-center rounded bg-accent text-white font-semibold">S</span>
-        <span className="text-lg font-medium">New deck from a prompt</span>
-      </header>
+      <AppHeader title="New deck from a prompt" />
       <main className="mx-auto max-w-2xl px-6 py-8">
         <p className="text-sm text-ink-muted">Step 1 of 5: the brief. Next you can add references, research and review the outline.</p>
         <form onSubmit={submit} className="mt-6 space-y-5" aria-label="Brief">
@@ -206,9 +204,14 @@ function NewFromPrompt() {
             <label className="flex items-center gap-2"><input type="checkbox" checked={sources} onChange={(e) => setSources(e.target.checked)} /> A Sources slide at the end</label>
           </fieldset>
           {error && <p role="alert" className="text-red-700">{error}</p>}
-          <button type="submit" disabled={busy} className="rounded bg-accent px-4 py-2 font-medium text-white disabled:opacity-60">
-            {busy ? 'Saving…' : 'Next: references'}
-          </button>
+          <div className="flex gap-2">
+            <button type="submit" disabled={busy} className="rounded bg-accent px-4 py-2 font-medium text-white disabled:opacity-60">
+              {busy ? 'Saving…' : 'Next: references'}
+            </button>
+            <Link to="/" className="rounded border border-rule px-4 py-2 font-medium text-ink-muted hover:bg-hover">
+              Cancel
+            </Link>
+          </div>
         </form>
       </main>
     </div>

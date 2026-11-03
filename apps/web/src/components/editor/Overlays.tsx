@@ -3,9 +3,19 @@
 // with a note saying which milestone brings them.
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { PromptRequest } from './actions.ts'
+import { Check } from '~/components/icons'
 
 export type MenuEntry =
-  | { kind: 'item'; label: string; onSelect?: () => void; shortcut?: string; disabled?: boolean; note?: string }
+  | {
+      kind: 'item'
+      label: string
+      onSelect?: () => void
+      shortcut?: string
+      disabled?: boolean
+      note?: string
+      /** Set on toggles. Any item in a menu with this field set gets a leading slot, so unchecked labels still line up. */
+      checked?: boolean
+    }
   | { kind: 'sep' }
   | { kind: 'group'; label: string; items: MenuEntry[] }
 
@@ -14,6 +24,7 @@ export type CloseMenu = (restoreFocus?: boolean) => void
 
 export function MenuList({ items, onClose, onAction }: { items: MenuEntry[]; onClose: CloseMenu; onAction?: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
+  const slot = items.some((e) => e.kind === 'item' && e.checked !== undefined)
   useEffect(() => {
     ref.current?.querySelector<HTMLButtonElement>('[role=menuitem]:not([disabled])')?.focus()
   }, [])
@@ -36,18 +47,18 @@ export function MenuList({ items, onClose, onAction }: { items: MenuEntry[]; onC
 
   return (
     <div ref={ref} role="menu" onKeyDown={onKeyDown} className="min-w-64 rounded-md border border-rule bg-white py-1 text-[13px] shadow-lg">
-      {items.map((entry, i) => renderEntry(entry, i, onClose, onAction))}
+      {items.map((entry, i) => renderEntry(entry, i, onClose, onAction, slot))}
     </div>
   )
 }
 
-function renderEntry(entry: MenuEntry, key: number, onClose: CloseMenu, onAction?: () => void): ReactNode {
+function renderEntry(entry: MenuEntry, key: number, onClose: CloseMenu, onAction?: () => void, slot = false): ReactNode {
   if (entry.kind === 'sep') return <div key={key} role="separator" className="my-1 border-t border-rule-soft" />
   if (entry.kind === 'group') {
     return (
       <div key={key} role="group" aria-label={entry.label}>
         <div className="px-3 pb-0.5 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-ink-muted">{entry.label}</div>
-        {entry.items.map((child, i) => renderEntry(child, i, onClose, onAction))}
+        {entry.items.map((child, i) => renderEntry(child, i, onClose, onAction, slot))}
       </div>
     )
   }
@@ -65,6 +76,16 @@ function renderEntry(entry: MenuEntry, key: number, onClose: CloseMenu, onAction
       }}
       className="flex w-full items-center gap-6 px-3 py-1.5 text-left hover:bg-hover focus:bg-hover focus:outline-none disabled:cursor-not-allowed disabled:text-ink-muted/60 disabled:hover:bg-transparent"
     >
+      {slot && (
+        <span className="grid w-3.5 shrink-0 place-items-center">
+          {entry.checked && (
+            <>
+              <Check size={14} />
+              <span className="sr-only">checked</span>
+            </>
+          )}
+        </span>
+      )}
       <span className="flex-1 whitespace-nowrap">{entry.label}</span>
       {entry.note && <span className="text-[11px] text-ink-muted">{entry.note}</span>}
       {entry.shortcut && <span className="text-[11px] text-ink-muted">{entry.shortcut}</span>}

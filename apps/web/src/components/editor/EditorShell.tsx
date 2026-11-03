@@ -393,6 +393,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
     openExport: (format) => setExportDialog(format),
     openImport: () => setImportOpen(true),
     saveTemplate: () => setSaveTemplateOpen(true),
+    canTrash: meta.role === 'owner',
     prompt: setPrompt,
     openShortcuts: () => setShortcutsOpen(true),
     toast,

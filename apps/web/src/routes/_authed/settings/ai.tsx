@@ -1,10 +1,11 @@
 // Settings › AI: the model providers the assistant can use. Keys are write-only: the page shows
 // "••••• set" and never gets the key back. A test sends one tiny request and reports the outcome.
-import { Link, createFileRoute } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { researchStatusFn } from '~/lib/wizard.functions'
 import { listAiProvidersFn, saveAiProviderFn, deleteAiProviderFn, setDefaultAiProviderFn, testAiProviderFn } from '~/lib/llm-settings.functions'
 import type { ProviderView } from '~/lib/llm-settings.server'
+import { AppHeader } from '~/components/AppHeader'
 import { SettingsNav } from '~/components/settings/SettingsNav'
 
 export const Route = createFileRoute('/_authed/settings/ai')({
@@ -184,17 +185,7 @@ function AiSettings() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex h-14 items-center justify-between border-b border-rule bg-white px-4">
-        <div className="flex items-center gap-2">
-          <Link to="/" className="grid size-8 place-items-center rounded bg-accent font-semibold text-white" aria-label="Back to decks">
-            S
-          </Link>
-          <h1 className="text-lg font-medium">AI providers</h1>
-        </div>
-        <Link to="/" className="rounded px-3 py-1.5 text-ink-muted hover:bg-hover">
-          Back to decks
-        </Link>
-      </header>
+      <AppHeader title="AI providers" />
 
       <main className="mx-auto max-w-4xl space-y-6 px-6 py-8">
         <SettingsNav />

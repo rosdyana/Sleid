@@ -3,7 +3,7 @@
 // session, so every command is one undo step and is saved like any other edit.
 import { deckToMarkdown } from '@sleid/render'
 import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, type Deck, type Element, type RichText, type Slide, type Theme } from '@sleid/model'
-import { createBlankDeckFn, setStarredFn } from '~/lib/decks.functions'
+import { createBlankDeckFn, moveDeckToTrashFn, setStarredFn } from '~/lib/decks.functions'
 import { copyDeckFn } from '~/lib/deck-doc.functions'
 import { markOnEverything, setMarkEverywhere, clearMarksEverywhere, type MarkName } from './rich.ts'
 import {
@@ -405,6 +405,18 @@ export function createActions(c: ActionContext) {
     }
   }
 
+  /** Owner only (the File menu shows it to owners). Soft delete, then the dashboard shows the undo toast. */
+  async function moveToTrash() {
+    const title = deck.title.trim() || 'Untitled deck'
+    if (!window.confirm(`Move “${title}” to trash? You can restore it from Trash on your deck list.`)) return
+    try {
+      await moveDeckToTrashFn({ data: { deckId: c.deckId } })
+      await c.navigate(`/?trashed=${c.deckId}&trashedTitle=${encodeURIComponent(title)}`)
+    } catch (err) {
+      c.toast(err instanceof Error ? err.message : 'Could not move the deck to trash')
+    }
+  }
+
   /** Markdown and JSON are made in the browser. The other formats are worker exports (see the export tray). */
   function download(format: 'json' | 'markdown') {
     const base = fileSafeName(deck.title)
@@ -526,6 +538,7 @@ export function createActions(c: ActionContext) {
     // deck
     newDeck,
     makeCopy,
+    moveToTrash,
     download,
     present,
     presenterView,

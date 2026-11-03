@@ -28,6 +28,8 @@ export interface MenuDeps {
   openImport: () => void
   /** Opens Save as template (File). Editors and owners only; viewers and commenters get it disabled. */
   saveTemplate: () => void
+  /** Owners only. Shows File ▸ Move to trash…; the action itself is in actions.ts. */
+  canTrash: boolean
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
@@ -87,8 +89,7 @@ function restrictForViewer(menus: Menu[], commenting: boolean): Menu[] {
     entries.map((entry) => {
       if (entry.kind === 'group') return { ...entry, items: walk(entry.items) }
       if (entry.kind === 'sep') return entry
-      const plain = entry.label.replace(/^✓ /, '')
-      if (entry.disabled || allowed.has(plain)) return entry
+      if (entry.disabled || allowed.has(entry.label)) return entry
       return { ...entry, disabled: true, note: entry.note ?? 'View only' }
     })
   return menus.map((m) => ({ ...m, items: walk(m.items) }))
@@ -128,6 +129,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
         ]),
         sep,
         item('Rename', d.focusTitle),
+        ...(d.canTrash ? [item('Move to trash…', () => void a.moveToTrash())] : []),
         sep,
         group('Version history', [item('Show version history', d.showHistory), item('Name current version…', d.nameVersion)]),
       ],
@@ -154,8 +156,8 @@ function buildAllMenus(d: MenuDeps): Menu[] {
         item('Present from current slide', () => a.present(false)),
         item('Presenter view', d.presenterView),
         sep,
-        { kind: 'item', label: `${d.ui.showNotes ? '✓ ' : ''}Show speaker notes`, onSelect: () => d.setUi({ showNotes: !d.ui.showNotes }) },
-        { kind: 'item', label: `${d.ui.showGuides ? '✓ ' : ''}Show grid and guides`, onSelect: () => d.setUi({ showGuides: !d.ui.showGuides }) },
+        { kind: 'item', label: 'Show speaker notes', checked: d.ui.showNotes, onSelect: () => d.setUi({ showNotes: !d.ui.showNotes }) },
+        { kind: 'item', label: 'Show grid and guides', checked: d.ui.showGuides, onSelect: () => d.setUi({ showGuides: !d.ui.showGuides }) },
         sep,
         group(
           'Zoom',

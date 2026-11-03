@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight } from '~/components/icons'
 
 /**
  * The phone remote. Anyone with the link can use it: the token in the path is the only credential, and it lasts
@@ -118,7 +119,8 @@ function RemotePage() {
           className="rounded-2xl bg-white/15 text-[24px] font-semibold active:bg-white/30 disabled:opacity-60"
           data-testid="phone-prev"
         >
-          ← Prev
+          <ChevronLeft size={18} className="mr-1 inline align-[-3px]" />
+          Prev
         </button>
         <button
           type="button"
@@ -127,7 +129,8 @@ function RemotePage() {
           className="rounded-2xl bg-accent text-[24px] font-semibold active:brightness-90 disabled:opacity-60"
           data-testid="phone-next"
         >
-          Next →
+          Next
+          <ChevronRight size={18} className="ml-1 inline align-[-3px]" />
         </button>
       </div>
     </main>

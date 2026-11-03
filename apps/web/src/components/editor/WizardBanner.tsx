@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { cancelWizardRunFn, getWizardForDeckFn, retryWizardFailedFn } from '~/lib/wizard.functions'
 import type { RunView } from '~/lib/wizard.server'
+import { X } from '~/components/icons'
 
 const LIVE = ['ingesting', 'outlining', 'generating']
 
@@ -91,7 +92,7 @@ export function WizardBanner({ deckId }: { deckId: string }) {
         )}
         {!live && (
           <button type="button" aria-label="Dismiss" className="rounded px-2 py-0.5 text-ink-muted hover:bg-hover" onClick={() => setDismissed(true)}>
-            ✕
+            <X size={14} />
           </button>
         )}
       </div>

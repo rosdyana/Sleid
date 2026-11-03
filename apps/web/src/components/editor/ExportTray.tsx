@@ -1,6 +1,7 @@
 // Export jobs started from this editor. Each one polls its status until it is done or failed.
 import { useCallback, useEffect, useState } from 'react'
 import { getExportFn, startExportFn } from '~/lib/export.functions'
+import { X } from '~/components/icons'
 
 export interface ExportJob {
   id: string
@@ -68,7 +69,7 @@ export function ExportTray({ jobs, onDismiss }: { jobs: ExportJob[]; onDismiss: 
               {job.status === 'failed' && <div role="alert" className="text-red-700">Export failed: {job.error}</div>}
             </div>
             <button type="button" aria-label={`Dismiss ${job.label}`} onClick={() => onDismiss(job.id)} className="rounded px-1.5 text-ink-muted hover:bg-hover">
-              ×
+              <X size={14} />
             </button>
           </div>
         </div>
