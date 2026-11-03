@@ -58,6 +58,8 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | web | Google sign-in |
 | `SLEID_TEST_AUTH` | web | `1` enables email+password sign-in for the browser checks. Refused when `NODE_ENV=production`. |
 | `COLLAB_TOKEN_SECRET` | web (signs), collab (verifies) | HMAC key for the 5-minute collab tokens. At least 32 characters. Must match in both. |
+| `MCP_RATE_LIMIT_PER_MINUTE` | web | Calls to `/mcp` per token per minute (default 120). Counted per process, in memory. |
+| `MCP_MAX_BODY_BYTES` | web | Largest request body accepted by `/mcp` (default 1048576). |
 | `COLLAB_INTERNAL_SECRET` | web, collab | Sent as `x-sleid-internal` on every internal API call. At least 16 characters. |
 | `COLLAB_PORT` | collab | WebSocket port, default `3001` |
 | `COLLAB_HOST` | collab | WebSocket bind address, default `127.0.0.1`. Use `0.0.0.0` only in a container. |
@@ -222,6 +224,43 @@ Small local models sometimes ignore the JSON schema. If a proposal fails with "n
 Usage counts are kept per request. A user can make `AI_RATE_LIMIT_MAX` requests per `AI_RATE_LIMIT_WINDOW_SECONDS` (default 30 per 10 minutes). The limit is checked in the database, so it holds across processes.
 
 Status of the live runs: the adapters are tested against fake HTTP servers. A live run against Foundry or a local server has **not** been done for this milestone. See DESIGN.md (M4, unverified).
+
+## MCP (AI agents)
+
+Sleid runs an MCP server at `/mcp` (Streamable HTTP). An agent can create decks, add slides, insert charts and diagrams, look at a slide as a PNG, export the deck and share it, using the same deck operations as the editor. Open editors see every change live.
+
+**1. Create a token.** Open **Extensions ▸ MCP access tokens** (or `/settings/tokens`). Choose a name, the scopes, an expiry (30 days to 1 year, 90 by default) and whether the token reaches all your decks or only some. The token is shown once. Copy it then.
+
+**2. Connect a client.**
+
+- **Claude Code** (run in a terminal):
+
+  ```sh
+  claude mcp add --transport http sleid http://localhost:3000/mcp --header "Authorization: Bearer <token>"
+  claude mcp list   # sleid should show ✔ Connected
+  ```
+
+  Use your public origin in place of `http://localhost:3000` on a deployed server. The settings page shows this command with your token filled in.
+
+- **Other clients that speak HTTP MCP** with custom headers: use the JSON on the settings page. The entry is `{"type": "http", "url": "<origin>/mcp", "headers": {"Authorization": "Bearer <token>"}}`.
+
+- **Claude Desktop and clients without header support:** they need a bridge that carries the header. For example `npx -y mcp-remote <origin>/mcp --header "Authorization: Bearer <token>"`. This has not been run against Sleid, so check it on your machine. Desktop's own "custom connector" flow expects OAuth, which Sleid does not offer yet.
+
+**Scopes.** A token can do only what its scopes allow. Each call also checks your current role on the deck, so removing someone's access takes effect on their next call.
+
+| Scope | Allows |
+|---|---|
+| `decks:read` | `list_decks`, `get_deck`, `render_slide`, the deck resource |
+| `decks:write` | `apply_ops`, the slide, text, chart, diagram, image and theme tools, `share_deck`. Needs editor access on each deck. |
+| `decks:create` | `create_deck` |
+| `exports` | `export_deck`. Viewers can export, as in the editor. |
+| `ai` | `generate_with_ai`. Needs editor access. Uses your AI provider and its limits. |
+
+**Tools.** `list_decks`, `create_deck`, `get_deck` (outline or JSON), `apply_ops`, `add_slide`, `update_text`, `set_notes`, `delete_slide`, `move_slide`, `insert_chart`, `insert_diagram` (Mermaid is parsed first, and a parse error comes back to the agent), `insert_image`, `set_theme`, `render_slide`, `export_deck`, `share_deck`, `generate_with_ai` (returns proposed ops and changes nothing; the agent then calls `apply_ops`). Resources: `sleid://schema/deck`, `sleid://schema/ops`, `sleid://themes`, `sleid://decks/{deckId}`. Prompt: `build_deck`.
+
+**Exports from MCP.** `export_deck` returns a one-time link, valid for 15 minutes, to a file on the server. It carries its own secret, never the token. The link works once, after the export has finished (a request before that gets 409 and the link is kept). Do not share it.
+
+**Safety notes.** Tokens are stored as SHA-256 hashes. Every tool call is recorded in the `mcp_audit` table (user, token, tool, deck, outcome, time, and the short error text). Revoke a token in the same settings page; it stops working at once. The rate limit and the body cap are per process, so a deployment with several web processes gets the limit per process.
 
 ## Sharing
 

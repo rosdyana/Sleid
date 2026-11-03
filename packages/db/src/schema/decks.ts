@@ -19,6 +19,8 @@ import { bytea } from './custom-types.ts'
 export const deckRole = pgEnum('deck_role', ['owner', 'editor', 'commenter', 'viewer'])
 /** Roles a share link or invite can grant. Ownership is never granted this way. */
 export const shareRole = pgEnum('share_role', ['editor', 'commenter', 'viewer'])
+/** How a membership came about. 'link' memberships end when their link is restricted, revoked or expires. */
+export const memberVia = pgEnum('member_via', ['owner', 'invite', 'link'])
 
 export const decks = pgTable('decks', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
@@ -48,6 +50,10 @@ export const deckMembers = pgTable(
     role: deckRole('role').notNull(),
     /** Per user: each collaborator stars decks for themselves. Moved here from decks in M2. */
     starred: boolean('starred').notNull().default(false),
+    /** owner: the creator. invite: an email invite or an explicit role from the share dialog or MCP. link: redeemed from a share link. */
+    via: memberVia('via').notNull().default('invite'),
+    /** The link that granted the membership, when via is 'link'. */
+    shareLinkId: uuid('share_link_id').references(() => shareLinks.id, { onDelete: 'set null' }),
   },
   (t) => [primaryKey({ columns: [t.deckId, t.userId] })],
 )
@@ -156,6 +162,10 @@ export const exportJobs = pgTable(
     error: text('error'),
     /** Storage key of the finished file. */
     fileKey: text('file_key'),
+    /** One-time download link for MCP callers: SHA-256 of the link secret, its expiry, and when it was used. */
+    linkTokenHash: text('link_token_hash'),
+    linkExpiresAt: timestamp('link_expires_at', { withTimezone: true }),
+    linkUsedAt: timestamp('link_used_at', { withTimezone: true }),
     fileName: text('file_name'),
     contentType: text('content_type'),
     bytes: integer('bytes'),

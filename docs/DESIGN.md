@@ -12,7 +12,7 @@ Living document. Update it as decisions change.
 | 2. Hocuspocus live co-edit, presence, sharing and roles, link tokens | **Done** (checks run, see M2 below; open gaps listed there) |
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON, asset storage, publish to web | **Done** (checks run, see M3 below; open gaps listed there) |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | **Done** (checks run, see M4 below; open gaps and unverified items listed there) |
-| 5. MCP server + access tokens | Pending |
+| 5. MCP server + access tokens | **Done** (checks run, see M5 below; open gaps and unverified items listed there) |
 | 6. Wizard + reference ingestion + research | Pending |
 | 7. Comments, version history, presenter + phone remote | Pending |
 | 8. Import: PPTX, Google Slides, Markdown | Pending |
@@ -206,7 +206,7 @@ Scope: live co-editing through Hocuspocus (`apps/collab`), presence, roles end t
 - The title bar's status text reads "All changes saved" (it had "in Sleid" in M1b), and "Saving…", "Connecting…", "Offline — changes will sync" and the denial text are added.
 
 **Known gaps and limitations (decisions to revisit).**
-- **Restricted does not remove people who joined through the link.** A redeemed link adds a membership row, and restricting the link does not remove it. The owner removes those people in the people list. A `via` column on `deck_members` would fix this and is a decision for you.
+- **Restricted does not remove people who joined through the link.** A redeemed link adds a membership row, and restricting the link does not remove it. The owner removes those people in the people list. A `via` column on `deck_members` would fix this and is a decision for you. **Resolved in M5** (`deck_members.via`, see M5).
 - **Mid-session role changes are enforced on the server, but the editor UI keeps its role until reload.** After a downgrade, the server refuses the user's writes, but their local edits still show, and the status stays "Saving…" until reload. After an upgrade, the UI stays read-only until reload. If the internal API is down, the change applies on the next connect.
 - **Rich text is last-writer-wins per element** (opaque JSON, unchanged from M1b). Two people typing into the same text box at the same time overwrite each other. Upgrade path: a `Y.XmlFragment` per text element bound with `y-prosemirror`. Only `ydoc.ts` and `ops.ts` change, because the rest of the app goes through them. Speaker notes are also a plain string, last-writer-wins.
 - **Edits made offline** live in the browser's document until the connection returns. Closing the tab while offline loses them, and the page asks for confirmation when there are unsaved changes.
@@ -442,7 +442,7 @@ Verified means a unit test reads the XML or a render was checked. LibreOffice wa
 | Shape (`shape`) | DrawingML preset: rect, roundRect, ellipse, triangle, rightArrow (arrow), line, star5. Fill and stroke. Opacity becomes fill transparency. Shape text is a text box with the shape geometry. | Good for the presets. Our arrow and star geometries are not the same as PowerPoint's presets, so proportions differ slightly. | XML: each preset present, alpha 50 % for opacity 0.5. Not rendered. |
 | Image (`image`) | Native picture. `fit` maps to `contain` and `cover` sizing. Asset and data-URL images are embedded. | Good for asset and data-URL images. `crop` is **not** applied (the full image is placed). External URLs are not fetched and are left out. An SVG is placed as-is and not checked visually. | XML: media part present. Render: the image on the chart slide (LibreOffice). |
 | Chart (`chart`) | Native chart part for bar, stacked-bar, line, area, pie, donut and scatter, with theme colours (or the chart's own colours) and the title and legend flags. | Good structure, editable in PowerPoint. ECharts overrides (`echartsOverride`) are not applied. Blank cells become 0. Axis and label styling are PowerPoint defaults with the palette. | XML: one chart part per chart type, value present. Render: the bar chart (LibreOffice). |
-| Diagram (`diagram`) | PNG of the Mermaid output, rendered by Chrome at the element's size. If the PNG fails, the source is written as monospace text. | Matches the Chrome render. Not editable in PowerPoint. | XML: picture present (with a PNG passed in), source text present (without). Render: the diagram on the chart slide. |
+| Diagram (`diagram`) | PNG of the Mermaid output, rendered by Chrome at the element's size. If the PNG fails, a placeholder box reads "Diagram could not be drawn" (fixed in M5: it used to write the source). | Matches the Chrome render. Not editable in PowerPoint. | XML: picture present (with a PNG passed in), source text present (without). Render: the diagram on the chart slide. |
 | Table (`table`) | Native table. Header row bold, header fill, border colour. Columns share the width equally. | Good. The model has no per-column widths, so columns are equal. Cell text is plain. | XML: table, cell text. Not rendered. |
 | Code (`code`) | Monospace text in a filled rectangle. | Plain text only, no syntax colours. | XML: monospace face and lines. Not rendered. |
 | Embed (`embed`) | Labelled text box with the URL as a hyperlink. | **Not** an embed. Deliberate, see the decisions. | XML: URL and hyperlink. |
@@ -721,7 +721,7 @@ Live runs after the fixes were 11 of 12 (suggest effects failed on the in-stream
 - **Packaging.** `packages/llm` has `mermaid@^12.2.0` and `happy-dom@^21.0.4`. Adding happy-dom also adds it as an optional peer of `vitest` in the lockfile, so each workspace's vitest entry changed. The runtime is unaffected. The web build bundles happy-dom and mermaid into the server output, and no client code imports `@sleid/llm` at runtime.
 
 **Not done.**
-- **PPTX.** `packages/pptx` still exports a failed diagram as its source text in monospace (`apps/worker/src/formats.ts`, `DiagramRasterizer`, then the fallback in `packages/pptx/src/index.ts`). The brief named the renderer and PDF/PNG, so this is unchanged. It is the one place a raw source can still reach a user.
+- **PPTX.** Fixed in M5: a failed diagram is a placeholder box, not the source text.
 - The parser checks syntax only. A diagram that parses but draws badly is not caught.
 
 **Checks.**
@@ -763,3 +763,116 @@ Each reply used the id-and-label form that the new rules ask for. So the retry a
 - **Firefox and Safari.** Chrome only.
 - **Production serving** (`node .output/server/index.mjs`) of the assistant. The build passes; the server was not run.
 - **Live multi-user timing** beyond one collaborator and one viewer.
+
+### What M5 built, and decisions taken while building it
+
+Scope: a personal access token (PAT) system, the MCP server at `/mcp`, one-time export links, MCP audit, link-only membership ending on restrict (added during M5), the M4 PPTX fallback fix, and the Extensions menu item. The stdio bridge was not built (see "Not done").
+
+**Layout.**
+- `packages/db`: `schema/api-tokens.ts` (`api_tokens`, `mcp_audit`), `api-tokens.ts` (create, normalise, verify, list, revoke, scope and allowlist helpers, audit writes), `export-links.ts` (one-time links), `deck_members.via` and `share_link_id` (schema and grant rules in `sharing.ts`, role rule in `deck-access.ts`).
+- Migrations `0004_noisy_domino.sql` (tokens, audit, export link columns) and `0005_link_membership_via.sql` (membership origin, with a hand-written owner backfill).
+- `apps/web/src/lib/mcp/`: `http.ts` (the route's handler: bearer check, rate limit, body cap, transport), `server.ts` (tools, resources, prompt, audit and role checks per call), `compile.ts` and `rich.ts` (convenience tools to ops, outlines, plain text to rich text), `rate-limit.ts`, `deps.ts` and `deps.server.ts` (dependencies; the env factory is server-only), `errors.ts`.
+- `apps/web`: `routes/mcp.ts` (POST, GET, DELETE), `routes/_authed/settings/tokens.tsx`, `lib/api-tokens.functions.ts`, the export route (accepts `?token=` one-time links), and the Extensions menu item.
+- `apps/web/tests/mcp.mjs` (live editor check, below).
+
+**Transport.** `@modelcontextprotocol/sdk` 1.32.2 with `WebStandardStreamableHTTPServerTransport`, so the TanStack route passes its web `Request` straight through, with no Node adapter. **Stateless**: no session id, a new server and transport per request, `enableJsonResponse: true` (plain JSON responses, no SSE). The SDK answers GET and DELETE itself in this mode (the SDK client connects fine). A stateful session would need persistence across processes, which is not needed for tool calls. Notifications are not pushed.
+
+**Authentication.**
+- A token is `sleid_pat_` plus 32 random bytes in base64url. The database stores its SHA-256 (hex) and a six-character hint, never the secret. The secret is shown once.
+- Verification looks the token up by its hash (a unique index), then checks revocation and expiry in the same query. An unknown, revoked, expired or malformed token gets the same 401 response, with `WWW-Authenticate: Bearer` (and `error="invalid_token"` for a presented token). The comparison is an indexed equality lookup, not an in-application compare: the attacker never sees a hash to compare against.
+- Expiry defaults to 90 days, with a maximum of 365. `last_used_at` is written at most every five minutes.
+- Every tool call checks, in order: the token's scope (`decks:read`, `decks:write`, `decks:create`, `exports`, `ai`), the token's deck allowlist (`null` means all decks; a deck outside it reads as "Deck not found"), then the user's **current** role on the deck. A removed membership is refused on the next call. That was tested.
+- Tokens are never placed in URLs. The web app's session is not used by MCP.
+
+**Rate limit and body cap.** 120 HTTP requests per token per minute (`MCP_RATE_LIMIT_PER_MINUTE`), counted in memory per web process, so a multi-process deployment gets the limit per process. A 429 carries `Retry-After`. Request bodies are capped at 1 MiB (`MCP_MAX_BODY_BYTES`), checked on the declared length and again while the body is read.
+
+**Writes and reads.**
+- Every write goes through the collab internal API (`applyOps` as `mcp:<tokenId>`), so open editors see it live and Undo works for the editor. The web app writes nothing to the database behind collab's back. If collab is down, the call fails with "nothing was changed".
+- `apply_ops` parses the ops with the model package's zod schemas first; a 422 from collab returns the failing op's index, name and reason, and nothing is applied.
+- Reads use `readDeck` (live, falling back to the saved state).
+- `create_deck` with a theme that cannot be applied removes the new row, so no empty deck is left behind.
+
+**Convenience tools.** They compile to ops and reuse `placeNewElement` (now exported from `@sleid/llm`), so charts, diagrams and images are placed in free space exactly as the assistant places them. When the slide is full, the element goes on a new slide after its target. Two items overflowing onto the same target land in reverse order (the later one goes first). That is the existing placement rule, not changed here, and the outline shows the result. `insert_diagram` runs `validateMermaid` (the real parser) and returns the parse error to the agent. `update_text`, `add_slide` and the notes use the plain-text format (`- ` bullets, `**bold**`, `*italic*`; markers count only at word edges, so `2*3*4` stays literal).
+
+**Rendering (`render_slide`).** Reuses the worker's PNG export with `slideId` and `scale`. The tool queues the job, polls the row every 250 ms, and waits up to 30 s. The PNG comes back as MCP image content, with a text block of ids and the pixel size. A render that does not finish in time says it is still queued. Requires `decks:read`.
+
+**Exports (`export_deck`).** Formats `pdf`, `pptx`, `png`, `html`, `md` (mapped to `markdown`) and `json`. It requires `exports`, and viewers may export, as in the editor. It returns a one-time download URL, `/api/exports/<id>/file?token=sleid_dl_…`.
+- **Decision: one-time signed links, not the PAT.** Each export gets its own random secret, valid 15 minutes. Only its SHA-256 is stored (`exports.link_token_hash`, `link_expires_at`, `link_used_at`). The link is consumed atomically by the first successful download of a finished export. A request before the export finishes gets 409 and keeps the link. A used, expired or unknown link gets 404. The download response carries `Referrer-Policy: no-referrer`.
+- This lifts the M3 gap that MCP could not choose export options. The worker already supported these formats.
+
+**Audit (`mcp_audit`).** One row per tool call: user, token id, tool, deck id (when named), ok, time in ms, and the short error text (at most 300 characters, never a stack). Refused calls are recorded too, including the deck named in the arguments. There are no foreign keys, so the history outlives the token, the deck and the user. A failure to write the row is logged and does not fail the call.
+
+**Generate with AI (`generate_with_ai`).** Requires `ai` and editor access. It calls the existing `runAbilityForDeck`, so it uses the user's default provider, the M4 rate limit and usage rows, and the endpoint policy. It returns the proposed ops and changes nothing; the agent then calls `apply_ops`.
+
+**Resources and prompt.** `sleid://schema/deck`, `sleid://schema/ops` (both from `deckJsonSchema()`), `sleid://themes`, and the template `sleid://decks/{deckId}` (outline; requires `decks:read` and the role check). Prompt `build_deck` (topic, audience, slide_count).
+
+**Settings page.** `/settings/tokens` (Extensions ▸ MCP access tokens opens it in a new tab). Create: name, scopes, expiry, all decks or chosen decks (owner or editor decks only). The created token appears once with copy buttons for the Claude Code command and a JSON snippet. The list shows the hint, scopes, deck count, created, expires, last used and status; Revoke ends the token at once. The origin is read after mount, so the server render and the client render agree (a hydration error was fixed here).
+
+**Link-only memberships (added during M5, from the coordinator).**
+- `deck_members.via` is `owner`, `invite` or `link`, and `share_link_id` names the link that granted a `link` membership.
+- Redeeming a link sets `link`. An explicit grant (email invite, a role change in the share dialog, MCP `share_deck`) sets `invite`, and so does an existing link member who gets an explicit grant. An `invite` never goes back to `link`. An owner stays owner.
+- **Restrict, revoke and expiry.** `getDeckRole` counts a `link` membership only while its link is active (not revoked, not expired). So access ends at the next check, in the web app, in collab and in the internal API alike. `setGeneralAccess('restricted')` also deletes the link memberships that are now inactive, and `listPeople` removes them when the owner opens the list. The restrict action calls `revalidateOpenConnections`, so open connections of link-only people close at once (4403). Explicit members are not touched.
+- **Migration 0005.** Owners get `owner`. Every other existing membership stays `invite`, because the database cannot tell who joined through a link. That is the conservative choice (a restricted link does not remove them). An owner who wants them gone removes them by hand. Documented in the migration as well.
+- The share dialog shows "Joined via link" next to people who joined through a link.
+- Grants now take a row lock (`SELECT … FOR UPDATE` after `INSERT … ON CONFLICT DO NOTHING`) instead of a single upsert. Concurrent grants still serialise and never lower a role (the existing concurrency test passes).
+
+**Fixes made in M5 (outside the M5 feature list).**
+- **Stale reads after an internal write (collab).** The internal API opened a direct connection, wrote, and disconnected. Hocuspocus unloads a document on disconnect with `unloadImmediately`, and the store runs on a timer after that. The next request reloaded the saved state from before the write. An agent's `get_deck` straight after `delete_slide` showed the slide still there. Fix: `direct.disconnect({ unloadImmediately: false })` in `apps/collab/src/internal-api.ts`, so the in-memory document is reused until its store completes. The MCP integration test covers this (the delete-then-read sequence).
+- **PPTX diagram fallback (M4 leftover).** A failed diagram is a placeholder box, "Diagram could not be drawn", the same text as the renderer. The source is not written. Test: `packages/pptx/src/deck-to-pptx.test.ts`.
+- **Hydration.** The new settings page reads the origin after mount (see above).
+
+**Known gaps and limitations (decisions to revisit).**
+- **No stdio bridge.** The brief made it optional and said to skip it if it did not stay small. Clients that cannot send headers use an external bridge (README), which has not been run against Sleid.
+- **Live connections and expiry.** An expired link closes nothing by itself. Its members lose access on their next check, and on reconnect (the token is refused). A live connection stays open until the next revalidate (a restrict, a role change, or the owner's action). The same limit as the M2 token-expiry gap.
+- **Rate limit and body cap are per process** (see above).
+- **Overflow order** when several elements go on new slides after the same target (see Convenience tools).
+- **Tokens can be scoped to any deck the user is a member of** when they are created (the UI offers owner and editor decks only). The per-call role check is what enforces access.
+- **`render_slide` and `export_deck` need the worker running.** Without it, the call fails with a clear message and the export row is marked failed.
+- **One-time links are bearer secrets.** Anyone with the link can download once within 15 minutes. The README says not to share them.
+- **Publish and export of MCP-created decks** use the same path as the editor (live document with saved-state fallback).
+
+**Not done.**
+- The stdio bridge (`packages/mcp-stdio`). Skipped, as the brief allowed.
+- An OAuth flow for Claude Desktop's custom connectors. Not offered; tokens are the only credential.
+- A PAT list in the editor dashboard. Tokens are managed in settings only.
+
+### M5 verification
+
+Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0.0.1:5433), Google Chrome (`CHROME_PATH`), Claude Code 2.1.316. Migrations `0004` and `0005` were applied to the local database.
+
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm test` (root): **45 files, 521 tests, all passing, none skipped.** M4 had 41 files and 481 tests. The new coverage:
+  - `packages/db/src/api-tokens.test.ts` (14): secret format and hash-only storage, 90-day default, input rules (names, scopes, deck ids, expiry range), verification, unknown and malformed secrets, expiry at a given clock, revoke by the owner only, throttled last-used, scope and allowlist helpers, audit rows (fields and error truncation), one-time export links (not consumed before the export is done, once only, expiry).
+  - `packages/db/src/link-membership.test.ts` (5): restrict removes link-only members and keeps explicit and upgraded ones; revoke and owner; lazy expiry and the people list; an explicit role change makes a member explicit; "Joined via link" data.
+  - `apps/collab/src/collab.integration.test.ts` (+1): restricting a link closes the connection of a link-only editor, and an explicitly invited editor keeps syncing. Collab suite: 11 tests.
+  - `apps/web/src/lib/mcp/mcp.unit.test.ts` (13): markdown to rich text (paragraphs, bullets, bold, italic, word-edge markers), slide compilation (placeholders, text boxes on blank slides, subtitles), slide and element resolution, outlines, PNG sizes, theme lookup, the rate limiter, bearer parsing.
+  - `apps/web/src/lib/mcp/mcp.integration.test.ts` (7), with the SDK client over real Streamable HTTP, real Postgres, the in-process collab service, the in-process worker (pg-boss, Chrome) and local storage:
+    - lists the 17 tools, 3 static resources, the template and the prompt, and reads the schema resources;
+    - 401 for missing, unknown and revoked tokens, with `WWW-Authenticate`;
+    - the workflow: create deck with a theme, three slides, a chart, a bad chart row refused, an invalid Mermaid source refused with the parser message, a valid diagram, update_text refused on a chart, the outline (six slides), JSON format, notes, move and delete, share as viewer (membership is `invite`);
+    - `render_slide` returns a PNG (signature, 1920 × 1080); `export_deck` pptx completes, downloads with a `PK` zip, and the second download is 404;
+    - a token without `decks:write` gets a scope error on `apply_ops`; a viewer gets role errors on writes and on `generate_with_ai`; a removed editor gets "Deck not found" on the next call;
+    - the deck allowlist hides other decks;
+    - the rate limit returns 200, 200, 200, 429 with `Retry-After`, and the body cap returns 413;
+    - a failed call is in the audit with its deck id and error.
+  - `packages/pptx` (+ updated test): the diagram placeholder, with no source text and no monospace.
+- `pnpm --filter @sleid/web build`: exit 0. The client bundle has no `createCipheriv`, `COLLAB_INTERNAL_SECRET` or `sleid_pat_`. The one `LLM_SECRET_KEY` match is help text on the AI settings page, which was already there in M4.
+- Browser checks against the dev stack (`pnpm dev` with `SLEID_TEST_AUTH=1`, `LLM_USER_ALLOW_PRIVATE_URLS=1`, a scratch `LLM_SECRET_KEY`, Chrome). Run twice: once before the link-membership change and once after it, with the servers restarted in between. Both runs passed:
+  - `smoke.mjs`: 22 checks. `collab.mjs`: 24 checks. `export.mjs`: 21 checks. `ai.mjs`: 32 checks. All with no page or console errors.
+  - `mcp.mjs` (new, below): 19 checks, no page or console errors.
+- **Live editor check** `apps/web/tests/mcp.mjs`. A token was created through the settings page (Playwright). An editor was open on a new deck. The SDK client made these calls: list_decks, add_slide ×3, insert_chart on a blank slide, and an invalid insert_diagram. The open editor showed the cover in 8 ms, the bullet slide in 8 ms and the chart in 95 ms (budget 3000 ms). The invalid diagram was refused and nothing appeared in the editor. `render_slide` returned a 1920 × 1080 PNG. Screenshots (in `SCREENSHOT_DIR`): `mcp-tokens.png` (settings page with the copy-once panel), `mcp-live.png` (editor after the MCP edits), `mcp-render.png` (the PNG from render_slide).
+- **Claude Code CLI**: `claude mcp add --transport http sleid-test http://localhost:3000/mcp --header "Authorization: Bearer <token>"` in a scratch directory, then `claude mcp list` showed `sleid-test: http://localhost:3000/mcp (HTTP) - ✔ Connected`, then `claude mcp remove sleid-test` (the list afterwards had no entry). The header value appeared only in redacted form in the CLI output. No agent session was run.
+- The servers were stopped afterwards. The scratch user made for the CLI check was deleted.
+
+### Unverified in M5
+
+- **Real agent sessions.** No agent ran a deck build through MCP. The Claude Code check connected and listed the server, but no tool call came from Claude itself.
+- **Claude Desktop and other clients.** Not tested. The `mcp-remote` bridge in the README is not verified.
+- **Restrict in the browser.** The restrict path is covered by the database and collab tests, not by a browser run (the share dialog's restrict button was not clicked in a check).
+- **Expiry on live connections.** Not tested in a running service (see the known gaps).
+- **Multi-process rate limits** and body caps behind a load balancer: not tested.
+- **Long decks and large exports** through MCP (the tests use 6-slide decks).
+- **Concurrent MCP writers** on one deck: the collab path is the same as the editor's, and was not stress-tested.
+- **Generate with AI through MCP** was not run against a live model (the live LLM was not called in M5; the test checks only the scope and the viewer refusal). The M4 live model check was not repeated.
+- **Firefox and Safari.** Chrome only.
+- **Production serving** (`node .output/server/index.mjs`) of `/mcp`. The build passes; the server was not run.

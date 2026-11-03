@@ -105,7 +105,10 @@ export function ShareDialog({ deckId, onClose }: { deckId: string; onClose: () =
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="truncate font-medium">{m.name}</div>
-                      <div className="truncate text-[12px] text-ink-muted">{m.email}</div>
+                      <div className="truncate text-[12px] text-ink-muted">
+                        {m.email}
+                        {m.via === 'link' && <span className="ml-2 rounded bg-hover px-1.5 py-0.5 text-[11px]">Joined via link</span>}
+                      </div>
                     </div>
                     {m.role === 'owner' || !isOwner ? (
                       <span className="text-[13px] text-ink-muted">{m.role === 'owner' ? 'Owner' : ROLE_LABEL[m.role as ShareRole] ?? m.role}</span>

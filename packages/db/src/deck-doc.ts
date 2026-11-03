@@ -117,7 +117,7 @@ export async function copyDeck(db: Db, userId: string, sourceId: string): Promis
   const state = Y.encodeStateAsUpdate(deckToYDoc({ ...source, id, title }))
   await db.transaction(async (tx) => {
     await tx.insert(decks).values({ id, ownerId: userId, title })
-    await tx.insert(deckMembers).values({ deckId: id, userId, role: 'owner' })
+    await tx.insert(deckMembers).values({ deckId: id, userId, role: 'owner', via: 'owner' })
     await tx.insert(deckSnapshots).values({ deckId: id, ydoc: Buffer.from(state), createdBy: userId })
   })
   return { id }

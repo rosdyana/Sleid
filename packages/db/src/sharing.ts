@@ -1,39 +1,81 @@
 // Membership, invites, general access ("share links") and per-user stars.
 // Every grant goes through grantMembership, which never lowers an existing role.
 import { randomBytes } from 'node:crypto'
-import { and, asc, eq, gt, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gt, isNull, notInArray, or, sql } from 'drizzle-orm'
 import type { Db } from './client.ts'
-import type { DeckRole, ShareRole } from './permissions.ts'
+import { higherRole, type DeckRole, type ShareRole } from './permissions.ts'
 import { decks, deckMembers, invites, shareLinks, user } from './schema/index.ts'
 
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 
-/** Numeric rank of a role, as SQL. Matches RANK in permissions.ts. */
-function rankSql(expr: ReturnType<typeof sql>) {
-  return sql`(case ${expr} when 'viewer' then 1 when 'commenter' then 2 when 'editor' then 3 when 'owner' then 4 else 0 end)`
-}
+/** How a membership is held. Owner rows come only from creating or copying a deck. */
+export type MemberVia = 'owner' | 'invite' | 'link'
 
 /**
- * Adds a membership, or raises the existing one to `role`. Atomic (ON CONFLICT),
- * so two concurrent grants cannot downgrade each other. Returns the resulting role.
+ * Adds a membership, or raises the existing one. Never lowers a role. The row is locked for the rest of the
+ * transaction, so two concurrent grants serialise. `via`:
+ * - an explicit grant ('invite') makes the membership explicit, so restricting a link never removes it. An owner stays owner.
+ * - a link grant ('link') is recorded with its link. It does not change an explicit membership, and it moves an
+ *   existing link membership to the link that was just redeemed.
  */
-export async function grantMembership(tx: Tx, deckId: string, userId: string, role: DeckRole): Promise<DeckRole> {
+export async function grantMembership(
+  tx: Tx,
+  deckId: string,
+  userId: string,
+  role: DeckRole,
+  via: Exclude<MemberVia, 'owner'> = 'invite',
+  shareLinkId: string | null = null,
+): Promise<DeckRole> {
+  const link = via === 'link' ? shareLinkId : null
   await tx
     .insert(deckMembers)
-    .values({ deckId, userId, role })
-    .onConflictDoUpdate({
-      target: [deckMembers.deckId, deckMembers.userId],
-      set: {
-        role: sql`case when ${rankSql(sql`excluded.role`)} > ${rankSql(sql`${deckMembers.role}`)} then excluded.role else ${deckMembers.role} end`,
-      },
-    })
+    .values({ deckId, userId, role, via, shareLinkId: link })
+    .onConflictDoNothing({ target: [deckMembers.deckId, deckMembers.userId] })
   const [row] = await tx
-    .select({ role: deckMembers.role })
+    .select({ role: deckMembers.role, via: deckMembers.via, shareLinkId: deckMembers.shareLinkId })
     .from(deckMembers)
     .where(and(eq(deckMembers.deckId, deckId), eq(deckMembers.userId, userId)))
+    .for('update')
     .limit(1)
   if (!row) throw new Error('membership missing after grant')
-  return row.role
+
+  const nextRole = higherRole(row.role, role)
+  let nextVia: MemberVia = row.via
+  let nextLink = row.shareLinkId
+  if (row.via !== 'owner') {
+    if (via === 'link') {
+      if (row.via === 'link') nextLink = link
+    } else {
+      nextVia = 'invite'
+      nextLink = null
+    }
+  }
+  if (nextRole !== row.role || nextVia !== row.via || nextLink !== row.shareLinkId) {
+    await tx
+      .update(deckMembers)
+      .set({ role: nextRole, via: nextVia, shareLinkId: nextLink })
+      .where(and(eq(deckMembers.deckId, deckId), eq(deckMembers.userId, userId)))
+  }
+  return nextRole
+}
+
+/** Removes the link memberships whose link is no longer active (revoked, expired, or the deck is restricted). */
+export async function pruneInactiveLinkMembers(db: Db | Tx, deckId: string): Promise<string[]> {
+  const activeLinks = db
+    .select({ id: shareLinks.id })
+    .from(shareLinks)
+    .where(activeLinkWhere(deckId))
+  const removed = await db
+    .delete(deckMembers)
+    .where(
+      and(
+        eq(deckMembers.deckId, deckId),
+        eq(deckMembers.via, 'link'),
+        or(isNull(deckMembers.shareLinkId), notInArray(deckMembers.shareLinkId, activeLinks)),
+      ),
+    )
+    .returning({ userId: deckMembers.userId })
+  return removed.map((r) => r.userId)
 }
 
 /** Turns every pending invite for this email into a membership. Called on session load. Returns how many were accepted. */
@@ -99,6 +141,7 @@ export interface PersonRow {
   email: string
   image: string | null
   role: DeckRole
+  via: MemberVia
 }
 
 export interface PendingInviteRow {
@@ -108,8 +151,9 @@ export interface PendingInviteRow {
 }
 
 export async function listPeople(db: Db, deckId: string): Promise<{ members: PersonRow[]; pending: PendingInviteRow[] }> {
+  await pruneInactiveLinkMembers(db, deckId)
   const members = await db
-    .select({ userId: user.id, name: user.name, email: user.email, image: user.image, role: deckMembers.role })
+    .select({ userId: user.id, name: user.name, email: user.email, image: user.image, role: deckMembers.role, via: deckMembers.via })
     .from(deckMembers)
     .innerJoin(user, eq(user.id, deckMembers.userId))
     .where(eq(deckMembers.deckId, deckId))
@@ -122,11 +166,11 @@ export async function listPeople(db: Db, deckId: string): Promise<{ members: Per
   return { members, pending }
 }
 
-/** Changes a non-owner member's role. Owners are never changed here. */
+/** Changes a non-owner member's role. This is an explicit grant, so a link member becomes an 'invite' member. */
 export async function setMemberRole(db: Db, deckId: string, userId: string, role: ShareRole): Promise<void> {
   const updated = await db
     .update(deckMembers)
-    .set({ role })
+    .set({ role, via: 'invite', shareLinkId: null })
     .where(and(eq(deckMembers.deckId, deckId), eq(deckMembers.userId, userId), sql`${deckMembers.role} <> 'owner'`))
     .returning({ userId: deckMembers.userId })
   if (updated.length === 0) throw new Error('Member not found')
@@ -170,6 +214,8 @@ export async function setGeneralAccess(
   return db.transaction(async (tx) => {
     if (mode === 'restricted') {
       await tx.update(shareLinks).set({ revokedAt: new Date() }).where(activeLinkWhere(deckId))
+      // People who joined only through a link lose access now. Explicit members stay.
+      await pruneInactiveLinkMembers(tx, deckId)
       return null
     }
     const updated = await tx.update(shareLinks).set({ role: mode }).where(activeLinkWhere(deckId)).returning({ role: shareLinks.role, token: shareLinks.token })
@@ -191,13 +237,13 @@ export function newShareToken(): string {
  */
 export async function redeemShareLink(db: Db, userId: string, deckId: string, token: string): Promise<DeckRole | null> {
   const [link] = await db
-    .select({ role: shareLinks.role })
+    .select({ id: shareLinks.id, role: shareLinks.role })
     .from(shareLinks)
     .innerJoin(decks, eq(decks.id, shareLinks.deckId))
     .where(and(eq(shareLinks.token, token), eq(shareLinks.deckId, deckId), isNull(decks.deletedAt), activeLinkWhere(deckId)))
     .limit(1)
   if (!link) return null
-  return db.transaction((tx) => grantMembership(tx, deckId, userId, link.role))
+  return db.transaction((tx) => grantMembership(tx, deckId, userId, link.role, 'link', link.id))
 }
 
 /** Stars or unstars a deck for one user. Returns false when the user is not a member. */

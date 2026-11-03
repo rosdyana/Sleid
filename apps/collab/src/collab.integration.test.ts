@@ -6,7 +6,7 @@ import * as Y from 'yjs'
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider'
 import { applyOps, yDocToDeck, type Deck } from '@sleid/model'
 import { count, eq } from 'drizzle-orm'
-import { COLLAB_TOKEN_TTL_SECONDS, deckUpdates, decks, grantMembership, loadDeckState, setMemberRole, removeMember, signCollabToken, type DeckRole, type Db } from '@sleid/db'
+import { COLLAB_TOKEN_TTL_SECONDS, createInvite, deckUpdates, decks, grantMembership, loadDeckState, redeemShareLink, setGeneralAccess, setMemberRole, removeMember, signCollabToken, type DeckRole, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createCollabServer, type CollabServer } from './server.ts'
 import { CollabInternalError, createCollabInternalClient } from '../../web/src/lib/collab-client.server.ts'
@@ -284,5 +284,30 @@ describe('collab server (real Postgres, in-process Hocuspocus)', () => {
     applyOps(e.doc, [{ op: 'setTitle', title: 'after downgrade' }], 'local')
     await sleep(600)
     expect(yDocToDeck(o.doc).title).toBe('Revalidate')
+  })
+
+  it('restricting a link closes the connections of people who joined only through it', async (ctx) => {
+    if (!db) return ctx.skip()
+    const owner = await person('link-owner')
+    const joiner = await person('link-joiner')
+    const invited = await person('link-explicit')
+    const deckId = await makeDeck(db, owner.id, 'Link restrict')
+    const access = await setGeneralAccess(db, deckId, owner.id, 'editor')
+    expect(await redeemShareLink(db, joiner.id, deckId, access!.token)).toBe('editor')
+    await createInvite(db, { deckId, invitedBy: owner.id, email: invited.email, role: 'editor' })
+
+    const o = await connectAs(deckId, owner.id, 'owner')
+    const j = await connectAs(deckId, joiner.id, 'editor')
+    const x = await connectAs(deckId, invited.id, 'editor')
+    expect(j.provider.authorizedScope).toBe('read-write')
+
+    await setGeneralAccess(db, deckId, owner.id, 'restricted')
+    const result = await internal().revalidate(deckId)
+    expect(result).toMatchObject({ closed: 1 })
+    await waitFor(() => !j.provider.isAuthenticated, 'link-only member disconnected', 5000)
+
+    // The explicitly invited editor keeps working.
+    applyOps(x.doc, [{ op: 'setTitle', title: 'still editing' }], 'local')
+    await waitFor(() => yDocToDeck(o.doc).title === 'still editing', 'explicit member still syncs', 5000)
   })
 })

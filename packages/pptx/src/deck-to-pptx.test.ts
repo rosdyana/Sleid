@@ -177,7 +177,7 @@ describe('deckToPptx', () => {
     expect(xml).toMatch(/<a:alpha val="50000"\/>/)
   })
 
-  it('diagrams use the rasterized PNG when given, and the source text when not', async () => {
+  it('diagrams use the rasterized PNG when given, and the placeholder (never the source) when not', async () => {
     const deck = createDeck('Diagrams')
     const slide = createSlide('blank', deck.theme)
     slide.elements = [{ id: 'd', type: 'diagram', source: 'graph TD; A-->B', x: 0, y: 0, w: 300, h: 300, z: 0, rotation: 0, locked: false, opacity: 1 }]
@@ -185,7 +185,12 @@ describe('deckToPptx', () => {
     const withPng = await open(await deckToPptx(deck, { rasterizeDiagram: async () => PNG }))
     expect(withPng.names.some((n) => n.startsWith('ppt/media/'))).toBe(true)
     const withoutPng = await open(await deckToPptx(deck))
-    expect(await withoutPng.read('ppt/slides/slide1.xml')).toContain('graph TD; A--&gt;B')
+    const xml = await withoutPng.read('ppt/slides/slide1.xml')
+    expect(xml).toContain('Diagram could not be drawn')
+    // The source is not shown, and no monospace text is written for it.
+    expect(xml).not.toContain('graph TD')
+    expect(xml).not.toContain('A--&gt;B')
+    expect(xml).not.toContain('Consolas')
   })
 
   it('font sizes convert from px to pt at 0.5 pt per px', async () => {

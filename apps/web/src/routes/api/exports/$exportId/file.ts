@@ -12,6 +12,8 @@ export const Route = createFileRoute('/api/exports/$exportId/file')({
           params.exportId,
           { db, storage: getAssetStorage(), userId: await sessionUserIdFromRequest(request) },
           getExportStorage(),
+          // The one-time link from an MCP export_deck call. Never a personal access token.
+          { linkToken: new URL(request.url).searchParams.get('token') },
         ),
     },
   },

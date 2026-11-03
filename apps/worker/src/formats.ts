@@ -300,7 +300,7 @@ window.drawDiagram = async (source, w, h) => {
         return { data: new Uint8Array(png), mime: 'image/png' }
       })
     } catch (err) {
-      this.env.logger.warn(`diagram exported as source text: ${err instanceof Error ? err.message : String(err)}`)
+      this.env.logger.warn(`diagram exported as a placeholder: ${err instanceof Error ? err.message : String(err)}`)
       return null
     }
   }

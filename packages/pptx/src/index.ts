@@ -9,6 +9,9 @@ import { inches, pptxColor, pptxFontFace, points, transparencyFor } from './unit
 
 export { chartSeries, pptxChartKind, chartPalette } from './charts.ts'
 export { richTextRuns, monospaceRuns } from './text.ts'
+
+/** Shown in place of a diagram that could not be drawn. Matches the HTML renderer's placeholder text. */
+export const DIAGRAM_PLACEHOLDER = 'Diagram could not be drawn'
 export { inches, points, pptxColor, pptxFontFace, transparencyFor } from './units.ts'
 
 export interface PptxAsset {
@@ -198,12 +201,9 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
       if (png) {
         s.addImage({ data: dataUri(png), ...box(el), altText: 'Diagram' })
       } else {
-        s.addText(monospaceRuns(el.source, { fontFace: ctx.bodyFace, monoFace: ctx.monoFace, fontSize: 28, color: ctx.textColor, align: 'left' }) as never, {
-          ...box(el),
-          fill: { color: ctx.surfaceColor },
-          margin: 12,
-          valign: 'top',
-        })
+        // Same neutral placeholder as the HTML renderer. The source is never shown on a slide.
+        const runs: PptxRun[] = [{ text: DIAGRAM_PLACEHOLDER, options: { fontFace: ctx.bodyFace, fontSize: 28, color: ctx.mutedColor } }]
+        s.addText(runs as never, { ...box(el), fill: { color: ctx.surfaceColor }, margin: 12, valign: 'middle', align: 'center' })
       }
       return
     }

@@ -31,7 +31,7 @@ export async function makeUser(db: Db, label: string): Promise<{ id: string; ema
 export async function makeDeck(db: Db, ownerId: string, title = 'Test deck'): Promise<string> {
   const [deck] = await db.insert(decks).values({ ownerId, title }).returning({ id: decks.id })
   if (!deck) throw new Error('could not create test deck')
-  await db.insert(deckMembers).values({ deckId: deck.id, userId: ownerId, role: 'owner' })
+  await db.insert(deckMembers).values({ deckId: deck.id, userId: ownerId, role: 'owner', via: 'owner' })
   return deck.id
 }
 

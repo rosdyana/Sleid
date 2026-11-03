@@ -266,7 +266,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
     },
     {
       label: 'Extensions',
-      items: [{ kind: 'item', label: 'MCP access tokens', ...TODO('M5') }],
+      items: [item('MCP access tokens', () => window.open('/settings/tokens', '_blank', 'noopener'))],
     },
     {
       label: 'Help',

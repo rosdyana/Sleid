@@ -85,7 +85,7 @@ export const removeMemberFn = createServerFn({ method: 'POST' })
 
 /**
  * Sets general access. 'restricted' turns off the link. Owner only.
- * Known gap: people who already joined through the link keep their membership.
+ * People who joined only through the link lose access (see setGeneralAccess).
  */
 export const setGeneralAccessFn = createServerFn({ method: 'POST' })
   .validator((data: unknown) => z.object({ deckId: z.uuid(), mode: z.enum(['restricted', ...SHARE_ROLES]) }).parse(data))
@@ -94,6 +94,8 @@ export const setGeneralAccessFn = createServerFn({ method: 'POST' })
     const myRole = await requireDeckRole(user.id, data.deckId, 'viewer')
     if (!canManagePeople(myRole)) throw new Error('Only the owner can change general access')
     const access = await setGeneralAccess(db, data.deckId, user.id, data.mode)
+    // Restricting a link removes the people who joined through it. Close their open connections now.
+    await revalidateOpenConnections(data.deckId)
     return { access }
   })
 

@@ -1,7 +1,7 @@
 // HTTP handlers for uploads, asset reads and export downloads. The /api routes call these with the
 // database, the storage and the caller's user id. Keeping them free of request-context imports makes them testable.
 import { createHash, randomUUID } from 'node:crypto'
-import { attachmentDisposition, canEdit, getAssetWithDeck, getDeckRole, getExportForUser, insertAsset, type Db } from '@sleid/db'
+import { attachmentDisposition, canEdit, consumeExportLink, findExportByLink, getAssetWithDeck, getDeckRole, getExportForUser, insertAsset, type Db } from '@sleid/db'
 import type { StorageDriver } from '@sleid/storage'
 
 export const ASSET_MAX_BYTES = 10 * 1024 * 1024
@@ -129,11 +129,30 @@ export async function handleAssetRead(assetId: string, deps: HandlerDeps): Promi
 }
 
 /** GET /api/exports/:id/file. Only the user who asked for the export can download it. */
-export async function handleExportDownload(exportId: string, deps: HandlerDeps, exportsStorage: StorageDriver): Promise<Response> {
+/**
+ * GET /api/exports/:id/file. The owner downloads with a session. An MCP caller passes the one-time `linkToken`
+ * from export_deck instead: a finished export is served once, and a link used or expired gets 404. A link
+ * sent before the export finished is kept, so the caller can try again.
+ */
+export async function handleExportDownload(
+  exportId: string,
+  deps: HandlerDeps,
+  exportsStorage: StorageDriver,
+  options: { linkToken?: string | null } = {},
+): Promise<Response> {
   if (!UUID.test(exportId)) return json(404, { error: 'Not found' })
-  if (!deps.userId) return json(401, { error: 'Sign in to download exports' })
-  const row = await getExportForUser(deps.db, deps.userId, exportId)
-  if (!row) return json(404, { error: 'Not found' })
+  let row: Awaited<ReturnType<typeof getExportForUser>>
+  if (options.linkToken) {
+    const pending = await findExportByLink(deps.db, exportId, options.linkToken)
+    if (!pending) return json(404, { error: 'Not found' })
+    if (pending.status !== 'done' || !pending.fileKey) return json(409, { error: 'The export is not ready yet' })
+    row = await consumeExportLink(deps.db, exportId, options.linkToken)
+    if (!row) return json(404, { error: 'Not found' })
+  } else {
+    if (!deps.userId) return json(401, { error: 'Sign in to download exports' })
+    row = await getExportForUser(deps.db, deps.userId, exportId)
+    if (!row) return json(404, { error: 'Not found' })
+  }
   if (row.status !== 'done' || !row.fileKey || !row.fileName || !row.contentType) {
     return json(409, { error: 'The export is not ready yet' })
   }
@@ -147,6 +166,7 @@ export async function handleExportDownload(exportId: string, deps: HandlerDeps, 
       'content-disposition': attachmentDisposition(row.fileName),
       'x-content-type-options': 'nosniff',
       'cache-control': 'private, no-store',
+      'referrer-policy': 'no-referrer',
     },
   })
 }

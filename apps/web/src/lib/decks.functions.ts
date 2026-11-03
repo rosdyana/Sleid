@@ -33,7 +33,7 @@ export const createBlankDeckFn = createServerFn({ method: 'POST' }).handler(asyn
   const id = await db.transaction(async (tx) => {
     const [deck] = await tx.insert(decks).values({ ownerId: user.id }).returning({ id: decks.id })
     if (!deck) throw new Error('Failed to create deck')
-    await tx.insert(deckMembers).values({ deckId: deck.id, userId: user.id, role: 'owner' })
+    await tx.insert(deckMembers).values({ deckId: deck.id, userId: user.id, role: 'owner', via: 'owner' })
     return deck.id
   })
   return { id }

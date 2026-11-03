@@ -101,7 +101,9 @@ export function createInternalHandler({ hocuspocus, db, internalSecret, logger }
       }
       throw err
     } finally {
-      await direct.disconnect()
+      // Keep the document in memory until its store has run. An immediate unload would let the next request reload
+      // the saved state from before this change, so an agent's read right after a write could be stale.
+      await direct.disconnect({ unloadImmediately: false })
     }
   }
 
@@ -116,7 +118,7 @@ export function createInternalHandler({ hocuspocus, db, internalSecret, logger }
       if (!direct.document) throw new Error('document is not available')
       return send(res, 200, yDocToDeck(direct.document))
     } finally {
-      await direct.disconnect()
+      await direct.disconnect({ unloadImmediately: false })
     }
   }
 
