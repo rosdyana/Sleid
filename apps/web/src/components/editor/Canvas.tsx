@@ -5,7 +5,7 @@
 // is one deck-op and one undo step, not one op per frame.
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import Moveable, { type OnDrag, type OnDragEnd, type OnDragStart, type OnResize, type OnResizeEnd, type OnRotate, type OnRotateEnd } from 'react-moveable'
-import type { Element, RichText, Slide, Theme } from '@sleid/model'
+import type { Deck, Element, RichText, Slide, Theme } from '@sleid/model'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
 import type { PresencePeer } from './collab-session.ts'
 import { SlideSurface } from './ElementView.tsx'
@@ -17,6 +17,8 @@ export type Geometry = { x: number; y: number; w: number; h: number; rotation: n
 export interface CanvasProps {
   slide: Slide
   theme: Theme
+  /** The deck's brand reference (M9): the logo overlay is drawn on the slide. */
+  brand?: Deck['brand']
   zoom: 'fit' | number
   selection: readonly string[]
   editingId: string | null
@@ -42,7 +44,7 @@ export interface CanvasProps {
 const PERCENT_SCALE = 1280 / CANVAS_W / 100
 
 export function SlideCanvas(props: CanvasProps) {
-  const { slide, theme, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor, onElementContextMenu, pins, onPinPick } = props
+  const { slide, theme, brand, zoom, selection, editingId, showGuides, readOnly, peers, onSelect, onGeometry, onStartEdit, onCommitText, onCursor, onElementContextMenu, pins, onPinPick } = props
   const outerRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const [available, setAvailable] = useState({ w: 900, h: 600 })
@@ -203,6 +205,7 @@ export function SlideCanvas(props: CanvasProps) {
         <SlideSurface
           slide={slide}
           theme={theme}
+          brand={brand}
           scale={scale}
           selectedIds={selected}
           editingId={editingId}

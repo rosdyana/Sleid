@@ -103,7 +103,7 @@ export function PresenterView({ deck, deckId, sid, startSlide, origin }: { deck:
           <div className="flex min-h-0 flex-1 items-center justify-center">
             {current && (
               <div className="overflow-hidden rounded bg-white shadow-lg" data-testid="presenter-current">
-                <SlideSurface slide={current} theme={deck.theme} scale={CURRENT_WIDTH / CANVAS_W} />
+                <SlideSurface slide={current} theme={deck.theme} brand={deck.brand} scale={CURRENT_WIDTH / CANVAS_W} />
               </div>
             )}
           </div>
@@ -112,7 +112,7 @@ export function PresenterView({ deck, deckId, sid, startSlide, origin }: { deck:
               <div className="mb-1 text-[11px] uppercase tracking-wide text-white/60">Next</div>
               {next ? (
                 <div className="overflow-hidden rounded bg-white opacity-90" data-testid="presenter-next">
-                  <SlideSurface slide={next} theme={deck.theme} scale={NEXT_WIDTH / CANVAS_W} />
+                  <SlideSurface slide={next} theme={deck.theme} brand={deck.brand} scale={NEXT_WIDTH / CANVAS_W} />
                 </div>
               ) : (
                 <div className="grid h-[236px] w-[420px] place-items-center rounded border border-white/20 text-white/60">End of deck</div>

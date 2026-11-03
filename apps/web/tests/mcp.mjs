@@ -5,8 +5,10 @@
 //   CHROME_PATH=... SCREENSHOT_DIR=... node tests/mcp.mjs [http://localhost:3000]
 // Writes mcp-tokens.png, mcp-live.png and mcp-render.png to SCREENSHOT_DIR.
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { chromium } from 'playwright-core'
+import postgres from 'postgres'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
@@ -52,6 +54,32 @@ async function call(mcp, name, args) {
   const text = result.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
   if (result.isError) throw new Error(`${name} failed: ${text}`)
   return JSON.parse(text)
+}
+
+/** Inserts a brand kit for the user with the given email, and writes its logo to the asset store. Returns the kit id. */
+async function seedBrandKit(email) {
+  const url = process.env.DATABASE_URL
+  if (!url) throw new Error('DATABASE_URL is needed to seed a brand kit (run with the same .env as pnpm dev)')
+  const sql = postgres(url, { max: 1 })
+  try {
+    const [owner] = await sql`select id from "user" where email = ${email}`
+    if (!owner) throw new Error(`no user for ${email}`)
+    const kitId = randomUUID()
+    const logoKey = `brand-logos/${kitId}-logo.png`
+    const assetDir = process.env.ASSET_DIR ? resolve(process.env.ASSET_DIR) : resolve(process.cwd(), '../../data/assets')
+    mkdirSync(join(assetDir, 'brand-logos'), { recursive: true })
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
+    writeFileSync(join(assetDir, logoKey), png)
+    const tokens = {
+      palette: { background: '#ffffff', surface: '#f8f9fa', text: '#202124', muted: '#5f6368', accent: '#0b57d0', accent2: '#188038', accent3: '#e37400', accent4: '#a142f4' },
+      fonts: { heading: 'Helvetica, sans-serif', body: 'Helvetica, sans-serif' },
+    }
+    await sql`insert into brand_kits (id, owner_id, name, visibility, tokens, logo_key, logo_mime, logo_bytes, logo_sha256, logo_placement)
+      values (${kitId}, ${owner.id}, 'E2E Kit', 'private', ${sql.json(tokens)}, ${logoKey}, 'image/png', ${png.byteLength}, ${'0'.repeat(64)}, ${sql.json({ corner: 'tr', widthPct: 12, margin: 48, slides: 'all-but-title' })})`
+    return kitId
+  } finally {
+    await sql.end({ timeout: 2 })
+  }
 }
 
 const browser = await chromium.launch({ headless: true, ...launchOptions })
@@ -147,8 +175,11 @@ try {
   log('mcp-live.png saved')
 
   // ---- render_slide returns the slide as a PNG the agent can look at.
+  // A render reads the saved state when the worker cannot reach the live document, and that lags the edit by about
+  // 2 seconds (the collab store debounce). Wait for the save first, so the check does not depend on that timing.
+  await sleep(3000)
   const rendered = await mcp.callTool({ name: 'render_slide', arguments: { deckId, slideId: chartSlide.slideId } })
-  check(rendered.isError !== true, 'render_slide succeeded')
+  check(rendered.isError !== true, `render_slide succeeded${rendered.isError ? `: ${(rendered.content ?? []).map((c) => c.text ?? '').join(' ').slice(0, 300)}` : ''}`)
   const image = rendered.content.find((c) => c.type === 'image')
   check(image && image.mimeType === 'image/png', 'render_slide returned image content (image/png)')
   const png = Buffer.from(image.data, 'base64')
@@ -170,6 +201,27 @@ try {
   const importedDeck = await call(mcp, 'get_deck', { deckId: imported.deckId, format: 'json' })
   check(importedDeck.title === `MCP import ${stamp}`, 'the imported deck has the title given to import_deck')
   check(importedDeck.slides.length === 3, `the imported deck has ${importedDeck.slides.length} slides (expected 3)`)
+
+  // ---- M9: templates and brand kits through MCP. A kit is seeded in the database for this user (no MCP tool makes
+  // a kit), with its logo written to the asset folder the way the server stores it.
+  const templates = await call(mcp, 'list_templates', {})
+  check(templates.templates.some((t) => t.id === 'builtin:pitch' && t.builtIn === true), 'list_templates includes the built-in Pitch template')
+  const fromTemplate = await call(mcp, 'create_deck', { title: `Template deck ${stamp}`, templateId: 'builtin:pitch' })
+  check(/^[0-9a-f-]{36}$/.test(fromTemplate.id), 'create_deck with templateId returns a deck id')
+  const templateDeck = await call(mcp, 'get_deck', { deckId: fromTemplate.id, format: 'json' })
+  check(templateDeck.slides.length >= 4 && templateDeck.theme.name === 'Midnight', `the template deck has ${templateDeck.slides.length} slides on the Midnight theme`)
+
+  const kitId = await seedBrandKit(person.email)
+  const kits = await call(mcp, 'list_brand_kits', {})
+  check(kits.brandKits.some((k) => k.id === kitId && k.hasLogo === true), 'list_brand_kits includes the seeded kit, with its logo')
+  const applied = await call(mcp, 'apply_brand_kit', { deckId: fromTemplate.id, brandKitId: kitId })
+  check(applied.logo === true && applied.theme === 'E2E Kit', 'apply_brand_kit applies the kit and its logo')
+  const branded = await call(mcp, 'get_deck', { deckId: fromTemplate.id, format: 'json' })
+  check(branded.brand?.brandKitId === kitId && /^\/api\/assets\//.test(branded.brand?.logo?.src ?? ''), 'the deck records the kit and a logo asset of its own')
+  check(branded.theme.colors.accent === '#0b57d0', 'the deck theme takes the kit accent colour')
+  await call(mcp, 'apply_brand_kit', { deckId: fromTemplate.id, brandKitId: null })
+  const unbranded = await call(mcp, 'get_deck', { deckId: fromTemplate.id, format: 'json' })
+  check(unbranded.brand === undefined && unbranded.theme.name === 'E2E Kit', 'removing the kit clears the logo and keeps the theme')
 
   for (const e of errors) console.log(`  captured: ${e.slice(0, 400)}`)
   check(errors.length === 0, `no page or console errors (${errors.length})`)

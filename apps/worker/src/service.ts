@@ -3,6 +3,7 @@ import type { Db, LiveDeckSource } from '@sleid/db'
 import type { StorageDriver } from '@sleid/storage'
 import type { BrowserPool } from './browser.ts'
 import { runExport } from './runner.ts'
+import { renderTemplateThumbnail } from './thumbnail.ts'
 import type { Logger } from './logger.ts'
 
 export interface ExportServiceOptions {
@@ -31,6 +32,14 @@ export async function startExportService(options: ExportServiceOptions): Promise
   await options.queue.start()
   await options.queue.workExports(options.concurrency, async (payload) => {
     await runExport(env, payload.exportId)
+  })
+  // Template thumbnails (M9). One at a time: each one starts a page in the shared browser.
+  await options.queue.workTemplateThumbnails(1, async (payload) => {
+    try {
+      await renderTemplateThumbnail(env, payload.templateId)
+    } catch (err) {
+      options.logger.error(`template thumbnail ${payload.templateId} failed`, err)
+    }
   })
   return {
     async stop() {

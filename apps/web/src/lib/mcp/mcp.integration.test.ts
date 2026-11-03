@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import JSZip from 'jszip'
 import {
   createApiToken,
@@ -20,6 +20,7 @@ import {
   getExportJob,
   grantMembership,
   listMcpAudit,
+  readDeck,
   revokeApiToken,
   type Db,
   type TokenScope,
@@ -28,6 +29,7 @@ import { connectOrNull, makeDeck, makeUser, removeUsers, TEST_DATABASE_URL } fro
 import { createJobQueue, type JobQueue } from '@sleid/jobs'
 import { createLocalStorage, type StorageDriver } from '@sleid/storage'
 import { createCollabServer, type CollabServer } from '../../../../collab/src/server.ts'
+import { createBrandKit, uploadBrandLogo } from '../brand-kits.server.ts'
 import { createBrowserPool, type BrowserPool } from '../../../../worker/src/browser.ts'
 import { startExportService } from '../../../../worker/src/service.ts'
 import { startWizardService } from '../../../../worker/src/wizard/service.ts'
@@ -227,6 +229,7 @@ describe('MCP over Streamable HTTP', () => {
       [
         'add_comment',
         'add_slide',
+        'apply_brand_kit',
         'apply_ops',
         'create_deck',
         'delete_slide',
@@ -239,8 +242,10 @@ describe('MCP over Streamable HTTP', () => {
         'insert_chart',
         'insert_diagram',
         'insert_image',
+        'list_brand_kits',
         'list_comments',
         'list_decks',
+        'list_templates',
         'list_versions',
         'move_slide',
         'render_slide',
@@ -254,7 +259,7 @@ describe('MCP over Streamable HTTP', () => {
     for (const t of tools) expect(t.description?.length ?? 0).toBeGreaterThan(20)
 
     const resources = await mcp.listResources()
-    expect(resources.resources.map((r) => r.uri).sort()).toEqual(['sleid://schema/deck', 'sleid://schema/ops', 'sleid://themes'])
+    expect(resources.resources.map((r) => r.uri).sort()).toEqual(['sleid://schema/deck', 'sleid://schema/ops', 'sleid://templates', 'sleid://themes'])
     const templates = await mcp.listResourceTemplates()
     expect(templates.resourceTemplates.map((t) => t.uriTemplate)).toEqual(['sleid://decks/{deckId}'])
 
@@ -756,3 +761,104 @@ describe('MCP create_deck_from_prompt', () => {
     expect(badVersion.isError).toBe(true)
   })
 })
+
+// ---- M9: templates and brand kits ----------------------------------------
+
+const TEST_PNG = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'))
+
+describe('MCP templates and brand kits (M9)', () => {
+  it('list_templates, create_deck from a template, list_brand_kits and apply_brand_kit, with the scopes and the audit', async () => {
+    if (!db) return
+    const owner = await person('mcp-m9-owner')
+    const viewer = await person('mcp-m9-viewer')
+    const writer = await tokenFor(owner.id, ['decks:read', 'decks:create', 'decks:write'])
+    const mcp = await client(writer)
+
+    // 1. The built-in templates are listed, with their ids and slide counts.
+    const listed = jsonOf(await tool(mcp, 'list_templates', {}))
+    const pitch = (listed.templates as Array<{ id: string; name: string; slideCount: number; builtIn: boolean }>).find((t) => t.id === 'builtin:pitch')
+    expect(pitch).toMatchObject({ name: 'Pitch', builtIn: true })
+    expect(pitch!.slideCount).toBeGreaterThanOrEqual(4)
+    const templateResource = await mcp.readResource({ uri: 'sleid://templates' })
+    const resource = JSON.parse((templateResource.contents[0] as { text: string }).text) as Array<{ id: string }>
+    expect(resource.map((t) => t.id)).toContain('builtin:pitch')
+
+    // 2. create_deck with a template makes a deck with its theme and slides, and the given title.
+    const made = jsonOf(await tool(mcp, 'create_deck', { title: 'From the pitch', templateId: 'builtin:pitch' }))
+    expect(made.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(made.title).toBe('From the pitch')
+    const read = jsonOf(await tool(mcp, 'get_deck', { deckId: made.id, format: 'json' }))
+    expect((read.slides as unknown[]).length).toBe(pitch!.slideCount)
+    expect((read.theme as { name: string }).name).toBe('Midnight')
+    expect(read.brand).toBeUndefined()
+
+    // A template and a theme cannot both be given, and an unknown template is refused.
+    const both = await tool(mcp, 'create_deck', { title: 'x', templateId: 'builtin:pitch', theme: 'Midnight' })
+    expect(both.isError).toBe(true)
+    expect(textOf(both)).toMatch(/either theme or templateId/)
+    const unknown = await tool(mcp, 'create_deck', { title: 'x', templateId: 'builtin:nope' })
+    expect(unknown.isError).toBe(true)
+    expect(textOf(unknown)).toMatch(/Template not found/)
+
+    // 3. A brand kit with a logo, made the way the web app makes it (the same functions and stores).
+    const kitDeps = {
+      db: db!,
+      storage: assetsStorage,
+      collab,
+      readDeck: async (id: string) => (await readDeck(db!, id, { live: baseDeps!.live })).deck,
+    }
+    const kit = await createBrandKit(kitDeps, owner.id, {
+      name: 'Acme',
+      visibility: 'private',
+      tokens: {
+        palette: { background: '#ffffff', surface: '#f0f4ff', text: '#102030', muted: '#556677', accent: '#0055cc', accent2: '#00aa66', accent3: '#dd7700', accent4: '#8844aa' },
+        fonts: { heading: 'Georgia, serif', body: 'Helvetica, sans-serif' },
+      },
+    })
+    await uploadBrandLogo(kitDeps, owner.id, kit.id, { mime: 'image/png', bytes: TEST_PNG })
+
+    const kits = jsonOf(await tool(mcp, 'list_brand_kits', {}))
+    expect(kits.brandKits).toEqual([expect.objectContaining({ id: kit.id, name: 'Acme', owned: true, hasLogo: true, accent: '#0055cc' })])
+
+    // 4. apply_brand_kit: the deck takes the kit's theme, and the logo is placed on the deck.
+    const applied = jsonOf(await tool(mcp, 'apply_brand_kit', { deckId: made.id, brandKitId: kit.id }))
+    expect(applied).toMatchObject({ deckId: made.id, brandKitId: kit.id, theme: 'Acme', logo: true })
+    const branded = jsonOf(await tool(mcp, 'get_deck', { deckId: made.id, format: 'json' }))
+    expect((branded.theme as { name: string; colors: { accent: string } }).colors.accent).toBe('#0055cc')
+    expect(branded.brand).toMatchObject({ brandKitId: kit.id, logo: { src: expect.stringMatching(/^\/api\/assets\//) } })
+
+    // Removing the kit keeps the theme and clears the logo.
+    const removed = jsonOf(await tool(mcp, 'apply_brand_kit', { deckId: made.id, brandKitId: null }))
+    expect(removed).toMatchObject({ removed: true })
+    const plain = jsonOf(await tool(mcp, 'get_deck', { deckId: made.id, format: 'json' }))
+    expect(plain.brand).toBeUndefined()
+    expect((plain.theme as { name: string }).name).toBe('Acme')
+
+    // 5. Scopes and roles: a token without decks:write, a viewer, and an outsider are refused.
+    const readOnly = await client(await tokenFor(owner.id, ['decks:read']))
+    const noWrite = await tool(readOnly, 'apply_brand_kit', { deckId: made.id, brandKitId: kit.id })
+    expect(noWrite.isError).toBe(true)
+    expect(textOf(noWrite)).toMatch(/decks:write/)
+    await readOnly.close()
+
+    await db!.insert(deckMembers).values({ deckId: made.id as string, userId: viewer.id, role: 'viewer', via: 'invite' })
+    const viewerClient = await client(await tokenFor(viewer.id, ['decks:read', 'decks:write']))
+    const viewerTry = await tool(viewerClient, 'apply_brand_kit', { deckId: made.id, brandKitId: kit.id })
+    expect(viewerTry.isError).toBe(true)
+    expect(textOf(viewerTry)).toMatch(/editor access|Your role/)
+    await viewerClient.close()
+
+    const outsider = await person('mcp-m9-outsider')
+    const outsiderClient = await client(await tokenFor(outsider.id, ['decks:read', 'decks:write']))
+    const outsiderTry = await tool(outsiderClient, 'apply_brand_kit', { deckId: made.id, brandKitId: kit.id })
+    expect(outsiderTry.isError).toBe(true)
+    expect(textOf(outsiderTry)).toMatch(/Deck not found/)
+    await outsiderClient.close()
+
+    // 6. Every call is in the audit, including the refused ones: the two applies, then the call with a token that lacks the scope.
+    const audit = await db!.execute(sql`select ok from mcp_audit where user_id = ${owner.id} and tool = 'apply_brand_kit' order by created_at`)
+    expect(audit.map((r) => (r as { ok: boolean }).ok)).toEqual([true, true, false])
+    await mcp.close()
+  }, 120_000)
+})
+

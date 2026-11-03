@@ -4,7 +4,7 @@
 // react-moveable works in real pixels and the gesture maths stays simple.
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type PointerEvent as ReactPointerEvent } from 'react'
 import * as echarts from 'echarts'
-import type { ChartElement, Element, RichNode, RichText, Slide, Theme } from '@sleid/model'
+import { logoAppliesToBrand, type BrandLogo, type BrandRef, type ChartElement, type Element, type RichNode, type RichText, type Slide, type Theme } from '@sleid/model'
 import { chartToEchartsOption } from '@sleid/render'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
 
@@ -32,6 +32,8 @@ export function slideBackground(slide: Slide, theme: Theme): CSSProperties {
 interface SurfaceProps {
   slide: Slide
   theme: Theme
+  /** The deck's brand reference (M9). Its logo is drawn over the slide, as in the renderer. */
+  brand?: BrandRef | undefined
   scale: number
   selectedIds?: readonly string[]
   editingId?: string | null
@@ -45,6 +47,7 @@ interface SurfaceProps {
 export function SlideSurface({
   slide,
   theme,
+  brand,
   scale,
   selectedIds = [],
   editingId = null,
@@ -84,6 +87,7 @@ export function SlideSurface({
           </div>
         )
       })}
+      {brand?.logo && logoAppliesToBrand(slide, brand) ? <BrandLogoOverlay logo={brand.logo} scale={scale} /> : null}
     </div>
   )
 }
@@ -324,4 +328,23 @@ function DiagramView({ source }: { source: string }) {
 
   if (error) return <div className="h-full w-full overflow-auto bg-red-50 p-2 text-[11px] text-red-800">{error}</div>
   return <div className="h-full w-full [&>svg]:h-full [&>svg]:w-full" dangerouslySetInnerHTML={{ __html: svg }} />
+}
+
+/**
+ * The brand logo over a slide (M9). Not an element: it has no pointer events, so it cannot be selected or moved in the
+ * editor. Placement follows the renderer: the corner, the width as a share of the slide, and the margin in canvas pixels.
+ */
+function BrandLogoOverlay({ logo, scale }: { logo: BrandLogo; scale: number }) {
+  const src = safeImageSrc(logo.src)
+  const isAsset = logo.src.startsWith('/api/assets/')
+  const isRaster = /^data:image\/(png|jpeg|webp|gif);base64,/.test(logo.src)
+  if (!src || !(isAsset || isRaster)) return null
+  const p = logo.placement
+  const margin = p.margin * scale
+  const style: CSSProperties = { position: 'absolute', width: `${p.widthPct}%`, height: 'auto', pointerEvents: 'none', zIndex: 1000 }
+  if (p.corner.endsWith('l')) style.left = margin
+  else style.right = margin
+  if (p.corner.startsWith('t')) style.top = margin
+  else style.bottom = margin
+  return <img src={src} alt="" aria-hidden="true" draggable={false} data-brand-logo="" style={style} />
 }

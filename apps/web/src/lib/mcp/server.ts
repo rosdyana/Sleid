@@ -46,6 +46,8 @@ import type { McpDeps } from './deps.ts'
 import { createDeckFromPrompt, getRun as getWizardRunView, type WizardDeps } from '~/lib/wizard.server'
 import { ImportError, decodeBase64, startImport, type ImportDeps } from '~/lib/import.server'
 import { resolveProvider } from '~/lib/llm-settings.server'
+import { applyBrandKit, listBrandKitsFor, removeBrandKit, type BrandDeps } from '~/lib/brand-kits.server'
+import { LibraryError, listTemplatesFor, newDeckFromTemplate, type TemplateDeps } from '~/lib/templates.server'
 
 const NOT_FOUND = 'Deck not found.'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -165,6 +167,8 @@ function toolValue<T>(run: () => T): T {
 function messageFor(err: unknown, deps: McpDeps, tool: string): string {
   if (err instanceof ToolError) return err.message
   if (isLlmError(err)) return err.message
+  // Template and brand kit refusals (M9) are written for the user, like the tool's own messages.
+  if (err instanceof LibraryError) return err.message
   if (err instanceof z.ZodError) return `Invalid input: ${zodMessage(err)}`
   deps.logger.error(`tool ${tool} failed`, err)
   return 'Something went wrong on the server. The error was logged. Try again, or check the deck with get_deck.'
@@ -300,6 +304,24 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
     storage: deps.assetStorage,
     queue: { enqueueImport: async (payload) => (await deps.getQueue()).enqueueImport(payload) },
   })
+  // Templates and brand kits (M9). Plain functions with the same database, storage and collab as the rest of this server.
+  const readDeckFor = (deckId: string) => readDeck(deps.db, deckId, deps.live ? { live: deps.live } : {}).then((r) => r.deck)
+  const templateDepsFor = (): TemplateDeps => ({
+    db: deps.db,
+    storage: deps.assetStorage,
+    readDeck: readDeckFor,
+    enqueueThumbnail: async (templateId) => {
+      await (await deps.getQueue()).enqueueTemplateThumbnail({ templateId })
+    },
+    logger: { warn: (message) => deps.logger.warn(message) },
+  })
+  const brandDepsFor = (): BrandDeps => ({
+    db: deps.db,
+    storage: deps.assetStorage,
+    collab: deps.collab,
+    readDeck: readDeckFor,
+    logger: { warn: (message) => deps.logger.warn(message) },
+  })
   const tool = <S extends z.ZodRawShape>(
     name: string,
     spec: { description: string; shape: S; scope?: TokenScope; readOnly?: boolean },
@@ -342,13 +364,20 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
     {
       scope: 'decks:create',
       description:
-        'Create an empty deck that you own, with one title slide. theme is an optional built-in theme name (see sleid://themes). Returns the deck id and URL. Then use add_slide.',
+        'Create a deck that you own. With no templateId: an empty deck with one title slide, and theme is an optional built-in theme name (see sleid://themes). With templateId (from list_templates): a deck with the template\'s theme and slides, and title replaces the template name. Returns the deck id and URL. Then use add_slide, or get_deck to see the slides.',
       shape: {
         title: z.string().min(1).max(120).describe('The deck title.'),
-        theme: z.string().max(60).optional().describe('A built-in theme name, such as "Midnight".'),
+        theme: z.string().max(60).optional().describe('A built-in theme name, such as "Midnight". Not used with templateId.'),
+        templateId: z.string().min(1).max(80).optional().describe('A template id from list_templates. Not used with theme.'),
       },
     },
     async (args, call) => {
+      if (args.templateId) {
+        if (args.theme) throw new ToolError('Pass either theme or templateId, not both.')
+        const created = await newDeckFromTemplate(templateDepsFor(), principal.userId, { templateId: args.templateId, title: args.title.trim() })
+        call.deckId = created.deckId
+        return asText({ id: created.deckId, title: args.title.trim(), template: args.templateId, url: `${deps.publicUrl}/d/${created.deckId}` })
+      }
       const theme = args.theme ? builtInTheme(args.theme) : undefined
       if (args.theme && !theme) throw new ToolError(`Unknown theme "${args.theme}". Built-in themes: ${builtInThemeNames().join(', ')}.`)
       const id = await deps.db.transaction(async (tx) => {
@@ -368,6 +397,81 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
         }
       }
       return asText({ id, title: args.title.trim(), theme: theme?.name ?? null, url: `${deps.publicUrl}/d/${id}` })
+    },
+  )
+
+  tool(
+    'list_templates',
+    {
+      scope: 'decks:read',
+      readOnly: true,
+      description:
+        'List the templates you can use: the built-in ones, your own, and the ones shared with everyone on this server. Each has an id (pass it to create_deck as templateId), a name, a description, a category and its slide count.',
+      shape: {},
+    },
+    async () => {
+      const list = await listTemplatesFor(templateDepsFor(), principal.userId)
+      return asText({
+        templates: list.map((t) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          category: t.category,
+          builtIn: t.builtIn,
+          owned: t.owned,
+          visibility: t.visibility,
+          slideCount: t.slideCount,
+        })),
+      })
+    },
+  )
+
+  tool(
+    'list_brand_kits',
+    {
+      scope: 'decks:read',
+      readOnly: true,
+      description:
+        'List the brand kits you can use: your own, and the ones shared with everyone on this server. Each has an id (pass it to apply_brand_kit), a name, its fonts, its accent colour and whether it has a logo.',
+      shape: {},
+    },
+    async () => {
+      const kits = await listBrandKitsFor(brandDepsFor(), principal.userId)
+      return asText({
+        brandKits: kits.map((k) => ({
+          id: k.id,
+          name: k.name,
+          owned: k.owned,
+          visibility: k.visibility,
+          fonts: k.tokens.fonts,
+          accent: k.tokens.palette.accent,
+          hasLogo: k.hasLogo,
+          logoCorner: k.logoPlacement.corner,
+        })),
+      })
+    },
+  )
+
+  tool(
+    'apply_brand_kit',
+    {
+      scope: 'decks:write',
+      description:
+        'Apply a brand kit to a deck you can edit. The deck takes the kit\'s palette and fonts as its theme, and the kit\'s logo is placed on its slides. AI tools on the deck then stay within the kit. Pass brandKitId null to remove the kit: the theme stays and the logo goes. The change reaches open editors live. Needs editor access on the deck.',
+      shape: {
+        deckId: deckIdField,
+        brandKitId: z.uuid().nullable().describe('A brand kit id from list_brand_kits, or null to remove the kit.'),
+      },
+    },
+    async (args, call) => {
+      await call.edit(args.deckId)
+      const actor = `mcp:${principal.tokenId}`
+      if (args.brandKitId === null) {
+        await removeBrandKit(brandDepsFor(), principal.userId, args.deckId, actor)
+        return asText({ deckId: args.deckId, brandKitId: null, removed: true })
+      }
+      const result = await applyBrandKit(brandDepsFor(), principal.userId, args.deckId, args.brandKitId, actor)
+      return asText({ deckId: args.deckId, brandKitId: args.brandKitId, theme: result.theme, logo: result.logo })
     },
   )
 
@@ -955,6 +1059,21 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
   jsonResource('sleid://schema/deck', 'Deck JSON Schema', 'The deck document (what get_deck format=json returns).', () => deckJsonSchema().deck)
   jsonResource('sleid://schema/ops', 'Deck-ops JSON Schema', 'The operations apply_ops accepts, one schema per op.', () => deckJsonSchema().op)
   jsonResource('sleid://themes', 'Built-in themes', 'The built-in themes, with their colours, fonts and sizes.', () => BUILT_IN_THEMES)
+  server.registerResource(
+    'Templates',
+    'sleid://templates',
+    { title: 'Templates', description: 'The templates you can use: id, name, description, category and slide count.', mimeType: 'application/json' },
+    async (location) => {
+      if (!tokenHasScope(principal, 'decks:read')) throw new Error('This token does not have the decks:read scope.')
+      const list = await listTemplatesFor(templateDepsFor(), principal.userId)
+      const text = JSON.stringify(
+        list.map((t) => ({ id: t.id, name: t.name, description: t.description, category: t.category, slideCount: t.slideCount, builtIn: t.builtIn })),
+        null,
+        2,
+      )
+      return { contents: [{ uri: location.href, mimeType: 'application/json', text }] }
+    },
+  )
 
   server.registerResource(
     'Deck outline',

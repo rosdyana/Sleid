@@ -115,7 +115,7 @@ export function Filmstrip({
               )}
               <div className="overflow-hidden rounded-sm border border-rule-soft bg-white shadow-sm">
                 <div className="pointer-events-none">
-                  <SlideSurface slide={slide} theme={deck.theme} scale={scale} />
+                  <SlideSurface slide={slide} theme={deck.theme} brand={deck.brand} scale={scale} />
                 </div>
               </div>
               {commentCounts?.[slide.id] ? (

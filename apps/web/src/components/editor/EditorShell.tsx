@@ -653,6 +653,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
         <SlideCanvas
           slide={viewSlide}
           theme={shownDeck.theme}
+          brand={shownDeck.brand}
           zoom={ui.zoom}
           selection={validSelection}
           editingId={editingId}

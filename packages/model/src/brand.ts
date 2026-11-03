@@ -3,7 +3,7 @@
 // are stored separately, on the brand kit and, once applied, on the deck.
 import { z } from 'zod'
 import { BUILT_IN_THEMES } from './defaults.ts'
-import type { Deck, Slide, Theme } from './schema.ts'
+import type { BrandRef, Deck, Slide, Theme } from './schema.ts'
 
 export const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
 // A CSS font family list made of plain names: letters, digits, spaces, hyphens and commas.
@@ -75,7 +75,12 @@ export function brandPaletteColors(tokens: Pick<BrandTokens, 'palette'>): string
 
 /** Whether the deck's brand logo is drawn on this slide, by the placement's `slides` rule. */
 export function logoAppliesToSlide(slide: Slide, deck: Deck): boolean {
-  const logo = deck.brand?.logo
+  return logoAppliesToBrand(slide, deck.brand)
+}
+
+/** The same rule, for callers that hold only the brand reference (the editor canvas). */
+export function logoAppliesToBrand(slide: Slide, brand: BrandRef | undefined): boolean {
+  const logo = brand?.logo
   if (!logo) return false
   switch (logo.placement.slides) {
     case 'all':

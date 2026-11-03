@@ -92,6 +92,13 @@
       "when": 1793679451393,
       "tag": "0012_m8_import_title",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793682180617,
+      "tag": "0013_m9_templates_brand_kits",
+      "breakpoints": true
     }
   ]
 }

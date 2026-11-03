@@ -5,6 +5,10 @@ import { z } from 'zod'
 
 export const EXPORT_QUEUE = 'export-deck'
 export const IMPORT_QUEUE = 'import-deck'
+/** M9: renders the PNG thumbnail of a user template. The row holds the template; the worker writes the file and the key. */
+export const TEMPLATE_THUMBNAIL_QUEUE = 'template-thumbnail'
+export const TemplateThumbnailPayloadSchema = z.object({ templateId: z.uuid() })
+export type TemplateThumbnailPayload = z.infer<typeof TemplateThumbnailPayloadSchema>
 /** A queued import. The row in import_jobs holds the file location and the result. */
 export const ImportJobPayloadSchema = z.object({ importId: z.uuid() })
 export type ImportJobPayload = z.infer<typeof ImportJobPayloadSchema>
@@ -26,6 +30,9 @@ export interface JobQueue {
   stop(): Promise<void>
   enqueueExport(payload: ExportJobPayload): Promise<string | null>
   enqueueImport(payload: ImportJobPayload): Promise<string | null>
+  enqueueTemplateThumbnail(payload: TemplateThumbnailPayload): Promise<string | null>
+  /** Runs `handler` for each thumbnail job. Failures are logged by the handler, not thrown. */
+  workTemplateThumbnails(concurrency: number, handler: (payload: TemplateThumbnailPayload, jobId: string) => Promise<void>): Promise<string>
   /** Runs `handler` for each import job, `concurrency` at a time. Failures belong in the import_jobs row. */
   workImports(concurrency: number, handler: (payload: ImportJobPayload, jobId: string) => Promise<void>): Promise<string>
   /** Runs `handler` for each export job, `concurrency` at a time. The handler should not throw: failures belong in the exports row. */
@@ -53,6 +60,7 @@ export function createJobQueue(connectionString: string, options: { maxConnectio
       await boss.start()
       await boss.createQueue(queueName, { retryLimit: 0, expireInSeconds: 60 * 60 })
       await boss.createQueue(importQueue, { retryLimit: 0, expireInSeconds: 60 * 60 })
+      await boss.createQueue(TEMPLATE_THUMBNAIL_QUEUE, { retryLimit: 0, expireInSeconds: 60 * 60 })
       for (const kind of Object.keys(WIZARD_QUEUES) as WizardJobKind[]) {
         await boss.createQueue(wizardName(kind), { retryLimit: 0, expireInSeconds: 60 * 60 })
       }
@@ -83,6 +91,18 @@ export function createJobQueue(connectionString: string, options: { maxConnectio
       return boss.work(importQueue, { localConcurrency: concurrency }, async (jobs: Job<unknown>[]) => {
         for (const job of jobs) {
           const payload = ImportJobPayloadSchema.parse(job.data)
+          await handler(payload, job.id)
+        }
+      })
+    },
+    async enqueueTemplateThumbnail(payload) {
+      const data = TemplateThumbnailPayloadSchema.parse(payload)
+      return boss.send(TEMPLATE_THUMBNAIL_QUEUE, data, { retryLimit: 0, expireInSeconds: 60 * 60 })
+    },
+    async workTemplateThumbnails(concurrency, handler) {
+      return boss.work(TEMPLATE_THUMBNAIL_QUEUE, { localConcurrency: concurrency }, async (jobs: Job<unknown>[]) => {
+        for (const job of jobs) {
+          const payload = TemplateThumbnailPayloadSchema.parse(job.data)
           await handler(payload, job.id)
         }
       })
