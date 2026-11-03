@@ -3,6 +3,12 @@ import { index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'd
 import { user } from './auth.ts'
 import { decks } from './decks.ts'
 
+/** A placeholder slide: its id in the deck, and its slide number in the outline (1-based). */
+export interface FailedSlide {
+  slideId: string
+  number: number
+}
+
 export const wizardStatus = pgEnum('wizard_status', ['draft', 'ingesting', 'outlining', 'ready', 'generating', 'done', 'failed', 'cancelled'])
 export const wizardSourceKind = pgEnum('wizard_source_kind', ['file', 'url', 'search'])
 export const wizardSourceStatus = pgEnum('wizard_source_status', ['queued', 'running', 'ready', 'failed'])
@@ -30,6 +36,8 @@ export const wizardRuns = pgTable(
     /** Last time the worker made progress on this run (a slide written, a source ingested). A run that is still
      * `generating` or `ingesting` with no heartbeat for five minutes lost its worker, and is marked failed on startup. */
     heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
+    /** Slides the model could not write (each is a placeholder in the deck). The retry replaces them in place. */
+    failedSlides: jsonb('failed_slides').$type<FailedSlide[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

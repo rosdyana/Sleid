@@ -64,6 +64,13 @@
       "when": 1793670706590,
       "tag": "0008_freezing_leo",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793672353989,
+      "tag": "0009_wizard_failed_slides",
+      "breakpoints": true
     }
   ]
 }

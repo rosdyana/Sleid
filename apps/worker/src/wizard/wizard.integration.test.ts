@@ -16,7 +16,7 @@ import { fetchPublicUrl } from '@sleid/ingest'
 import { Outline, WizardBrief, withKnownSources } from '@sleid/llm'
 import { scriptedProvider } from '@sleid/llm/testing'
 import type { SearchProvider } from '@sleid/research'
-import { recoverStaleRuns, runGenerate, runIngest, runResearch, STALE_RUN_MESSAGE, type WizardEnv } from './jobs.ts'
+import { recoverStaleRuns, runGenerate, runIngest, runResearch, runRetry, STALE_RUN_MESSAGE, type WizardEnv } from './jobs.ts'
 import type { WizardCollab } from './collab.ts'
 
 const db: Db | null = await connectOrNull()
@@ -252,7 +252,93 @@ describe.skipIf(!db)('wizard jobs (real Postgres)', () => {
     const deck = yDocToDeck(fake.doc)
     expect(deck.slides).toHaveLength(2)
     expect(JSON.stringify(deck.slides[1])).toContain('Point one')
+    // The visible note is on the slide too (not only in the speaker notes), and the run records the placeholder.
+    expect(JSON.stringify(deck.slides[1])).toContain('Could not be generated')
     expect(deck.slides[1]!.notes).toContain('could not be written')
+    expect(run!.failedSlides).toEqual([{ slideId: deck.slides[1]!.id, number: 2 }])
+  }, 120_000)
+
+  it('the figures on a slide come from the CSV: the FACTS reach the prompt, and an invented figure is corrected once', async () => {
+    const { user, deckId } = await setup('wizard-numbers')
+    const run = await insertWizardRun(database, { userId: user.id, brief: WizardBrief.parse({ prompt: 'x', slideCount: 3, language: 'en' }) as unknown as Record<string, unknown> })
+    const fake = fakeCollab('Numbers')
+    const env = envFor(scriptedProvider([]), fake.collab)
+    const csvId = await ingestFile(run.id, 'bills.csv', csvBytes, env)
+    const provider = scriptedProvider([
+      slideReply({ layout: 'title', title: 'Cover', bullets: [], notes: '' }),
+      slideReply({ layout: 'title-content', title: 'Bills', bullets: ['Average before Rp3.38 million'], notes: 'See [1].' }),
+      slideReply({ layout: 'title-content', title: 'Bills', bullets: ['Average before: 117,667'], notes: 'See [1].' }),
+    ])
+    const outline = withKnownSources(
+      Outline.parse({
+        title: 'Numbers',
+        slides: [
+          { title: 'Cover', layout: 'title', keyPoints: [], visual: 'none', sourceIds: [] },
+          { title: 'Bills', layout: 'title-content', keyPoints: ['Average before'], visual: 'none', sourceIds: [csvId] },
+        ],
+      }),
+      new Set([csvId]),
+    )
+    await updateWizardRun(database, run.id, { status: 'ready', outline: outline as unknown as Record<string, unknown>, total: 2, deckId })
+    await runGenerate(envFor(provider, fake.collab), run.id)
+    // The slide prompt carries the computed average of the CSV's first column (120000, 118000, 115000).
+    expect(provider.requests[1]!.messages[0]!.content).toContain('average 117,667')
+    // The first reply stated an invented figure; the corrective request was made and its figure is kept.
+    expect(provider.requests).toHaveLength(3)
+    expect(provider.requests[2]!.messages[0]!.content).toContain('Correction:')
+    const slide = yDocToDeck(fake.doc).slides[1]!
+    expect(JSON.stringify(slide)).toContain('Average before: 117,667')
+    expect(JSON.stringify(slide)).not.toContain('(estimate)')
+    expect((await getWizardRun(database, run.id))!.failedSlides).toEqual([])
+  }, 120_000)
+
+  it('a retry writes a placeholder slide again in place, and a retry that fails again keeps the placeholder', async () => {
+    const { user, deckId } = await setup('wizard-retry')
+    const brief = WizardBrief.parse({ prompt: 'x', slideCount: 3, language: 'en' }) as unknown as Record<string, unknown>
+    const runId = (await insertWizardRun(database, { userId: user.id, brief })).id
+    const fake = fakeCollab('Retry test')
+    const outline = Outline.parse({
+      title: 'Retry test',
+      slides: [
+        { title: 'Cover', layout: 'title', keyPoints: [], visual: 'none', sourceIds: [] },
+        { title: 'Hard slide', layout: 'title-content', keyPoints: ['Point one', 'Point two'], visual: 'none', sourceIds: [] },
+        { title: 'Last slide', layout: 'title-content', keyPoints: ['Final'], visual: 'none', sourceIds: [] },
+      ],
+    })
+    await updateWizardRun(database, runId, { status: 'ready', outline: outline as unknown as Record<string, unknown>, total: 3, deckId })
+    await runGenerate(
+      envFor(scriptedProvider([slideReply({ layout: 'title', title: 'Cover', bullets: [], notes: '' }), 'not json', 'still not json', slideReply({ layout: 'title-content', title: 'Last', bullets: ['Done'], notes: '' })]), fake.collab),
+      runId,
+    )
+    const before = yDocToDeck(fake.doc)
+    expect(before.slides).toHaveLength(3)
+    const placeholderId = before.slides[1]!.id
+    const failed = (await getWizardRun(database, runId))!.failedSlides
+    expect(failed).toEqual([{ slideId: placeholderId, number: 2 }])
+
+    // The web app sets the run to generating and queues the retry. The first retry fails again (invalid replies).
+    await updateWizardRun(database, runId, { status: 'generating', progress: 0, total: 1, error: null })
+    await runRetry(envFor(scriptedProvider(['not json', 'still not json']), fake.collab), runId)
+    let run = await getWizardRun(database, runId)
+    expect(run!.status).toBe('done')
+    expect(run!.failedSlides).toEqual([{ slideId: placeholderId, number: 2 }])
+    expect(yDocToDeck(fake.doc).slides[1]!.id).toBe(placeholderId)
+
+    // The second retry writes the slide: same index, new content, no placeholder left.
+    await updateWizardRun(database, runId, { status: 'generating', progress: 0, total: 1, error: null })
+    const provider = scriptedProvider([slideReply({ layout: 'title-content', title: 'Second, written', bullets: ['Survei atap'], notes: 'Back.' })])
+    await runRetry(envFor(provider, fake.collab), runId)
+    run = await getWizardRun(database, runId)
+    expect(run!.status).toBe('done')
+    expect(run!.failedSlides).toEqual([])
+    const after = yDocToDeck(fake.doc)
+    expect(after.slides).toHaveLength(3)
+    expect(after.slides[1]!.id).not.toBe(placeholderId)
+    expect(after.slides[0]!.id).toBe(before.slides[0]!.id)
+    expect(after.slides[2]!.id).toBe(before.slides[2]!.id)
+    expect(JSON.stringify(after.slides[1])).toContain('Second, written')
+    expect(JSON.stringify(after.slides[1])).not.toContain('Could not be generated')
+    expect(provider.requests).toHaveLength(1)
   }, 120_000)
 
   it('research queues one ingest job per distinct page and records the page as a search source', async () => {

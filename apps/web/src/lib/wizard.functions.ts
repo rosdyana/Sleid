@@ -65,6 +65,13 @@ export const startWizardGenerationFn = createServerFn({ method: 'POST' })
     return wizard.startGeneration(await wizardDeps(), user, data.runId)
   })
 
+export const retryWizardFailedFn = createServerFn({ method: 'POST' })
+  .validator((data: unknown) => runSchema.parse(data))
+  .handler(async ({ data }) => {
+    const user = await requireUser()
+    return wizard.retryFailedSlides(await wizardDeps(), user, data.runId)
+  })
+
 export const cancelWizardRunFn = createServerFn({ method: 'POST' })
   .validator((data: unknown) => runSchema.parse(data))
   .handler(async ({ data }) => {

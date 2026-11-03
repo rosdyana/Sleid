@@ -45,7 +45,9 @@ async function waitUntil(label, fn, timeoutMs = 20000, intervalMs = 250) {
   }
 }
 
-const fake = await startFakeOpenAI(0, { wizardSlideDelayMs: 1200 })
+// Slide 3 ("Point 4" after the outline edits) fails once with a 400, so it is a placeholder until it is retried.
+const fake = await startFakeOpenAI(0, { wizardSlideDelayMs: 1200, failWizardSlideOnce: 3 })
+const slideCalls = () => fake.seen.filter((r) => r.body?.response_format?.json_schema?.name === 'slide').length
 const browser = await chromium.launch({ headless: true, ...launchOptions })
 const errors = []
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
@@ -144,6 +146,8 @@ try {
   const deckId = new URL(page.url()).pathname.split('/')[2]
   const banner = page.getByRole('status', { name: 'Wizard progress' })
   await banner.waitFor({ state: 'visible', timeout: 30000 })
+  // The banner is part of the layout (between the toolbar and the formula bar), not fixed over the title row.
+  check((await banner.evaluate((el) => getComputedStyle(el).position)) !== 'fixed', 'the progress banner is in the layout flow, not fixed over the editor')
   const samples = []
   let shot = false
   const started = Date.now()
@@ -168,8 +172,23 @@ try {
   // Outline slides + the Sources slide.
   check((await thumbs()) === 5, 'the deck has the four outline slides and the Sources slide')
   check(samples.every((s, i, a) => i === 0 || s.thumbs >= a[i - 1].thumbs), 'the slide count never went down')
-  check(fake.seen.filter((r) => r.body?.response_format?.json_schema?.name === 'slide').length === 4, 'the model wrote four slides (one call each)')
+  // Four slides, one call each: the forced failure on slide 3 is one of those calls (a provider error is not retried).
+  check(slideCalls() === 4, 'the model was called once per slide (slide 3 failed on its one call)')
   check(fake.seen.some((r) => r.body?.response_format?.json_schema?.name === 'outline'), 'the outline was drafted by the model')
+
+  // ---- 6b. A slide the model could not write: a placeholder with its outline points and a note. Retry fills it in place.
+  await banner.getByText('could not be written and show the outline points').waitFor({ state: 'visible', timeout: 10000 })
+  check(true, 'the banner names the slide the model could not write')
+  check((await page.getByText('Could not be generated', { exact: false }).count()) >= 1, 'the placeholder slide shows the note in the deck language')
+  check((await page.getByText('A short point', { exact: true }).count()) >= 1, 'the placeholder slide shows its outline points as bullets')
+  await page.screenshot({ path: join(shotDir, 'wizard-placeholder.png') })
+  log('wizard-placeholder.png saved')
+  await banner.getByRole('button', { name: 'Retry failed slides', exact: true }).click()
+  await waitUntil('retry finished', async () => /Generated from prompt/.test(await banner.innerText()) && !/could not be written/.test(await banner.innerText()), 60000)
+  check((await page.getByText('Could not be generated', { exact: false }).count()) === 0, 'Retry failed slides replaced the placeholder: the note is gone')
+  check((await page.getByText('A short point', { exact: true }).count()) === 0, 'Retry failed slides replaced the placeholder: its outline point is gone')
+  check((await thumbs()) === 5, 'the retry kept the slide count (four outline slides and the Sources slide)')
+  check(slideCalls() === 5, 'the retry called the model once more, for slide 3 only')
 
   // ---- 7. Done: the Sources list names the references.
   await page.getByRole('button', { name: /^Sources \(\d+\)$/ }).click()

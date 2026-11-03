@@ -747,7 +747,7 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
     'get_wizard_status',
     {
       scope: 'decks:read',
-      description: 'The status of a prompt-to-deck run: draft, ingesting, outlining, ready, generating, done, failed or cancelled, with progress, the references and any error.',
+      description: 'The status of a prompt-to-deck run: draft, ingesting, outlining, ready, generating, done, failed or cancelled, with progress, the references, any error, and failedSlides (the 1-based numbers of slides the model could not write; they are placeholders).',
       shape: { runId: z.uuid() },
     },
     async (args) => {
@@ -761,6 +761,8 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
         total: run.total,
         deckId: run.deckId,
         error: run.error,
+        /** Slide numbers (1-based) the model could not write. They are placeholders until the run is retried in the web app. */
+        failedSlides: run.failedSlides,
         sources: run.sources.map((s) => ({ title: s.title, url: s.url, status: s.status, words: s.wordCount })),
       })
     },

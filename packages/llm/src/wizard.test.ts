@@ -280,7 +280,7 @@ describe('schemas and language', () => {
 
 // ---------- slide quality (defects from the live run) ----------
 
-const bullets4 = ['Tagihan turun di Januari', 'Tagihan turun di Februari', 'Hemat sekitar Rp 1,6 juta', 'ROI lebih cepat']
+const bullets4 = ['Tagihan turun di Januari', 'Tagihan turun di Februari', 'Hemat setiap bulan', 'ROI lebih cepat']
 const LR4 = 'graph LR\n  A[Panel di rooftop] --> B[Inverter ke AC]\n  B --> C[Koneksi ke grid]\n  C --> D[Monitoring produksi]'
 const TD3 = 'graph TD\n  A[Panel] --> B[Inverter]\n  B --> C[Grid]'
 

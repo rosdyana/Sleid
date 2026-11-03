@@ -1,6 +1,6 @@
 // Wizard service rules against real Postgres: ownership, upload and URL limits, outline validation, generate precondition.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { connectOrNull, makeUser, removeUsers } from '@sleid/db/testing'
+import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { getWizardRunFor, updateWizardRun, listWizardSources, type Db } from '@sleid/db'
 import { createLocalStorage } from '@sleid/storage'
 import { LIMITS } from '@sleid/ingest'
@@ -123,6 +123,31 @@ describe.skipIf(!db)('wizard service', () => {
     expect(row!.deckId).toBe(started.deckId)
     expect(jobs.at(-1)).toEqual({ kind: 'generate', payload: { runId: run.id } })
     await expect(wizard.startGeneration(deps, a, run.id)).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('writes the placeholder slides again only for a done run that has placeholders, and queues a retry job', async () => {
+    const a = await owner('wiz-retry')
+    const b = await owner('wiz-retry-other')
+    const run = await wizard.createRun(deps, a, { prompt: 'x', slideCount: 3 })
+    const deckId = await makeDeck(database, a.id, 'Retry deck')
+    // Not done yet: refused.
+    await expect(wizard.retryFailedSlides(deps, a, run.id)).rejects.toMatchObject({ status: 409 })
+    await updateWizardRun(database, run.id, { status: 'done', deckId, failedSlides: [] })
+    // Done with no placeholders: nothing to retry.
+    await expect(wizard.retryFailedSlides(deps, a, run.id)).rejects.toThrow(/No slide needs/)
+    await updateWizardRun(database, run.id, { status: 'done', deckId, failedSlides: [{ slideId: '11111111-1111-4111-8111-111111111111', number: 2 }] })
+    // Another user gets not-found.
+    await expect(wizard.retryFailedSlides(deps, b, run.id)).rejects.toMatchObject({ status: 404 })
+    const before = jobs.length
+    const view = await wizard.retryFailedSlides(deps, a, run.id)
+    expect(view.status).toBe('generating')
+    expect(view.failedSlides).toEqual([2])
+    expect(view.total).toBe(1)
+    expect(jobs.length).toBe(before + 1)
+    expect(jobs.at(-1)).toEqual({ kind: 'generate', payload: { runId: run.id, retry: true } })
+    // A second click while it runs is refused, and no second job is queued.
+    await expect(wizard.retryFailedSlides(deps, a, run.id)).rejects.toMatchObject({ status: 409 })
+    expect(jobs.length).toBe(before + 1)
   })
 
   it('cancel moves an active run to cancelled', async () => {

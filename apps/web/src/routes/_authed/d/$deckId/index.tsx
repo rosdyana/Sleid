@@ -27,10 +27,7 @@ function DeckPage() {
   const { session } = useRouteContext({ from: '/_authed' })
   return (
     <ClientOnly fallback={<div className="grid h-screen place-items-center text-ink-muted">Opening deck…</div>}>
-      <>
-        <WizardBanner deckId={deck.id} />
-        <EditorShell key={deck.id} deck={deck} user={session} />
-      </>
+      <EditorShell key={deck.id} deck={deck} user={session} banner={<WizardBanner deckId={deck.id} />} />
     </ClientOnly>
   )
 }

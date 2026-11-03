@@ -525,7 +525,10 @@ interface FakeModel {
   close(): Promise<void>
 }
 
-function wizardAnswer(body: { response_format?: { json_schema?: { name?: string } }; messages?: Array<{ role: string; content?: string }> }): Record<string, unknown> {
+function wizardAnswer(
+  body: { response_format?: { json_schema?: { name?: string } }; messages?: Array<{ role: string; content?: string }> },
+  options: { failSlide?: number } = {},
+): Record<string, unknown> {
   const name = body.response_format?.json_schema?.name
   const system = body.messages?.find((m) => m.role === 'system')?.content ?? ''
   if (name === 'queries') return { queries: ['rooftop solar bakery'] }
@@ -544,12 +547,14 @@ function wizardAnswer(body: { response_format?: { json_schema?: { name?: string 
   }
   if (name === 'slide') {
     const index = Number(/write slide (\d+) of/.exec(system)?.[1] ?? 1)
+    // A reply that is not JSON, both times: the slide becomes a placeholder.
+    if (index === options.failSlide) return { __raw: 'not json' }
     return { layout: index === 1 ? 'title' : 'title-content', title: index === 1 ? 'Solar for bakeries' : `Point ${index}`, bullets: ['Solar cuts the bill'], notes: 'Say it plainly.' }
   }
   return { paragraphs: ['OK'] }
 }
 
-async function startFakeModel(): Promise<FakeModel> {
+async function startFakeModel(options: { failSlide?: number } = {}): Promise<FakeModel> {
   const server = createServer(async (req, res) => {
     let raw = ''
     for await (const chunk of req) raw += chunk
@@ -558,7 +563,8 @@ async function startFakeModel(): Promise<FakeModel> {
       res.writeHead(404).end()
       return
     }
-    const content = JSON.stringify(wizardAnswer(body))
+    const answer = wizardAnswer(body, options)
+    const content = typeof answer.__raw === 'string' ? answer.__raw : JSON.stringify(answer)
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.end(
@@ -585,7 +591,7 @@ describe('MCP create_deck_from_prompt', () => {
     if (!db || !baseDeps) return
     const owner = await person('mcp-wizard')
     const token = await tokenFor(owner.id, ['decks:create', 'decks:read', 'decks:write', 'ai'])
-    const model = await startFakeModel()
+    const model = await startFakeModel({ failSlide: 2 })
     const saved = baseDeps.env
     // The server-default provider from the environment (the environment scope may use a local address).
     const env = { ...process.env, SLEID_LLM_KIND: 'openai-compatible', SLEID_LLM_ENDPOINT: model.url, SLEID_LLM_MODEL: 'fake-local' }
@@ -619,6 +625,8 @@ describe('MCP create_deck_from_prompt', () => {
       expect(status.progress).toBe(3)
       expect(status.total).toBe(3)
       expect(status.deckId).toBe(deckId)
+      // Slide 2 is a placeholder (the fake model's reply was not JSON), and get_wizard_status says which slide it is.
+      expect(status.failedSlides).toEqual([2])
 
       const outline = jsonOf(await tool(mcp, 'get_deck', { deckId }))
       expect(outline.slideCount).toBe(3)
@@ -627,6 +635,7 @@ describe('MCP create_deck_from_prompt', () => {
       expect(slides).toHaveLength(3)
       const titles = slides.map((s) => JSON.stringify(s.elements.find((e) => e.role === 'title')?.content ?? ''))
       expect(titles[0]).toContain('Solar for bakeries')
+      expect(titles[1]).toContain('Point 2')
       expect(titles[2]).toContain('Point 3')
       await mcp.close()
     } finally {

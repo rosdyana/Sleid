@@ -157,10 +157,12 @@ export function respond(body) {
 
 /**
  * Starts the fake server. options.wizardSlideDelayMs makes each wizard slide reply wait, so a browser check can watch the
- * slides arrive one by one (the default is no delay).
+ * slides arrive one by one (the default is no delay). options.failWizardSlideOnce = N makes the first call for slide N
+ * fail with a 400 (not retried by the provider layer), so the slide becomes a placeholder; later calls succeed.
  */
 export async function startFakeOpenAI(port = 0, options = {}) {
   const seen = []
+  let failedOnce = false
   const server = createServer(async (req, res) => {
     let raw = ''
     for await (const chunk of req) raw += chunk
@@ -173,6 +175,15 @@ export async function startFakeOpenAI(port = 0, options = {}) {
     }
     const isWizardSlide = body.response_format?.json_schema?.name === 'slide' && /write slide \d+ of/.test((body.messages ?? []).find((m) => m.role === 'system')?.content ?? '')
     if (isWizardSlide && options.wizardSlideDelayMs) await new Promise((resolve) => setTimeout(resolve, options.wizardSlideDelayMs))
+    if (isWizardSlide && options.failWizardSlideOnce && !failedOnce) {
+      const index = Number(/write slide (\d+) of/.exec((body.messages ?? []).find((m) => m.role === 'system')?.content ?? '')?.[1])
+      if (index === options.failWizardSlideOnce) {
+        failedOnce = true
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'Injected failure for the check (slide ' + index + ')' } }))
+        return
+      }
+    }
     const reply = respond(body)
     if (reply.kind === 'json') {
       res.writeHead(200, { 'content-type': 'application/json' })

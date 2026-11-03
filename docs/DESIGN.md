@@ -982,7 +982,7 @@ Visual review of every slide (contact sheet, and each slide at full size where n
 6. **No Sources slide.** Cause, two parts: the brief's `includeSources` defaulted to false (in the schema and in the new-brief checkbox), and the live script never built the Sources slide (only the worker did). Fix: the default is now on (schema and form). The Sources slides come from one helper, `sourcesSlideOps`, which the worker and the script both use. Tests: `wizard.test.ts` (the default; the Sources helper, eight per slide).
 7. **Theme.** The live script set `theme: 'Sheets Light'` on the brief but never applied a `setTheme` op, so the deck kept the empty deck's default theme. Sheets Light is that default, so the output looked the same. The script now applies the brief's built-in theme as the worker does. The "AI from brand colours" theme was not exercised by any live run.
 
-**Remaining defects in live run 3 (not fixed in this pass):**
+**Remaining defects in live run 3 (all four fixed in M6 pass 2, see below):**
 - **Invented figures in bullets.** Slide 2's bullets say "Tagihan sebelum rata-rata Rp3,38 juta" and "sesudah rata-rata Rp2,08 juta". The CSV's averages are Rp4,175,000 and about Rp2,447,000. The rule "numbers come from the references" is enforced for charts only; bullet text is model-written. A check that every figure in a bullet appears in the references would catch it.
 - **Reference label leaked into a title.** Slide 5's title "Penghematan dari Data S1" shows the outline's internal label "S1".
 - **Editor banner covers the editor header.** The wizard banner is `fixed` at the top of the editor and hides the deck title row while it runs (seen in `shots-m6/wizard-live.png`). Cosmetic; a layout change in the editor was out of scope.
@@ -1017,3 +1017,84 @@ Visual review of every slide (contact sheet, and each slide at full size where n
 - **Images are not read** by the model (see the known gaps above).
 - **Live run 3 slides 6 to 8**: not produced by the model (endpoint outage). Their rendering was checked only as placeholders.
 - **Firefox and Safari.** Chrome only, as before.
+
+### M6 pass 2: numeric grounding, label leaks, failed-slide retry, banner layout
+
+Closes the four defects left from live run 3. Branch `m6-wizard`, one commit, not pushed.
+
+**Facts for tables (`packages/llm/src/wizard-facts.ts`).** Before a slide is written, code computes figures from the reference tables and puts them in the slide prompt as a `FACTS` block (inside the untrusted-data markers), one line per fact with the citation number and source id. Per numeric column: min, max, average, total, first and last. Per pair of columns with the same unit (a `(Rp)` or trailing unit word): the per-row difference (first minus second, up to 12 rows), its average and total, and the difference as a share of the first column. Formatting follows the deck language (4.175.000 in Indonesian, 4,175,000 in English). A slide gets its own sources' facts, or all of them when it names none. The source id is kept out of the parsed text, so its digits never count as supporting figures.
+
+**Numeric checker (`packages/llm/src/wizard-numbers.ts`, rules in `writeWizardSlide`).**
+- Every figure in a title, subtitle or bullet is read in both notations: `Rp4.175.000`, `Rp4,2 juta`, `4.2 million`, `4,175,000`, `38–43%`, `1,6–1,9 juta`. A figure with one separator reads both ways (`4.175` is 4175 or 4.175). A range takes the unit of the figure that has one.
+- The tolerance is the rounding the figure shows: one decimal of a million is ±50 000 (so `Rp4,2 juta` covers 4 175 000), two decimals of a million is ±5 000, a grouped whole number may be rounded to its trailing zeros (`2.447.000` covers 2 446 667), a percentage is ±0.5 point.
+- Supported figures come from the slide's own reference text, its FACTS and the table cells. Notes and chart data are not checked (chart data is copied from the table).
+- Exempt: years (1900 to 2100), slide counts ("5 slides"), ordinals of ten or fewer, and day numbers before a month name.
+- One corrective request for the slide, naming the unsupported figures. If the second reply still states one, the figure stays and is marked in the deck language: `(perkiraan)` in Indonesian, `(estimate)` otherwise, after each such figure. The speaker notes get a line naming them, and the run warnings get "Slide n: figures not found in the references were marked as estimates: …". The slide result carries the list (`estimates`).
+- The checker is lexical. It cannot tell that a figure is attached to the wrong thing, and a wrong figure that happens to equal a source figure passes.
+
+**Internal labels (`stripSourceLabels` in `wizard-text.ts`).** `S1`, `[S1]`, bracketed citation numbers and uuids are removed from every visible title, subtitle, bullet, outline title and key point, and chart title. A label left at the start of text takes its separator with it. A title that is only a label falls back to "Slide n". Citations stay in the speaker notes. The prompts name sources by their title in visible text. Limit: a real `S1` in deck text (Indonesian "Kelas S1") is removed too.
+
+**Failed slides.**
+- *Worker path, checked:* the worker's placeholder already carried the outline title and bullets (the integration test checks the bullet text). It had no visible note, only a line in the speaker notes. The live script's placeholder was the same. Both now add a muted note at the foot of the slide: "Could not be generated — click ✨ Ask AI to retry." (Indonesian: "Tidak dapat dibuat — klik ✨ Ask AI untuk mencoba lagi."). **The note's wording does not match the retry:** "✨ Ask AI" is the assistant, not the wizard retry, which is the banner's "Retry failed slides" button. The wording is as specified; change it when the note is revisited.
+- *Recording:* `wizard_runs.failed_slides` (migration `0009_wizard_failed_slides`) holds `{slideId, number}` for each placeholder. Keying on the slide id means a retry finds the slide even after the user moved things.
+- *Retry:* `retryFailedSlides` (server function `retryWizardFailedFn`) is allowed only for a `done` run with placeholders. It sets the run to `generating` and queues a `generate` job with `retry: true`. `runRetry` writes each placeholder again: `replaceSlideOps` deletes the old slide and adds the new one at the same index. A slide that fails again stays a placeholder. A placeholder the user deleted is skipped. The run ends `done` with the placeholders that remain. A retry that crashes leaves the placeholders as they were and the run `done`, so it can be retried again.
+- *Surfaces:* the banner shows "Slide n could not be written and show the outline points." with the retry button. `get_wizard_status` returns `failedSlides` (1-based slide numbers).
+
+**Banner layout.** The banner is no longer `fixed`. `EditorShell` takes a `banner` slot, rendered between the toolbar and the preview and formula bar, so it takes its own row. The title row is not covered (`shots-m6b/wizard-live.png`).
+
+**Tests.** 
+- `packages/llm/src/wizard-numbers.test.ts` (13): the notations, ranges, tolerance (including the live run's 3,38 and 2,08 juta cases), exemptions, marking.
+- `packages/llm/src/wizard-grounding.test.ts` (19): FACTS (values, the difference pair, language, unit detection, the block), the corrective retry, the marked estimate in both languages, exemptions, the FACTS block in the prompt, label stripping in slides and in the outline, the placeholder (title, bullets, muted note, no overlap with the bullets), the in-place replace ops, chart keys.
+- `packages/llm/src/wizard.test.ts`: one fixture bullet changed from "Hemat sekitar Rp 1,6 juta" to "Hemat setiap bulan". The figure is not in the fixture's source, so the checker now asks for a correction, and the scripted provider has no second reply.
+- `apps/worker/src/wizard/wizard.integration.test.ts` (9, real Postgres): the placeholder's visible note and recorded id; a CSV figure from FACTS is corrected once, with the FACTS in the prompt; a retry that fails again keeps the placeholder, and the next retry replaces it at the same index.
+- `apps/web/src/lib/wizard.server.test.ts` (10): the retry is refused unless done with placeholders, belongs to the owner, and queues one retry job.
+- `apps/web/src/lib/mcp/mcp.integration.test.ts`: the fake model fails slide 2, so `get_wizard_status` returns `failedSlides: [2]` and the placeholder carries the outline's title.
+
+**Verification (this pass).**
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm test` (root): **53 files, 649 tests, all passing, none skipped.** The M6 completion entry above had 51 files and 614 tests.
+- Browser suites against the dev stack (same environment as before): `wizard.mjs` 34 `ok` lines (25 before: 8 new checks for the banner layout, the placeholder note and bullets, the retry replacing the placeholder in place, and the call counts, plus the placeholder screenshot), `smoke.mjs` 22, `mcp.mjs` 19. All pass, no page or console errors.
+- `wizard.mjs` forces slide 3 to fail once (`failWizardSlideOnce` in `apps/web/tests/fake-openai-server.mjs`, a 400, which the provider layer does not retry). The check shows the placeholder with its bullet and note, then Retry failed slides removes both, and the slide count stays at five.
+
+**Live run 4** (`apps/web/scripts/live-wizard-check.ts`, the same brief, CSV and Wikipedia page, research off, `qwen3.8-flash-next-q2_0` at `https://gpt.knowhub.my.id/v1`, no key). Output in the session scratchpad, `live-wizard4/`: deck.json, outline.json, facts.json, numbers.json, report.json, slide-1..9.png, contact.png. The run made 9 model calls (1 outline, 8 slides) and needed no corrective request, no placeholder and no retry. Warnings: 0. Tokens: 78.4k in, 11.9k out.
+
+| Step | Time |
+|---|---|
+| Fetch the page | 0.8 s |
+| Outline | 80.7 s (earlier runs 20 to 35 s; endpoint latency varies) |
+| Slides 1 to 8 | 18.5, 33.4, 13.8, 14.2, 16.9, 27.8 (diagram), 18.8, 13.5 s; total 156.9 s |
+
+Figures in the visible text (titles, subtitles, bullets): 28 occurrences, 4 exempt years (2021 three times, 2000 once), 24 checked, 24 supported, 0 unsupported, 0 marked. Checked by hand against the CSV and the fetched page (the notes too):
+
+| Slide | Figure as written | Source | Verdict |
+|---|---|---|---|
+| 2, 3, 7 | Rp4.200.000, Rp4.100.000, Rp4.000.000 (before), Rp2.600.000, Rp2.550.000, Rp2.350.000 (after) | CSV, Jan, Feb, May | exact |
+| 2, 5 | Rp4,2 juta (average before) | CSV average 4 175 000 | rounded |
+| 3, 5, 6, 8 | Rp1,7 juta (average saving) | CSV average difference 1 728 333 | rounded |
+| 5 | Rp10,4 juta (total saving, six months) | CSV total difference 10 370 000 | rounded |
+| 5, 8 | 41,4% (saving as a share of the before total) | 10 370 000 / 25 050 000 | computed, one decimal |
+| 7 | Rp1.650.000 (May saving) | 4 000 000 − 2 350 000 | computed, exact |
+| 4 | 30,3% (coal, 2021) | page: "Coal (30.3%)" in 2021 total energy supply | exact |
+| 4 | 11,6% (wind, solar and others, 2021) | page: "Wind, Solar, etc. (11.6%)" | exact |
+| 4 | "hampir 60%", 2000 to 2021 | page: "increased by nearly 60%" | exact |
+| 2, 3, 4, 7 | 2000, 2021 | years | exempt |
+
+The chart on slide 3 has six rows from the CSV, all equal to the CSV, not illustrative. The diagram on slide 6 is a flowchart with four nodes, full width. Speaker-note citations: 8 of 8 slides. Label leaks: none (no S-label, no bracketed number in visible text). Language: Indonesian (103 Indonesian vs 8 English word hits).
+
+Visual review of every slide (contact sheet, and full size for slides 3, 4 and 6):
+- Slide 1 (cover): fine.
+- Slide 2 (five bullets, the first three are the before-bills): fine, most of the slide empty.
+- Slide 3 (chart with bullets): good, chart labels readable, chart equals the CSV.
+- Slide 4 (two-column): correct text, but the split is uneven (two bullets left, one right), and the slide is mostly empty.
+- Slide 5 (six bullets): fine.
+- Slide 6 (full-width flowchart): readable at 1920 px, after rendering the diagram with Mermaid. (A first render without the Mermaid script showed the raw source; that was a render-tool setting, not the deck.)
+- Slide 7 (bullets): fine, but two of its four bullets repeat the file name ("Penurunan terlihat pada tagihan-listrik.csv", "Data nyata dari tagihan-listrik.csv"). Filler.
+- Slide 8 (next steps): fine.
+- Slide 9 (Sources): "tagihan-listrik.csv — tagihan-listrik.csv" (title and origin are both the file name). The Wikipedia entry is titled "Energy in Indonesia - Wikipedia", because the URL's page is that article; the deck is about solar. Neither is a defect of this pass.
+
+**Not done in this pass.**
+- The retry was not exercised by the live run (no placeholder), only by the browser check (fake, forced failure), the worker integration test and the live script's dry run against the fake model.
+- The live script does not call the server's retry path; it runs the same writer and replace ops. Its dry run used `LIVE_WIZARD_ALLOW_PRIVATE=1` against the local fake (the live run leaves it unset).
+- The note's "✨ Ask AI" wording (see above).
+- The "pending" theme op is lost if the first slide batch is refused. That was there before this pass and is unchanged.
+- The Wikipedia figure check is one run against one page; the page can change.

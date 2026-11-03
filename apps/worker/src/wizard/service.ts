@@ -3,7 +3,7 @@ import type { JobQueue } from '@sleid/jobs'
 import type { StorageDriver } from '@sleid/storage'
 import type { SearchProvider } from '@sleid/research'
 import type { Logger } from '../logger.ts'
-import { recoverStaleRuns, runGenerate, runIngest, runResearch, type WizardEnv } from './jobs.ts'
+import { recoverStaleRuns, runGenerate, runIngest, runResearch, runRetry, type WizardEnv } from './jobs.ts'
 import { resolveWizardProvider } from './provider.ts'
 import type { WizardCollab } from './collab.ts'
 import type { Db } from '@sleid/db'
@@ -40,7 +40,8 @@ export async function startWizardService(options: WizardServiceOptions): Promise
   await options.queue.workWizard('ingest', options.ingestConcurrency ?? 3, async (payload) => {
     if (payload.sourceId) await runIngest(env, payload.sourceId)
   })
-  await options.queue.workWizard('generate', 1, async (payload) => runGenerate(env, payload.runId))
+  // A retry job writes only the placeholder slides again; a normal job writes the whole outline.
+  await options.queue.workWizard('generate', 1, async (payload) => (payload.retry ? runRetry(env, payload.runId) : runGenerate(env, payload.runId)))
   options.logger.info('[worker] listening for wizard jobs (research, ingest, generate)')
   return {
     async stop() {

@@ -1,0 +1,1 @@
+ALTER TABLE "wizard_runs" ADD COLUMN "failed_slides" jsonb DEFAULT '[]'::jsonb NOT NULL;

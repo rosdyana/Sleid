@@ -12,7 +12,8 @@ export const WIZARD_QUEUES = {
 } as const
 export type WizardJobKind = keyof typeof WIZARD_QUEUES
 
-export const WizardJobPayloadSchema = z.object({ runId: z.uuid(), sourceId: z.uuid().optional() })
+/** `retry` on a generate job: write the run's placeholder slides again (not the whole outline). */
+export const WizardJobPayloadSchema = z.object({ runId: z.uuid(), sourceId: z.uuid().optional(), retry: z.boolean().optional() })
 export type WizardJobPayload = z.infer<typeof WizardJobPayloadSchema>
 
 export interface JobQueue {

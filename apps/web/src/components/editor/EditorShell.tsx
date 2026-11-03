@@ -2,7 +2,7 @@
 // through the collab service) and waits for the first sync. EditorWorkspace owns the UI state,
 // selection, the keyboard map and the overlays. Everything the user can do is an action in
 // actions.ts, which builds deck-ops and applies them through the session.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ChartElement, Deck, Element as SlideElement, RichText } from '@sleid/model'
 import { isReadOnlyRole, type DeckRole } from '@sleid/db/permissions'
 import { createActions, currentSlide, slideIndex, type PromptRequest, type UiState } from './actions.ts'
@@ -58,7 +58,8 @@ function altTextIds(deck: Deck, slideIds: string[]): string[] {
     .slice(0, 30)
 }
 
-export function EditorShell({ deck: meta, user }: { deck: EditorDeck; user: EditorUser }) {
+/** `banner` is a row between the toolbar and the formula bar (the wizard's progress), in the layout flow. */
+export function EditorShell({ deck: meta, user, banner }: { deck: EditorDeck; user: EditorUser; banner?: ReactNode }) {
   const readOnly = isReadOnlyRole(meta.role as DeckRole)
   const [session, setSession] = useState<CollabSession | null>(null)
 
@@ -76,7 +77,7 @@ export function EditorShell({ deck: meta, user }: { deck: EditorDeck; user: Edit
   }, [meta.id, readOnly, user.id, user.name, user.image])
 
   if (!session) return <Opening />
-  return <SessionGate session={session} meta={meta} user={user} readOnly={readOnly} />
+  return <SessionGate session={session} meta={meta} user={user} readOnly={readOnly} banner={banner} />
 }
 
 function Opening({ text = 'Opening deck…' }: { text?: string }) {
@@ -84,17 +85,17 @@ function Opening({ text = 'Opening deck…' }: { text?: string }) {
 }
 
 /** Renders the workspace only after the first sync. Before that the document is empty. */
-function SessionGate({ session, meta, user, readOnly }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean }) {
+function SessionGate({ session, meta, user, readOnly, banner }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean; banner?: ReactNode }) {
   const ready = useReady(session)
   const status = useSyncStatus(session)
   if (!ready) {
     if (status.kind === 'denied') return <Opening text={deniedMessage(status.reason)} />
     return <Opening text="Connecting…" />
   }
-  return <EditorWorkspace session={session} meta={meta} user={user} readOnly={readOnly} />
+  return <EditorWorkspace session={session} meta={meta} user={user} readOnly={readOnly} banner={banner} />
 }
 
-function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean }) {
+function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: CollabSession; meta: EditorDeck; user: EditorUser; readOnly: boolean; banner?: ReactNode }) {
   const deck = useDeck(session.doc)
   const status = useSyncStatus(session)
   const peers = usePeers(session)
@@ -458,6 +459,7 @@ function EditorWorkspace({ session, meta, user, readOnly }: { session: CollabSes
         undo={() => session.undo()}
         redo={() => session.redo()}
       />
+      {banner}
       {preview && (
         <div role="region" aria-label="Preview" className="flex shrink-0 items-center justify-between gap-3 bg-amber-100 px-3 py-1.5 text-[13px] text-amber-900">
           <span>

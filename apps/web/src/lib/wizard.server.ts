@@ -10,7 +10,7 @@ import type { StorageDriver } from '@sleid/storage'
 import type { ResolvedProvider } from './llm-settings.server'
 
 export interface WizardQueue {
-  enqueueWizard(kind: 'research' | 'ingest' | 'generate', payload: { runId: string; sourceId?: string }): Promise<string | null>
+  enqueueWizard(kind: 'research' | 'ingest' | 'generate', payload: { runId: string; sourceId?: string; retry?: boolean }): Promise<string | null>
 }
 
 export interface WizardDeps {
@@ -57,6 +57,8 @@ export interface RunView {
   deckId: string | null
   brief: Brief
   outline: OutlineT | null
+  /** Slide numbers (1-based) that are placeholders: the model could not write them. */
+  failedSlides: number[]
   sources: SourceView[]
   researchAvailable: boolean
   researchLabel: string
@@ -125,6 +127,7 @@ async function runView(deps: WizardDeps, row: WizardRunRow): Promise<RunView> {
     deckId: row.deckId,
     brief: WizardBrief.parse(row.brief),
     outline: row.outline ? Outline.parse(row.outline) : null,
+    failedSlides: row.failedSlides.map((f) => f.number).sort((a, b) => a - b),
     sources: sources.map(sourceView),
     researchAvailable: research.available,
     researchLabel: research.label,
@@ -323,6 +326,24 @@ export async function startGeneration(deps: WizardDeps, user: WizardUser, runId:
   if (moved.length === 0) throw new WizardError('The run changed while the deck was made. Try again.', 409)
   await deps.queue.enqueueWizard('generate', { runId })
   return { deckId, runId }
+}
+
+/**
+ * Writes the placeholder slides again. Only for a finished run that has placeholders: the run goes back to generating,
+ * the worker replaces each placeholder in place, and the run ends done again.
+ */
+export async function retryFailedSlides(deps: WizardDeps, user: WizardUser, runId: string): Promise<RunView> {
+  const run = await ownedRun(deps, user, runId)
+  if (run.status !== 'done' || !run.deckId) throw new WizardError('Slides can be written again once the deck is done.', 409)
+  if (run.failedSlides.length === 0) throw new WizardError('No slide needs to be written again.', 409)
+  const moved = await deps.db
+    .update(wizardRuns)
+    .set({ status: 'generating', progress: 0, total: run.failedSlides.length, error: null, heartbeatAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(wizardRuns.id, runId), eq(wizardRuns.status, 'done')))
+    .returning({ id: wizardRuns.id })
+  if (moved.length === 0) throw new WizardError('The run changed while the retry was queued. Try again.', 409)
+  await deps.queue.enqueueWizard('generate', { runId, retry: true })
+  return getRun(deps, user, runId)
 }
 
 export async function cancelRun(deps: WizardDeps, user: WizardUser, runId: string): Promise<RunView> {

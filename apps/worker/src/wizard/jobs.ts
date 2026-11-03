@@ -14,15 +14,21 @@ import {
   type IngestedSource,
 } from '@sleid/ingest'
 import {
-  buildSlideElements,
+  allFacts,
+  chartKeysOf,
   draftResearchQueries,
   Outline,
+  placeholderSlide,
+  replaceSlideOps,
+  slideFacts,
   sourcesSlideOps,
   WizardBrief,
   writeWizardSlide,
   runAbility,
+  type FactLine,
   type OutlineSlide,
   type SlideContext,
+  type Usage,
 } from '@sleid/llm'
 import {
   getWizardRun,
@@ -36,6 +42,7 @@ import {
   updateWizardRun,
   updateWizardSource,
   type Db,
+  type FailedSlide,
 } from '@sleid/db'
 import type { StorageDriver } from '@sleid/storage'
 import type { SearchProvider, SearchResult } from '@sleid/research'
@@ -187,14 +194,51 @@ export async function runResearch(env: WizardEnv, runId: string): Promise<void> 
   }
 }
 
-/** One slide that stands in for a slide the model could not write: the outline's points, and a note. */
-function placeholderOps(deck: Deck, slide: OutlineSlide, theme: Theme, slideIndex: number): { ops: Op[]; notes: string } {
-  const built = buildSlideElements('title-content', theme, { title: slide.title, bullets: slide.keyPoints }, {})
-  const id = crypto.randomUUID()
+/** What a slide is written from: the references (numbered as the model cites them), their chunks, tables and FACTS. */
+interface RunContext {
+  brief: WizardBrief
+  outline: Outline
+  resolved: ResolvedWizardProvider
+  refs: Array<{ number: number; sourceId: string; title: string; origin: string }>
+  numberOf: Map<string, number>
+  sourceChunks: ReturnType<typeof chunksOf>
+  tables: Array<{ number: number; sourceId: string; tableIndex: number; table: NonNullable<IngestedSource['tables']>[number] }>
+  facts: FactLine[]
+}
+
+async function loadRunContext(env: WizardEnv, run: { id: string; userId: string; providerId: string | null }, brief: WizardBrief, outline: Outline): Promise<RunContext> {
+  const resolved = await env.resolveProvider(run.userId, run.providerId)
+  const ready = (await listWizardSources(env.db, run.id)).filter((s) => s.status === 'ready')
+  const refs = ready.map((s, i) => ({ number: i + 1, sourceId: s.id, title: s.title, origin: s.url ?? s.fileName ?? 'web search' }))
+  const numberOf = new Map(refs.map((r) => [r.sourceId, r.number]))
+  const ingested = new Map(ready.map((s) => [s.id, s.extracted as unknown as IngestedSource]))
+  const sourceChunks = chunksOf(ready.map((s) => ({ id: s.id, ingested: ingested.get(s.id)! })))
+  const tables = refs.flatMap((r) => (ingested.get(r.sourceId)?.tables ?? []).map((table, tableIndex) => ({ number: r.number, sourceId: r.sourceId, tableIndex, table })))
+  return { brief, outline, resolved, refs, numberOf, sourceChunks, tables, facts: allFacts(tables, brief.language) }
+}
+
+function contextFor(ctx: RunContext, slide: OutlineSlide): SlideContext {
+  const relevant = relevantChunks([slide.title, ...slide.keyPoints].join(' '), ctx.sourceChunks, 6)
+  const slideTables = (slide.sourceIds.length ? ctx.tables.filter((t) => slide.sourceIds.includes(t.sourceId)) : ctx.tables).slice(0, 5)
   return {
-    ops: [{ op: 'addSlide', layout: 'title-content', slide: { id, notes: `Slide ${slideIndex + 1} could not be written. Its outline points are shown instead.`, elements: built.elements } } as Op],
-    notes: deck.slides.length ? '' : '',
+    refs: ctx.refs.map((r) => ({ number: r.number, sourceId: r.sourceId, title: r.title, origin: r.origin })),
+    chunks: relevant.map((c) => ({ number: ctx.numberOf.get(c.sourceId) ?? 0, text: c.text })).filter((c) => c.number > 0),
+    tables: slideTables.map((t) => ({ number: t.number, sourceId: t.sourceId, tableIndex: t.tableIndex, name: t.table.name, columns: t.table.columns, rows: t.table.rows })),
+    facts: slideFacts(ctx.facts, slide.sourceIds),
   }
+}
+
+async function recordSlideUsage(env: WizardEnv, userId: string, deckId: string, providerId: string | null, usage: Usage): Promise<void> {
+  await recordLlmUsage(env.db, {
+    userId,
+    deckId,
+    providerId,
+    ability: 'wizardSlide',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    latencyMs: 0,
+    ok: true,
+  })
 }
 
 /** Generates the deck from the outline. The deck exists already (created by the web app); slides land in it live. */
@@ -210,13 +254,8 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
   try {
     const brief = WizardBrief.parse(run.brief)
     const outline = Outline.parse(run.outline)
-    const resolved = await env.resolveProvider(run.userId, run.providerId)
-    const ready = (await listWizardSources(env.db, runId)).filter((s) => s.status === 'ready')
-    const refs = ready.map((s, i) => ({ number: i + 1, sourceId: s.id, title: s.title, origin: s.url ?? s.fileName ?? 'web search' }))
-    const numberOf = new Map(refs.map((r) => [r.sourceId, r.number]))
-    const ingested = new Map(ready.map((s) => [s.id, s.extracted as unknown as IngestedSource]))
-    const sourceChunks = chunksOf(ready.map((s) => ({ id: s.id, ingested: ingested.get(s.id)! })))
-    const tables = refs.flatMap((r) => (ingested.get(r.sourceId)?.tables ?? []).map((table, tableIndex) => ({ number: r.number, sourceId: r.sourceId, tableIndex, table })))
+    const ctx = await loadRunContext(env, run, brief, outline)
+    const { resolved, refs } = ctx
 
     const warnings: string[] = []
     let deck = await env.collab.getDeck(deckId)
@@ -247,24 +286,19 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
     }
 
     const total = outline.slides.length + (brief.includeSources && refs.length ? 1 : 0)
-    if (!(await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { total, progress: 0, error: null }))) return
+    if (!(await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { total, progress: 0, error: null, failedSlides: [] }))) return
 
     let defaultsDeleted = false
     let written = 0
+    const failed: FailedSlide[] = []
     // Chart data already on the deck: the same chart is not placed on a second slide.
     const placedCharts = new Set<string>()
     for (let i = 0; i < outline.slides.length; i++) {
       if (await isCancelled(env.db, runId)) break
       const slide = outline.slides[i]!
-      const relevant = relevantChunks([slide.title, ...slide.keyPoints].join(' '), sourceChunks, 6)
-      const slideTables = (slide.sourceIds.length ? tables.filter((t) => slide.sourceIds.includes(t.sourceId)) : tables).slice(0, 5)
-      const context: SlideContext = {
-        refs: refs.map((r) => ({ number: r.number, sourceId: r.sourceId, title: r.title, origin: r.origin })),
-        chunks: relevant.map((c) => ({ number: numberOf.get(c.sourceId) ?? 0, text: c.text })).filter((c) => c.number > 0),
-        tables: slideTables.map((t) => ({ number: t.number, sourceId: t.sourceId, tableIndex: t.tableIndex, name: t.table.name, columns: t.table.columns, rows: t.table.rows })),
-      }
       let ops: Op[]
       let slideChartKey: string | undefined
+      let placeholderId: string | null = null
       try {
         deck = await env.collab.getDeck(deckId)
         const result = await writeWizardSlide({ provider: resolved.provider, compact: resolved.compact }, {
@@ -272,7 +306,7 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
           outline,
           slideIndex: i,
           slide,
-          context,
+          context: contextFor(ctx, slide),
           theme,
           deck,
           placedCharts,
@@ -280,20 +314,13 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
         ops = result.ops
         slideChartKey = result.chartKey
         warnings.push(...result.warnings)
-        await recordLlmUsage(env.db, {
-          userId: run.userId,
-          deckId,
-          providerId: resolved.providerId,
-          ability: 'wizardSlide',
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-          latencyMs: 0,
-          ok: true,
-        })
+        await recordSlideUsage(env, run.userId, deckId, resolved.providerId, result.usage)
       } catch (err) {
         env.logger.warn(`[wizard] slide ${i + 1} of run ${runId} failed: ${messageOf(err)}`)
         warnings.push(`Slide ${i + 1} could not be written: ${messageOf(err)}`)
-        ops = placeholderOps(deck, slide, theme, i).ops
+        const placeholder = placeholderSlide({ slideIndex: i, title: slide.title, bullets: slide.keyPoints, theme, language: brief.language })
+        ops = [placeholder.op]
+        placeholderId = placeholder.slideId
       }
       const cleanup: Op[] = !defaultsDeleted ? initialSlides.map((slideId) => ({ op: 'deleteSlide', slideId }) as Op) : []
       const batch = [...pending.splice(0), ...ops, ...cleanup]
@@ -304,12 +331,14 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
         // A batch that the collab service refuses is replaced by the placeholder, so the run goes on.
         env.logger.warn(`[wizard] slide ${i + 1} of run ${runId} was refused: ${messageOf(err)}`)
         warnings.push(`Slide ${i + 1} was refused by the editor and replaced by its outline points.`)
-        const fallback = placeholderOps(deck, slide, theme, i).ops
-        await env.collab.applyOps(deckId, 'wizard', [...fallback, ...cleanup])
+        const fallback = placeholderSlide({ slideIndex: i, title: slide.title, bullets: slide.keyPoints, theme, language: brief.language })
+        placeholderId = fallback.slideId
+        await env.collab.applyOps(deckId, 'wizard', [fallback.op, ...cleanup])
       }
+      if (placeholderId) failed.push({ slideId: placeholderId, number: i + 1 })
       if (cleanup.length) defaultsDeleted = true
       written++
-      await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { progress: written })
+      await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { progress: written, failedSlides: failed })
     }
 
     if (await isCancelled(env.db, runId)) {
@@ -323,17 +352,94 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
       await env.collab.applyOps(deckId, 'wizard', [...sourceOps, ...cleanup])
       if (cleanup.length) defaultsDeleted = true
       written++
-      await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { progress: written })
+      await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { progress: written, failedSlides: failed })
     }
 
     if (!defaultsDeleted && initialSlides.length) {
       await env.collab.applyOps(deckId, 'wizard', initialSlides.map((slideId) => ({ op: 'deleteSlide', slideId }) as Op))
     }
-    const done = await setWizardStatusUnlessCancelled(env.db, runId, 'done', { progress: written, error: warnings.length ? warnings.slice(0, 5).join(' ') : null })
-    env.logger.info(`[wizard] run ${runId} ${done ? 'done' : 'not updated'}: ${written} of ${total} written, ${warnings.length} warnings`)
+    const done = await setWizardStatusUnlessCancelled(env.db, runId, 'done', {
+      progress: written,
+      failedSlides: failed,
+      error: warnings.length ? warnings.slice(0, 5).join(' ') : null,
+    })
+    env.logger.info(`[wizard] run ${runId} ${done ? 'done' : 'not updated'}: ${written} of ${total} written, ${failed.length} placeholder(s), ${warnings.length} warnings`)
   } catch (err) {
     env.logger.error(`[wizard] run ${runId} failed: ${messageOf(err)}`)
     await setWizardStatusUnlessCancelled(env.db, runId, 'failed', { error: messageOf(err) })
+  }
+}
+
+/**
+ * Writes the run's placeholder slides again, in place: each old placeholder is deleted and its new slide is added at
+ * the same index. Slides that still fail stay placeholders. The web app sets the run to `generating` before queuing
+ * this job; the run ends `done` with the slides that are still placeholders.
+ */
+export async function runRetry(env: WizardEnv, runId: string): Promise<void> {
+  const run = await getWizardRun(env.db, runId)
+  if (!run || run.status !== 'generating' || !run.deckId || !run.outline) return
+  const deckId = run.deckId
+  const queue = [...run.failedSlides].sort((a, b) => a.number - b.number)
+  const warnings: string[] = []
+  const remaining: FailedSlide[] = []
+  let next = 0
+  let written = 0
+  try {
+    const brief = WizardBrief.parse(run.brief)
+    const outline = Outline.parse(run.outline)
+    const ctx = await loadRunContext(env, run, brief, outline)
+    for (; next < queue.length; next++) {
+      const f = queue[next]!
+      if (await isCancelled(env.db, runId)) break
+      const deck = await env.collab.getDeck(deckId)
+      const position = deck.slides.findIndex((s) => s.id === f.slideId)
+      const slide = outline.slides[f.number - 1]
+      if (position < 0 || !slide) {
+        // The user deleted the placeholder: nothing to replace.
+        warnings.push(`Slide ${f.number} is no longer in the deck, so it was not written again.`)
+        written++
+        continue
+      }
+      try {
+        const result = await writeWizardSlide({ provider: ctx.resolved.provider, compact: ctx.resolved.compact }, {
+          brief,
+          outline,
+          slideIndex: f.number - 1,
+          slide,
+          context: contextFor(ctx, slide),
+          theme: deck.theme as Theme,
+          deck,
+          placedCharts: chartKeysOf(deck),
+        })
+        const [add] = result.ops
+        if (result.ops.length !== 1 || !add || add.op !== 'addSlide') throw new Error('the reply did not make a slide')
+        await env.collab.applyOps(deckId, 'wizard', replaceSlideOps(position, f.slideId, add))
+        await recordSlideUsage(env, run.userId, deckId, ctx.resolved.providerId, result.usage)
+        warnings.push(...result.warnings)
+      } catch (err) {
+        env.logger.warn(`[wizard] retry of slide ${f.number} in run ${runId} failed: ${messageOf(err)}`)
+        warnings.push(`Slide ${f.number} could not be written again: ${messageOf(err)}`)
+        remaining.push(f)
+      }
+      written++
+      await setWizardStatusUnlessCancelled(env.db, runId, 'generating', { progress: written })
+    }
+    if (await isCancelled(env.db, runId)) return
+    const untried = queue.slice(next)
+    const done = await setWizardStatusUnlessCancelled(env.db, runId, 'done', {
+      progress: written,
+      failedSlides: [...remaining, ...untried],
+      error: warnings.length ? warnings.slice(0, 5).join(' ') : null,
+    })
+    env.logger.info(`[wizard] retry of run ${runId} ${done ? 'done' : 'not updated'}: ${queue.length - remaining.length - untried.length} written, ${remaining.length + untried.length} still placeholders`)
+  } catch (err) {
+    // The placeholders stay as they were, and the run can be retried again.
+    env.logger.error(`[wizard] retry of run ${runId} failed: ${messageOf(err)}`)
+    await setWizardStatusUnlessCancelled(env.db, runId, 'done', {
+      progress: written,
+      failedSlides: [...remaining, ...queue.slice(next)],
+      error: `The retry failed: ${messageOf(err)}`,
+    })
   }
 }
 
