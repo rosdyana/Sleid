@@ -5,12 +5,13 @@ import * as Y from 'yjs'
 import { deckToYDoc, type Deck } from '@sleid/model'
 import type { Db } from './client.ts'
 import { insertAsset } from './assets.ts'
+import { bytesMatchMime } from './image-bytes.ts'
 import { decks, deckMembers, deckSnapshots } from './schema/index.ts'
 
 /** Largest image kept from an import, the same as the editor's image upload. */
 export const IMPORT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
-const DATA_URL = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/
+const DATA_URL = /^data:(image\/(?:png|jpeg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=]+)$/
 
 export interface CreateImportedDeckInput {
   userId: string
@@ -27,8 +28,12 @@ export interface CreatedImportedDeck {
   droppedImages: number
 }
 
-/** Moves each data-URL image into the asset store and points the deck at the asset. */
-async function moveImages(deck: Deck, deckId: string, userId: string, storeAsset: CreateImportedDeckInput['storeAsset']) {
+/**
+ * Moves each data-URL image into the asset store and points the deck at the asset. An image is dropped (and counted)
+ * when it is empty, over IMPORT_IMAGE_MAX_BYTES, or its bytes do not match its declared type (bytesMatchMime; an SVG
+ * with script is dropped this way). Everything else is kept as it is.
+ */
+export async function storeDataImages(deck: Deck, deckId: string, userId: string, storeAsset: CreateImportedDeckInput['storeAsset']) {
   const rows: Array<{ id: string; deckId: string; ownerId: string; mime: string; bytes: number; sha256: string }> = []
   let dropped = 0
   const keep = async (src: string): Promise<string | null> => {
@@ -36,6 +41,7 @@ async function moveImages(deck: Deck, deckId: string, userId: string, storeAsset
     if (!m) return null
     const bytes = Buffer.from(m[2]!, 'base64')
     if (bytes.byteLength === 0 || bytes.byteLength > IMPORT_IMAGE_MAX_BYTES) return null
+    if (!bytesMatchMime(m[1]!, bytes)) return null
     const id = randomUUID()
     await storeAsset(id, bytes, m[1]!)
     rows.push({ id, deckId, ownerId: userId, mime: m[1]!, bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') })
@@ -78,7 +84,7 @@ export async function createImportedDeck(db: Db, input: CreateImportedDeckInput)
     stored.push(id)
   }
   try {
-    const moved = await moveImages(input.deck, deckId, input.userId, storeTracked)
+    const moved = await storeDataImages(input.deck, deckId, input.userId, storeTracked)
     const deck: Deck = { ...input.deck, id: deckId, title, slides: moved.slides as Deck['slides'] }
     const state = Y.encodeStateAsUpdate(deckToYDoc(deck))
     await db.transaction(async (tx) => {

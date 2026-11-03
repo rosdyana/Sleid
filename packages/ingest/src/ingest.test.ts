@@ -9,7 +9,7 @@ import { htmlToText, cleanText, stripMarkup } from './sanitize.ts'
 import { chunkText } from './chunk.ts'
 import { rankBm25 } from './bm25.ts'
 import { buildIngested, chunksOf, relevantChunks } from './source.ts'
-import { fetchPublicUrl, extractUrl, PUBLIC_URL_POLICY } from './url.ts'
+import { fetchPublicUrl, fetchPublicImage, extractUrl, PUBLIC_URL_POLICY } from './url.ts'
 import { IngestError, LIMITS } from './limits.ts'
 
 const enc = (s: string) => new TextEncoder().encode(s)
@@ -252,5 +252,73 @@ describe('URL fetch', () => {
 
   it('the production policy refuses private names', () => {
     expect(PUBLIC_URL_POLICY.allowPrivate).toBe(false)
+  })
+})
+
+describe('image fetch', () => {
+  const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
+  const JPEG_HEADER = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9])
+  let server: Server
+  let base = ''
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      if (req.url === '/logo.png') {
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(PNG_1X1.byteLength) })
+        return res.end(PNG_1X1)
+      }
+      if (req.url === '/page-as-image') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        return res.end('<html><body>not an image</body></html>')
+      }
+      if (req.url === '/png-named-jpeg') {
+        res.writeHead(200, { 'content-type': 'image/png' })
+        return res.end(JPEG_HEADER)
+      }
+      if (req.url === '/big-png') {
+        // A PNG signature followed by padding, larger than the 1 KB cap used below.
+        const body = Buffer.concat([PNG_1X1, Buffer.alloc(4096, 0x20)])
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': String(body.byteLength) })
+        return res.end(body)
+      }
+      if (req.url === '/redirect-logo') {
+        res.writeHead(302, { location: '/logo.png' })
+        return res.end()
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+  afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())))
+
+  const testPolicy = { allowPrivate: true }
+
+  it('fetches a PNG and returns its type and bytes', async () => {
+    const image = await fetchPublicImage(`${base}/logo.png`, { policy: testPolicy })
+    expect(image.mime).toBe('image/png')
+    expect(image.url).toBe(`${base}/logo.png`)
+    expect(Buffer.from(image.body).equals(PNG_1X1)).toBe(true)
+  })
+
+  it('follows a redirect to the image, and checks it again', async () => {
+    const image = await fetchPublicImage(`${base}/redirect-logo`, { policy: testPolicy })
+    expect(image.url).toBe(`${base}/logo.png`)
+  })
+
+  it('refuses text/html', async () => {
+    await expect(fetchPublicImage(`${base}/page-as-image`, { policy: testPolicy })).rejects.toMatchObject({ code: 'unsupported' })
+  })
+
+  it('refuses a PNG content type whose bytes are a JPEG', async () => {
+    await expect(fetchPublicImage(`${base}/png-named-jpeg`, { policy: testPolicy })).rejects.toThrow(/does not match its declared type \(image\/png\)/)
+  })
+
+  it('refuses an image over the size cap', async () => {
+    await expect(fetchPublicImage(`${base}/big-png`, { policy: testPolicy, maxBytes: 1024 })).rejects.toMatchObject({ code: 'too-large' })
+  })
+
+  it('refuses loopback with the production policy (SSRF)', async () => {
+    await expect(fetchPublicImage(`${base}/logo.png`)).rejects.toMatchObject({ code: 'blocked' })
   })
 })

@@ -62,50 +62,6 @@ export const RichTextSchema = z.looseObject({
 export type RichText = z.infer<typeof RichTextSchema>
 
 // ---------------------------------------------------------------------------
-// Theme
-// ---------------------------------------------------------------------------
-
-/** One Google Fonts css2 `family` value: a family name, optionally with an axis list. */
-export const FONT_IMPORT_RE = /^[A-Za-z0-9 ]{1,60}(:[A-Za-z0-9,;@.]{1,80})?$/
-
-export const ThemeSchema = z.object({
-  name: z.string(),
-  colors: z.object({
-    background: z.string(),
-    surface: z.string(),
-    text: z.string(),
-    muted: z.string(),
-    accent: z.string(),
-    accent2: z.string(),
-    accent3: z.string(),
-    accent4: z.string(),
-  }),
-  fonts: z.object({
-    heading: z.string(),
-    body: z.string(),
-    mono: z.string(),
-  }),
-  sizes: z.object({
-    title: z.number().positive(),
-    heading: z.number().positive(),
-    body: z.number().positive(),
-    small: z.number().positive(),
-  }),
-  radius: z.number().min(0),
-  backgroundStyle: z.enum(['solid', 'gradient', 'image']),
-  backgroundValue: z.string().optional(),
-  /**
-   * M10. Google Fonts css2 `family` values, e.g. `Inter:wght@400;600;700`. The render adds one stylesheet link.
-   * The pattern keeps the value to family names plus an axis list, so it cannot carry a URL or markup.
-   */
-  fontImports: z
-    .array(z.string().regex(FONT_IMPORT_RE))
-    .max(6)
-    .optional(),
-})
-export type Theme = z.infer<typeof ThemeSchema>
-
-// ---------------------------------------------------------------------------
 // Elements
 // ---------------------------------------------------------------------------
 
@@ -144,6 +100,8 @@ export const TextStyleSchema = z.object({
   /** In em, so it scales with fontSize. */
   letterSpacing: z.number().min(-0.5).max(2).optional(),
   textTransform: z.enum(['none', 'uppercase', 'lowercase', 'capitalize']).optional(),
+  /** M11. Shrink the text to fit its box, grow the box to fit the text, or do neither. */
+  autoFit: z.enum(['shrink', 'grow-box', 'none']).optional(),
 })
 
 // M10. Shared by shapes, images and text. Canvas pixels for offsets and blur.
@@ -217,6 +175,14 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
     alt: z.string().optional(),
     /** M10. Reveal auto-animate match key. Two elements with the same key animate between slides. */
     animateKey: z.string().regex(ANIMATE_KEY_RE).optional(),
+    /** M11. The component this element is a part of (for example a card's title). Set by the assistant and by templates. */
+    component: z
+      .object({
+        kind: z.string().min(1).max(40),
+        instance: z.string().min(1).max(64),
+        part: z.string().min(1).max(40),
+      })
+      .optional(),
   }
   return z.discriminatedUnion('type', [
     z.object({
@@ -317,6 +283,154 @@ export type ChartData = z.infer<typeof ChartDataSchema>
 export type ChartOptions = z.infer<typeof ChartOptionsSchema>
 
 // ---------------------------------------------------------------------------
+// Theme. Declared after the element schemas, because the component tokens use
+// ShadowSchema, TextStyleSchema and ANIMATION_EFFECTS.
+// ---------------------------------------------------------------------------
+
+/** One Google Fonts css2 `family` value: a family name, optionally with an axis list. */
+export const FONT_IMPORT_RE = /^[A-Za-z0-9 ]{1,60}(:[A-Za-z0-9,;@.]{1,80})?$/
+
+/** M11. The background of a dark slide: a solid colour or a CSS gradient string. */
+export const DarkBackgroundSchema = z.object({
+  type: z.enum(['color', 'gradient']),
+  value: z.string(),
+})
+
+/** M11. Colours a slide uses when its variant is 'dark'. */
+export const DarkVariantSchema = z.object({
+  background: DarkBackgroundSchema,
+  text: z.string(),
+  muted: z.string(),
+  accent: z.string(),
+  surface: z.string(),
+  stroke: z.string(),
+})
+export type DarkVariant = z.infer<typeof DarkVariantSchema>
+
+const BoxSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  w: z.number().min(0),
+  h: z.number().min(0),
+})
+
+/** M11. Deck chrome: logos, footer text and page numbers that the theme places on every slide. */
+export const ComponentChromeSchema = z.object({
+  logoLight: z.string().optional(),
+  logoDark: z.string().optional(),
+  logoBox: BoxSchema.optional(),
+  footerText: z.string().optional(),
+  footerBox: BoxSchema.optional(),
+  footerStyle: TextStyleSchema.partial().optional(),
+  pageNumbers: z.boolean().optional(),
+})
+
+/**
+ * M11. Component tokens: the look of the common building blocks (labels, headings, cards, icon tiles, spacing, motion).
+ * Every field is optional. resolveTokens (tokens.ts) fills the missing ones from the theme.
+ */
+export const ComponentTokensSchema = z.object({
+  label: z
+    .object({
+      size: z.number().positive().optional(),
+      weight: z.number().int().min(100).max(900).optional(),
+      letterSpacing: z.number().min(-0.5).max(2).optional(),
+      textTransform: z.enum(['none', 'uppercase', 'lowercase', 'capitalize']).optional(),
+      color: z.string().optional(),
+    })
+    .optional(),
+  heading: z
+    .object({
+      size: z.number().positive().optional(),
+      weight: z.number().int().min(100).max(900).optional(),
+      letterSpacing: z.number().min(-0.5).max(2).optional(),
+      lineHeight: z.number().positive().optional(),
+    })
+    .optional(),
+  subtitle: z
+    .object({
+      size: z.number().positive().optional(),
+      weight: z.number().int().min(100).max(900).optional(),
+      color: z.string().optional(),
+    })
+    .optional(),
+  body: z
+    .object({
+      size: z.number().positive().optional(),
+      lineHeight: z.number().positive().optional(),
+    })
+    .optional(),
+  small: z.object({ size: z.number().positive().optional() }).optional(),
+  card: z
+    .object({
+      fill: z.string().optional(),
+      stroke: z.string().optional(),
+      strokeWidth: z.number().min(0).optional(),
+      radius: z.number().min(0).optional(),
+      shadow: ShadowSchema.optional(),
+    })
+    .optional(),
+  /** How much the accent is mixed into the surface for icon tiles. 0 is no tint, 1 is the accent. */
+  tileTint: z.number().min(0).max(1).optional(),
+  margin: z
+    .object({
+      x: z.number().min(0).optional(),
+      y: z.number().min(0).optional(),
+    })
+    .optional(),
+  gap: z.number().min(0).optional(),
+  motion: z
+    .object({
+      effect: z.enum(ANIMATION_EFFECTS).optional(),
+      stagger: z.boolean().optional(),
+    })
+    .optional(),
+  chrome: ComponentChromeSchema.optional(),
+})
+export type ComponentTokens = z.infer<typeof ComponentTokensSchema>
+
+export const ThemeSchema = z.object({
+  name: z.string(),
+  colors: z.object({
+    background: z.string(),
+    surface: z.string(),
+    text: z.string(),
+    muted: z.string(),
+    accent: z.string(),
+    accent2: z.string(),
+    accent3: z.string(),
+    accent4: z.string(),
+  }),
+  fonts: z.object({
+    heading: z.string(),
+    body: z.string(),
+    mono: z.string(),
+  }),
+  sizes: z.object({
+    title: z.number().positive(),
+    heading: z.number().positive(),
+    body: z.number().positive(),
+    small: z.number().positive(),
+  }),
+  radius: z.number().min(0),
+  backgroundStyle: z.enum(['solid', 'gradient', 'image']),
+  backgroundValue: z.string().optional(),
+  /**
+   * M10. Google Fonts css2 `family` values, e.g. `Inter:wght@400;600;700`. The render adds one stylesheet link.
+   * The pattern keeps the value to family names plus an axis list, so it cannot carry a URL or markup.
+   */
+  fontImports: z
+    .array(z.string().regex(FONT_IMPORT_RE))
+    .max(6)
+    .optional(),
+  /** M11. Colours for slides with variant 'dark'. Absent, the dark variant is derived from the theme (tokens.ts). */
+  dark: DarkVariantSchema.optional(),
+  /** M11. Component tokens. Absent, every token comes from the theme's own sizes and colours. */
+  components: ComponentTokensSchema.optional(),
+})
+export type Theme = z.infer<typeof ThemeSchema>
+
+// ---------------------------------------------------------------------------
 // Slides, sections, deck
 // ---------------------------------------------------------------------------
 
@@ -337,6 +451,8 @@ export const SlideMetaSchema = z.object({
   transition: z.enum(TRANSITIONS),
   autoAnimate: z.boolean(),
   hidden: z.boolean(),
+  /** M11. 'dark' slides use the theme's dark variant. Absent means light. */
+  variant: z.enum(['light', 'dark']).optional(),
 })
 
 export const SlideSchema = SlideMetaSchema.extend({
@@ -396,6 +512,9 @@ export const BrandRefSchema = z.object({
 })
 export type BrandRef = z.infer<typeof BrandRefSchema>
 
+/** M11. A BCP 47 style tag: a 2 or 3 letter language, then optional subtags. */
+export const LANGUAGE_TAG_RE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/
+
 export const DeckSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -406,6 +525,8 @@ export const DeckSchema = z.object({
   version: z.literal(1),
   /** Set when a brand kit is applied. Absent for a deck without a kit. */
   brand: BrandRefSchema.optional(),
+  /** M11. A second language for the deck (for example 'id' for a bilingual talk). Absent when the deck has one language. */
+  secondaryLanguage: z.string().regex(LANGUAGE_TAG_RE).optional(),
 })
 export type Deck = z.infer<typeof DeckSchema>
 

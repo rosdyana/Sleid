@@ -11,11 +11,32 @@ export interface AssetRow {
   sha256: string
   /** Set when the deck is published (anonymous readers may fetch the asset). */
   publishedToken: string | null
+  /** Pixel size when known (M11). */
+  width: number | null
+  height: number | null
+}
+
+/** The images stored on one deck, oldest first (M11 MCP tools). The caller must have checked the deck. */
+export async function listDeckAssets(db: Db, deckId: string): Promise<Array<{ id: string; mime: string; bytes: number; width: number | null; height: number | null }>> {
+  return db
+    .select({ id: assets.id, mime: assets.mime, bytes: assets.bytes, width: assets.width, height: assets.height })
+    .from(assets)
+    .where(eq(assets.deckId, deckId))
+    .orderBy(assets.id)
 }
 
 export async function insertAsset(
   db: Db,
-  input: { id: string; deckId: string; ownerId: string; mime: string; bytes: number; sha256: string },
+  input: {
+    id: string
+    deckId: string
+    ownerId: string
+    mime: string
+    bytes: number
+    sha256: string
+    width?: number | null
+    height?: number | null
+  },
 ): Promise<void> {
   await db.insert(assets).values(input)
 }
@@ -31,6 +52,8 @@ export async function getAssetWithDeck(db: Db, assetId: string): Promise<AssetRo
       bytes: assets.bytes,
       sha256: assets.sha256,
       publishedToken: decks.publishedToken,
+      width: assets.width,
+      height: assets.height,
     })
     .from(assets)
     .innerJoin(decks, eq(decks.id, assets.deckId))

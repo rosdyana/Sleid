@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fullDeck } from './fixtures.ts'
-import { DeckImportError, jsonToDeck } from './import-json.ts'
+import { DeckImportError, jsonToDeck, normalizeDeckJson, validateDeckJson } from './import-json.ts'
 import { DeckSchema, type Deck } from './schema.ts'
 
 describe('jsonToDeck', () => {
@@ -93,5 +93,82 @@ describe('jsonToDeck: animateKey (M10)', () => {
     const [source, copy] = out.slides[0]!.elements
     expect(source!.animateKey).toBe('own-key')
     expect(copy!.animateKey).toBe('old-a')
+  })
+})
+
+describe('jsonToDeck: forgiving import (M11)', () => {
+  it('imports a deck JSON without id or version', () => {
+    const { id: _id, version: _version, ...rest } = JSON.parse(JSON.stringify(fullDeck())) as Record<string, unknown>
+    const out = jsonToDeck(JSON.stringify(rest))
+    expect(DeckSchema.safeParse(out).success).toBe(true)
+    expect(out.slides).toHaveLength(fullDeck().slides.length)
+  })
+
+  it('fills the deck-level defaults for a minimal deck', () => {
+    const out = jsonToDeck(JSON.stringify({ slides: [] }))
+    expect(out.title).toBe('Untitled deck')
+    expect(out.theme.name).toBe('Sheets Light')
+    expect(out.sections).toEqual([])
+    expect(out.size).toEqual({ w: 1920, h: 1080 })
+  })
+
+  it('lists each failing path in the import error', () => {
+    const deck = fullDeck()
+    const broken = { ...deck, slides: [{ ...deck.slides[0]!, elements: [{ type: 'text', id: 'x' }] }] }
+    expect(() => jsonToDeck(JSON.stringify(broken))).toThrow(/slides\[0\]\.elements\[0\]\.x: /)
+  })
+})
+
+describe('normalizeDeckJson (M11)', () => {
+  it('fills the per-slide and per-element defaults, and keeps every value that is present', () => {
+    const raw = {
+      slides: [
+        {
+          id: 's',
+          elements: [
+            { id: 't', type: 'text', x: 0, y: 0, w: 10, h: 10, content: { type: 'doc' }, style: { fontSize: 40, align: 'center' } },
+            { id: 'r', type: 'shape', shape: 'rect', x: 0, y: 0, w: 10, h: 10, fill: '#000000', z: 7, rotation: 45 },
+            { id: 'i', type: 'image', x: 0, y: 0, w: 10, h: 10, src: 'a.png' },
+          ],
+        },
+      ],
+    }
+    const out = normalizeDeckJson(raw) as { slides: Array<{ id: string; elements: Array<Record<string, unknown>>; notes: unknown }> }
+    const [t, r, i] = out.slides[0]!.elements
+    expect(out.slides[0]).toMatchObject({ id: 's', layout: 'blank', notes: '', transition: 'none', autoAnimate: false, hidden: false })
+    expect(t!.style).toEqual({ fontSize: 40, align: 'center', valign: 'top' })
+    expect(r).toMatchObject({ stroke: 'transparent', strokeWidth: 0, z: 7, rotation: 45, locked: false, opacity: 1 })
+    expect(i).toMatchObject({ fit: 'contain' })
+  })
+
+  it('does not change a value that is present', () => {
+    const raw = { title: 'Mine', version: 1, slides: [] }
+    expect(normalizeDeckJson(raw)).toMatchObject({ title: 'Mine', version: 1 })
+  })
+})
+
+describe('validateDeckJson (M11)', () => {
+  it('passes a valid deck with no issues', () => {
+    expect(validateDeckJson(JSON.stringify(fullDeck()))).toEqual({ ok: true, issues: [] })
+  })
+
+  it('reports two separate errors in one call, each with its path', () => {
+    const deck = JSON.parse(JSON.stringify(fullDeck())) as { slides: Array<{ elements: Array<{ style?: Record<string, unknown> }> }> }
+    deck.slides[0]!.elements[0]!.style!.align = 'middle'
+    deck.slides[1]!.elements[0]!.style!.valign = 'center'
+    const result = validateDeckJson(JSON.stringify(deck))
+    expect(result.ok).toBe(false)
+    const paths = result.issues.map((issue) => issue.path)
+    expect(paths).toContain('slides[0].elements[0].style.align')
+    expect(paths).toContain('slides[1].elements[0].style.valign')
+    expect(result.issues.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('reports text that is not JSON as one issue with an empty path', () => {
+    const result = validateDeckJson('not json at all')
+    expect(result.ok).toBe(false)
+    expect(result.issues).toHaveLength(1)
+    expect(result.issues[0]).toMatchObject({ path: '' })
+    expect(result.issues[0]!.message).toMatch(/not valid JSON/)
   })
 })

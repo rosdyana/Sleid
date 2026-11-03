@@ -8,8 +8,32 @@ describe('StartExportSchema', () => {
     const pdf = StartExportSchema.parse({ deckId, format: 'pdf' })
     expect(pdf.options).toEqual({ includeNotes: false, includeHidden: false })
     const png = StartExportSchema.parse({ deckId, format: 'png' })
-    expect(png.options).toEqual({ scale: 1, includeHidden: false })
+    expect(png.options).toEqual({ scale: 1, includeHidden: false, contactSheet: false, columns: 4 })
     expect(StartExportSchema.parse({ deckId, format: 'pptx' }).options).toEqual({})
+  })
+
+  it('accepts slideIds and contactSheet for png and jpg, with columns between 1 and 8', () => {
+    const ids = StartExportSchema.parse({ deckId, format: 'jpg', options: { slideIds: ['a', 'b'] } })
+    expect(ids.options).toMatchObject({ slideIds: ['a', 'b'], contactSheet: false, columns: 4 })
+    const sheet = StartExportSchema.parse({ deckId, format: 'png', options: { contactSheet: true, columns: 8 } })
+    expect(sheet.options).toMatchObject({ contactSheet: true, columns: 8 })
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { columns: 0 } })).toThrow()
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { columns: 9 } })).toThrow()
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { columns: 2.5 } })).toThrow()
+  })
+
+  it('bounds slideIds to 1 to 40 entries of 1 to 100 characters', () => {
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { slideIds: [] } })).toThrow()
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { slideIds: [''] } })).toThrow()
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { slideIds: ['x'.repeat(101)] } })).toThrow()
+    expect(() => StartExportSchema.parse({ deckId, format: 'png', options: { slideIds: Array.from({ length: 41 }, (_, i) => `s${i}`) } })).toThrow()
+    expect(StartExportSchema.parse({ deckId, format: 'png', options: { slideIds: Array.from({ length: 40 }, (_, i) => `s${i}`) } }).options).toBeDefined()
+  })
+
+  it('refuses slideId and slideIds together, with a message that says so', () => {
+    const attempt = () => StartExportSchema.parse({ deckId, format: 'png', options: { slideId: 'a', slideIds: ['b'] } })
+    expect(attempt).toThrow(/Use either slideId or slideIds, not both/)
+    expect(() => StartExportSchema.parse({ deckId, format: 'jpg', options: { slideId: 'a' } })).not.toThrow()
   })
 
   it('rejects an unknown format, a bad scale, a bad deck id and options that belong to another format', () => {

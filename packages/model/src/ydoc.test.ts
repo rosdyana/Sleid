@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { createDeck, DeckSchema, deckToYDoc, getDeckMap, yDocToDeck, type Deck, type Element } from './index.ts'
+import { BUILT_IN_THEMES, createDeck, DeckSchema, deckToYDoc, getDeckMap, yDocToDeck, type Deck, type Element } from './index.ts'
 import { fullDeck } from './fixtures.ts'
 
 describe('yjs binding', () => {
@@ -159,5 +159,31 @@ describe('yjs binding: M10 fields', () => {
     const shape = elements.toArray().find((m) => m.get('id') === 'm10-shape')
     expect(shape?.get('gradient')).toBeInstanceOf(Y.Map)
     expect(Array.isArray((shape?.get('gradient') as Y.Map<unknown>).get('stops'))).toBe(true)
+  })
+})
+
+describe('yjs binding: M11 fields', () => {
+  it('round-trips the deck secondaryLanguage through the Y.Doc', () => {
+    const deck = { ...createDeck('Bilingual'), secondaryLanguage: 'id-ID' }
+    const doc = deckToYDoc(deck)
+    expect(getDeckMap(doc).get('secondaryLanguage')).toBe('id-ID')
+    expect(yDocToDeck(doc)).toEqual(deck)
+  })
+
+  it('round-trips a slide variant, an element component and a text autoFit', () => {
+    const deck = createDeck('M11')
+    deck.slides[0] = { ...deck.slides[0]!, variant: 'dark' }
+    const el = deck.slides[0]!.elements[0] as Extract<Element, { type: 'text' }>
+    deck.slides[0]!.elements[0] = {
+      ...el,
+      component: { kind: 'card', instance: 'c1', part: 'title' },
+      style: { ...el.style, autoFit: 'shrink' },
+    }
+    expect(yDocToDeck(deckToYDoc(deck))).toEqual(deck)
+  })
+
+  it('round-trips a built-in theme with a dark variant and component tokens', () => {
+    const deck: Deck = { ...createDeck('Theme'), theme: BUILT_IN_THEMES.find((t) => t.name === 'Paper Navy')! }
+    expect(yDocToDeck(deckToYDoc(deck))).toEqual(deck)
   })
 })

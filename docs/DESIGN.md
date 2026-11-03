@@ -18,6 +18,7 @@ Living document. Update it as decisions change.
 | 8. Import: PPTX, Google Slides, Markdown, JSON | **Done** (checks run, see M8 below; open items and unverified parts listed there. Real Google OAuth, Picker and Drive were not run.) |
 | 9. Templates and brand kits | **Done** (checks run, see M9 below; open items and known gaps listed there) |
 | 10. Fidelity: typography, shapes, vectors, animation | **Done** (typecheck, unit tests and build run, see M10 below; no browser check yet, and the open items are listed there) |
+| 11. Agent-grade MCP: components, styles from a reference deck, assets, lint, contact sheets | **Done** (checks run, see M11 below; open items listed there) |
 
 ### What M0 built, and decisions taken while building it
 
@@ -1427,3 +1428,169 @@ Scope: the deck schema gains text weight, letter spacing and case, text and box 
 - Settings pages and the wizard share `AppHeader`. The logo and the right-hand link both go back to the dashboard. The dashboard keeps its own header.
 - Delete forever also removes the deck's finished export files (export storage), not only its asset files. A deck that is not in Trash is refused with "This deck is not in Trash", and a non-owner with "Only the owner can delete this deck".
 - Checked in Chrome against a dev server with the test login: the card menu (Escape returns focus to its trigger), trash and Undo, File ▸ Move to trash… landing on the deck list with the Undo toast, the Trash tab, Restore with its Open toast, and the delete-forever dialog (Cancel focused first, Tab stays inside, Escape cancels and returns focus, Delete forever removes the row). The wizard header was checked at 390 px wide.
+
+## M11: Agent-grade MCP (components, reference styles, assets, lint, contact sheets)
+
+Why: an agent that built a product deck with Kompast (the 19-slide stakeholder deck from M10) as the quality bar could not get close with the old convenience tools. Matching it meant reading 180 KB of schema and placing about 40 elements per slide by pixel from a generator script. M11 lets an agent reach that look with high-level calls. Branch `m11-agent-mcp`.
+
+**Layout.**
+- `packages/model`:
+  - `tokens.ts`: `resolveTokens` and `deriveDarkVariant`.
+  - `recolor.ts`: colour maps between theme tokens.
+  - `schema.ts`, with new fields:
+    - theme `dark` and `components`, which includes `components.chrome`;
+    - slide `variant`;
+    - element `component {kind, instance, part}`;
+    - text `autoFit`;
+    - deck `secondaryLanguage`.
+  - `ops.ts`: the `setDeckOptions` op, and the recolouring described below.
+  - `import-json.ts`: `normalizeDeckJson`, `normalizeElementInput` and `validateDeckJson`.
+  - `defaults.ts`: the "Paper Navy" theme, and a dark variant for every built-in theme.
+- `packages/compose` (new, pure functions):
+  - `measure.ts` and `metrics.json`: server-side text measurement.
+  - `icons.ts`: Lucide icons by name, converted to vector paths.
+  - `regions.ts`.
+  - `components/*`: nine components.
+  - `lint.ts`.
+  - `style.ts`: `deriveStyle` and `themeFromStyle`.
+  - `demo.ts`.
+- `packages/db`:
+  - `user-assets.ts`: the per-user library, `storeDeckAsset` and `copyAssetToDeck`.
+  - `image-bytes.ts`: `bytesMatchMime`, moved here, and `imageSize`.
+  - `import-deck.ts`: `storeDataImages`, which now accepts SVG after a byte check.
+  - `export-spec.ts`: png gains `slideIds`, `contactSheet` and `columns`.
+  - Migration `0014`: `user_assets`, asset `width` and `height`, and the brand kit's dark logo and `footer_text`.
+- `packages/ingest`: `fetchPublicImage`, which goes through the same SSRF-safe redirect loop as `fetchPublicUrl`.
+- `packages/llm`: the `translate` ability.
+- `apps/worker/src/formats.ts`: multi-slide PNG exports and the contact sheet (a `sheet.html` grid of iframes, one screenshot).
+- `apps/web/src/lib/mcp/`: `server.ts` is split into the following.
+  - `call.ts`.
+  - `tools/{decks,slides,media,style,inspect,collab}.ts`.
+  - `compose-ops.ts`: components to ops, chrome and region stacking.
+  - `compact.ts`.
+  - `plan.ts`.
+  - `images.ts`.
+  - `resources.ts`.
+  - `prompts.ts`.
+  - `guide-elements.md`, plus a generated `.ts`.
+  - `test-harness.ts`.
+  - `mcp.agent-flow.integration.test.ts`.
+  - `fixtures/` holds a trimmed Kompast deck (598 KB) and 5 screenshots.
+- Brand kits: a dark-slide logo and footer text, in `brand-kits.server.ts`, `BrandKitForm.tsx` and `LogoField.tsx`.
+- `apps/collab/src/hooks.ts`: the store fix below.
+
+**The 14 reported problems, and what was done.**
+1. **`build_deck` prompt "did not exist".**
+   - The prompt was already registered in M5.
+   - A real Claude Code 2.1.316 session against this branch lists `mcp__sleid__build_deck` among its slash commands, with 41 Sleid tools.
+   - The cause on the user's side is unknown. The likely ones are an older deployed image, a different server name in `claude mcp add`, or a prompt list cached from an earlier connection.
+   - The prompt now takes `brief`, `audience`, `slide_count` and `reference_deck_id`, and keeps `topic` as an alias.
+   - `plan_deck` is the same thing as a tool, because tools show in every client. It is deterministic and makes no model call. It returns the slides, their components with placeholder props, and the exact call sequence.
+2. **Midnight title slide unreadable.**
+   - The root cause was not the theme. A new deck's title slide stores Sheets Light colours on its elements, and `setTheme` only changed the theme.
+   - Fix: `setTheme` and `setBrandKit` now recolour every element colour that equals an old theme token to the new token. This covers text style, marks, fills, strokes, gradient stops, vector paths, chart colours and table styles. Dark slides are recoloured through the dark variant.
+   - `contrast-matrix.test.ts` builds every built-in theme × layout × light/dark through the real op path and checks WCAG AA against the effective background, including the worst gradient stop.
+   - Side effect, and a decision: applying a brand kit now changes element colours that matched the old theme. The M9 "content unchanged" test now ignores colours.
+3. **two-column ignored the second column.** `add_slide` takes `columns: [left, right]`, or a `---` line in `body`.
+4. **Images.**
+   - `upload_asset` takes base64, up to 5 MB, to a deck or to the user's library, and returns `{assetId, width, height}`.
+   - `insert_image` with a URL fetches the image on the server: the SSRF policy, image types only, a magic-byte check, then a deck asset.
+   - `insert_image` with an asset id from the library, or from another deck the user can read, copies the bytes into this deck.
+   - JSON import turns `data:` images into assets, SVG included after the byte check.
+   - The cross-deck answer: `/api/assets/<id>` from another deck shows in the editor only for that deck's members, and is blank in exports (the worker draws only the deck's own assets). Copy it instead. This keeps the M9 rule that a deck depends only on its own assets.
+5. **JSON import errors.**
+   - System fields and element defaults are filled in.
+   - `validate_deck` returns every issue with its path, such as `slides[3].elements[2].style.align`.
+   - The `import_deck` description has a minimal example.
+6. **Reading overflowed the context.**
+   - `get_deck` gains `slideIds`, `range` and `format: "compact"`. Compact drops defaults, rounds numbers, writes rich text as markdown, and shares repeated `styles`, `paints` and `images` in tables.
+   - Kompast is 465 KB as JSON, about 95 KB compact, and about 15 KB for three slides.
+   - The planned 60 KB was not reached. The rest is one object per element (about 620 elements), so it would need a non-JSON format. The test pins the measured size plus 10%.
+   - `get_deck_style` returns the design system.
+7. **Schema too big.** `sleid://guide/elements` is 5.5 KB (a test keeps it under 8 KB). It has one worked example per element type, and the defaults that can be left out.
+8. **Overflow went unreported.**
+   - Server-side measurement (decision below).
+   - The `autoFit` modes `shrink`, `grow-box` and `none` are resolved at write time, so stored geometry is what renders.
+   - `lint_deck` reports overflow, overlap, off-slide, low contrast, missing alt, empty slides and missing translations (info), each with its slideId and elementId.
+9. **Too many render calls.** `render_deck` returns one contact sheet (a 4-column grid, 1920 px wide), or up to 10 slides at 0.5×.
+10. **Components.**
+    - `insert_component` and `add_slide({components})`, plus `update_component`. The nine components: `header`, `card_grid`, `browser_frame`, `timeline`, `comparison`, `numbered_cards`, `bullets_with_sublines`, `stat_row` and `footer_and_logo`.
+    - Each lays out from theme tokens. The sizes are ratios measured on Kompast, documented in `components/common.ts` `SCALE`.
+    - Each measures its text and staggers the theme's motion.
+    - Left and right regions stack separately, which gives the Kompast feature split.
+11. **Icons by name.** `insert_icon` and `list_icons` use Lucide (the `lucide` package). Circle, rect, line, polyline and polygon nodes are converted to paths that pass `VECTOR_PATH_D_RE`.
+12. **Reuse a reference deck's style.**
+    - `deriveStyle` finds the type scale, the dark variant (from gradient slides), the card styling, the margins, the motion, the slide archetypes, and the elements that recur on at least 60% of slides (logo and footer, with light and dark logo variants).
+    - `derive_theme_from_deck` can save the result as a brand kit with both logos and the footer.
+    - `apply_style_from_deck` sets the theme (which recolours), copies the logos into the target deck, sets `components.chrome`, and adds the chrome to existing slides. It takes a `footerText` override.
+    - Brand kits gained a dark-slide logo and footer text.
+13. **Dark slides.** `theme.dark` is a gradient plus text, muted, accent, surface and stroke colours. `updateSlide({variant})` and `addSlide` with a dark variant recolour the slide and set the background. Light to dark to light restores text and muted colours.
+14. **Two languages.**
+    - `set_deck_options({secondaryLanguage})`.
+    - Components render a `secondary` line under headings, card titles, bullets, numbered cards and timeline steps.
+    - `generate_with_ai` with `ability: "translate"` fills these lines. It returns `updateElement` ops for existing secondary lines only.
+
+**Decisions.**
+- **Text measurement.**
+  - Width tables were measured once in Chrome. There is one table per family (system UI, Arial, Helvetica Neue, Georgia, Times, Menlo, Courier), plus widest-of tables for unknown stacks.
+  - A font stack is measured as the widest of the families it names, plus a 1.5% margin. The browser takes the first installed family, and that differs by machine (SF on a Mac, Liberation Sans on the Linux worker), so text that fits here fits on every platform we know about.
+  - There is no Chrome and no native dependency at write time.
+  - Consequence: Kompast's own headings, sized tight to SF by the M10 script, are reported as overflowing (51 overflow errors over the deck). The user saw three of them wrap (slides 1, 15 and 17). The rest wrap only in wider fonts.
+- **Components are ordinary elements, tagged** with `component {kind, instance, part}`, so the editor, exports and PPTX need no new renderer. Lint exempts parts of the same instance from overlap checks.
+- **Recurring chrome** (logo and footer) is made of real elements added per slide from `theme.components.chrome`. It is not an overlay. The M9 brand-logo overlay is unchanged.
+- **Library assets are copied into each deck on use**, as M9 does for brand logos.
+
+**Bug found and fixed: deletions did not reach the database (from before M11, collab).**
+- `onStoreDocument` skipped the store when the state vector was unchanged. A Yjs deletion adds no clock, so deleting slides or elements and nothing else was never stored.
+- A reload, an export or a render then brought the deleted content back. Editor deletes were affected too, not only MCP.
+- The agent flow found it: the worker's contact sheet showed a slide that `get_deck` (which reads live) did not.
+- Fix: compare the full encoded state, and write the diff from the stored state vector, which carries the delete set.
+- Test: "deletions reach the database" in `mcp.integration.test.ts` fails on the old hook.
+
+**Checks run** (macOS, Node 24.14, Postgres 17 in compose, Chrome):
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm vitest run`: **100 files, 1277 tests, all passing, none skipped.** M10 had 85 files and 954 passing. The DB, collab, worker and browser suites ran.
+- `pnpm --filter @sleid/web build`: exit 0.
+- **Agent flow** (`mcp.agent-flow.integration.test.ts`, real Postgres, collab, worker and Chrome):
+  - The calls:
+    1. import Kompast
+    2. `create_deck` with `startEmpty`
+    3. `apply_style_from_deck`
+    4. 5 × `upload_asset`
+    5. `set_deck_options` with zh-TW
+    6. 10 × `add_slide` with components (a dark cover, cards, a comparison, three split feature slides with screenshots, stats, a timeline, bullets, a dark ask)
+    7. `lint_deck`
+    8. `render_deck`
+    9. `get_deck_style` ×2
+    10. two `get_deck` checks
+  - **27 tool calls.**
+  - **lint: 0 errors, 0 warnings, 0 info.**
+  - 10 slides, with the first and last dark.
+  - No call argument has an `x`, `y`, `w` or `h` key.
+  - The target style equals the source on theme colours, heading and label sizes, and the dark gradient.
+- **Contact sheets viewed** (scratchpad `agent-flow-sheet.png` and `kompast-sheet.png`).
+  - The new deck has Kompast's look: the warm background, uppercase blue labels, 65 px headings with muted subtitles and zh-TW lines, cards with tinted icon tiles, browser frames, the navy gradient cover and ask, the logo top right and the footer.
+  - Text sizes match Kompast's measured sizes.
+  - Kompast's 19 slides import (images become assets) and render.
+- **Claude Code CLI** against the dev server with a scratch token: `claude mcp list` showed ✔ Connected, and the session init listed `mcp__sleid__build_deck` and 41 Sleid tools. The scratch user and the server entry were removed afterwards.
+
+**Unverified.**
+- **A real agent session** building the deck through Claude Code. Only the scripted agent flow was run, so the call count is for that script.
+- The editor's canvas has not been looked at with component decks, dark variants or secondary lines in Chrome. Only the worker render was.
+- The `translate` ability against a live model: tested with the fake provider only.
+- PPTX export of component decks: no Lucide vector or dark gradient was opened in PowerPoint.
+- The brand kit form's new fields in a browser.
+
+**Known gaps.**
+- **Sparser than Kompast.** Several generated slides are emptier than Kompast:
+  - the stat row has no equivalent of Kompast's six-card status grid;
+  - the lower third is empty on the cards and ask slides, because of height caps;
+  - bullets fill only the left column.
+  - Covers have no hero image block.
+  - The feature split is 50/50, where Kompast's is closer to 40/60.
+  - Slide 4's split sits higher than slides 5 and 6.
+- **Compact `get_deck`** is about 95 KB for Kompast, against the 60 KB goal (see above).
+- **Measurement is conservative.** Hand-made decks with boxes sized tight to one font get overflow reports. `lint_deck` is exact only for decks laid out by the components.
+- **`apply_style_from_deck`** rebuilds only the chrome. Other components keep their geometry and follow the recolour. It does not delete the target's previous chrome logo assets.
+- **Library images** have no HTTP route or UI (MCP only), so `upload_asset` returns `url: null` for them. The per-user limit of 200 is not atomic.
+- **Concurrent writes.** The collab store fix encodes the full document on each debounced store, which costs more on very large decks.

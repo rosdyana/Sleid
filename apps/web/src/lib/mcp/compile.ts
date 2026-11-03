@@ -27,6 +27,29 @@ export function resolveSlide(deck: Deck, input: { slideId?: string | undefined; 
   throw new ToolError('Give slideId, or index (0-based).')
 }
 
+/** Which slides a read covers: by id, by a 0-based inclusive range, or both (the intersection). Empty means all. */
+export interface SlideSelection {
+  slideIds?: string[] | undefined
+  range?: { from: number; to: number } | undefined
+}
+
+/** The selected slides in deck order, each with its deck index. With no selection, every slide. */
+export function selectSlides(deck: Deck, selection: SlideSelection = {}): Array<{ slide: Slide; index: number }> {
+  let picks = deck.slides.map((slide, index) => ({ slide, index }))
+  if (selection.range) {
+    const { from, to } = selection.range
+    if (from > to) throw new ToolError('range.from must not be after range.to.')
+    if (to >= deck.slides.length) throw new ToolError(`range.to is ${to}, but the deck has ${deck.slides.length} slides (0 to ${Math.max(0, deck.slides.length - 1)}).`)
+    picks = picks.filter((p) => p.index >= from && p.index <= to)
+  }
+  if (selection.slideIds) {
+    const wanted = new Set(selection.slideIds)
+    for (const id of wanted) findSlide(deck, id)
+    picks = picks.filter((p) => wanted.has(p.slide.id))
+  }
+  return picks
+}
+
 export function findElement(deck: Deck, elementId: string): { slide: Slide; element: Element } {
   for (const slide of deck.slides) {
     const element = slide.elements.find((e) => e.id === elementId)
@@ -119,14 +142,18 @@ export function summarizeElement(el: Element): Record<string, unknown> {
   }
 }
 
-/** The outline an agent reads first: slides by 0-based index, with ids, layout, title and a summary of each element. */
-export function outlineOf(deck: Deck): Record<string, unknown> {
+/**
+ * The outline an agent reads first: slides by 0-based index, with ids, layout, title and a summary of each element.
+ * `selection` keeps only some slides; their indexes are still the deck's indexes.
+ */
+export function outlineOf(deck: Deck, selection?: SlideSelection): Record<string, unknown> {
+  const picks = selectSlides(deck, selection)
   return {
     deckId: deck.id,
     title: deck.title,
     theme: deck.theme.name,
     slideCount: deck.slides.length,
-    slides: deck.slides.map((slide, index) => {
+    slides: picks.map(({ slide, index }) => {
       const title = slide.elements.find((e) => e.type === 'text' && e.role === 'title')
       return {
         index,

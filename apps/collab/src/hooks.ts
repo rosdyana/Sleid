@@ -60,7 +60,12 @@ export interface HooksOptions {
  * it holds, for each loaded document, the state vector that the database already has.
  */
 export function createHooks({ db, tokenSecret, logger, onEdit, remoteStates }: HooksOptions) {
-  const lastStored = new Map<string, Uint8Array>()
+  /**
+   * What the database holds for each loaded document: its state vector (the base of the next diff) and its full encoded
+   * state (the test for "nothing changed"). A state vector alone is not enough: a deletion adds no clock, so a deleted slide
+   * left the vector the same and the store was skipped, which lost the deletion.
+   */
+  const lastStored = new Map<string, { vector: Uint8Array; full: Uint8Array }>()
 
   return {
     async onAuthenticate({ token, documentName, connectionConfig }: { token: string; documentName: string; connectionConfig: { readOnly: boolean } }) {
@@ -82,7 +87,7 @@ export function createHooks({ db, tokenSecret, logger, onEdit, remoteStates }: H
     async onLoadDocument({ documentName, document }: { documentName: string; document: Y.Doc }) {
       const state = await loadDeckState(db, documentName)
       Y.applyUpdate(document, state, LOAD_ORIGIN)
-      lastStored.set(documentName, Y.encodeStateVector(document))
+      lastStored.set(documentName, { vector: Y.encodeStateVector(document), full: Y.encodeStateAsUpdate(document) })
     },
 
     /**
@@ -91,17 +96,19 @@ export function createHooks({ db, tokenSecret, logger, onEdit, remoteStates }: H
      * logged loudly and still stored, so no edit is silently lost.
      */
     async onStoreDocument({ document, documentName }: { document: Y.Doc; documentName: string }) {
-      const previous = lastStored.get(documentName) ?? EMPTY_STATE_VECTOR
-      const stateVector = Y.encodeStateVector(document)
-      if (Buffer.from(stateVector).equals(Buffer.from(previous))) return
+      const previous = lastStored.get(documentName)
+      const full = Y.encodeStateAsUpdate(document)
+      if (previous && Buffer.from(full).equals(Buffer.from(previous.full))) return
 
-      const update = Y.encodeStateAsUpdate(document, previous)
+      // The diff carries the delete set too, so deletions and insertions both reach the database.
+      const update = Y.encodeStateAsUpdate(document, previous?.vector ?? EMPTY_STATE_VECTOR)
       const title = titleAfterStore(document, documentName, logger)
-      lastStored.set(documentName, stateVector)
+      lastStored.set(documentName, { vector: Y.encodeStateVector(document), full })
       try {
         await appendDeckUpdate(db, documentName, update, title)
       } catch (err) {
-        lastStored.set(documentName, previous)
+        if (previous) lastStored.set(documentName, previous)
+        else lastStored.delete(documentName)
         throw err
       }
     },

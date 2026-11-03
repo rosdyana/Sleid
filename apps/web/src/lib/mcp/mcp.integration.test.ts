@@ -1,23 +1,17 @@
 // Integration: the MCP server over real Streamable HTTP, with the official SDK client.
 // Real Postgres (127.0.0.1:5433), an in-process collab service, an in-process export worker (pg-boss, Chrome),
-// and real local storage. Skips when the database is unreachable. Browser-dependent checks (render_slide,
-// export_deck completion) skip with a message when CHROME_PATH does not point at a file.
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+// and real local storage (see test-harness.ts). Skips when the database is unreachable. Browser-dependent checks
+// (render_slide, render_deck, export_deck completion) skip with a message when CHROME_PATH does not point at a file.
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { eq, sql } from 'drizzle-orm'
 import JSZip from 'jszip'
 import {
+  assets,
   createApiToken,
   deckMembers,
   deckSnapshots,
-  getExportJob,
   grantMembership,
   listMcpAudit,
   readDeck,
@@ -25,198 +19,62 @@ import {
   type Db,
   type TokenScope,
 } from '@sleid/db'
-import { connectOrNull, makeDeck, makeUser, removeUsers, TEST_DATABASE_URL } from '@sleid/db/testing'
-import { createJobQueue, type JobQueue } from '@sleid/jobs'
-import { createLocalStorage, type StorageDriver } from '@sleid/storage'
-import { createCollabServer, type CollabServer } from '../../../../collab/src/server.ts'
+import { makeDeck, makeUser } from '@sleid/db/testing'
+import type { JobQueue } from '@sleid/jobs'
+import type { StorageDriver } from '@sleid/storage'
+import type { CollabServer } from '../../../../collab/src/server.ts'
 import { createBrandKit, uploadBrandLogo } from '../brand-kits.server.ts'
-import { createBrowserPool, type BrowserPool } from '../../../../worker/src/browser.ts'
-import { startExportService } from '../../../../worker/src/service.ts'
 import { startWizardService } from '../../../../worker/src/wizard/service.ts'
-import { startImportService } from '../../../../worker/src/import/service.ts'
 import { createWizardCollab } from '../../../../worker/src/wizard/collab.ts'
-import { createCollabInternalClient, type CollabInternalClient } from '~/lib/collab-client.server'
-import { handleExportDownload } from '~/lib/http-handlers.server'
-import { handleMcpRequest } from './http.ts'
+import type { CollabInternalClient } from '~/lib/collab-client.server'
 import { FixedWindowLimiter } from './rate-limit.ts'
 import type { McpDeps } from './deps.ts'
+import {
+  BROWSER_OK,
+  INTERNAL_SECRET,
+  PNG_SIGNATURE,
+  clientFor,
+  jsonOf,
+  listen,
+  makeHandler,
+  startHarness,
+  stopHarness,
+  textOf,
+  tool,
+  waitForExport as waitForExportFor,
+  type Harness,
+  tokenFor as tokenForFor,
+  person as personFor,
+} from './test-harness.ts'
 
-const TOKEN_SECRET = 'mcp-integration-token-secret-0123456789'
-const INTERNAL_SECRET = 'mcp-integration-internal-secret-0123'
-const CHROME = process.env.CHROME_PATH?.trim() ?? ''
-const BROWSER_OK = CHROME !== '' && existsSync(CHROME)
-const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
-
+let h: Harness | null = null
 let db: Db | null = null
-let collabServer: CollabServer | null = null
 let collab: CollabInternalClient
+let collabServer: CollabServer | null = null
 let queue: JobQueue | null = null
-let browser: BrowserPool | null = null
-let stopWorker: (() => Promise<void>) | null = null
-let httpServers: Server[] = []
-let mcpUrl = ''
-let exportsStorage: StorageDriver
 let assetsStorage: StorageDriver
-const tempDirs: string[] = []
-const userIds: string[] = []
 let baseDeps: McpDeps | null = null
-
-interface ToolResult {
-  isError?: boolean
-  content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>
-}
-
-function textOf(result: ToolResult): string {
-  return result.content
-    .filter((c) => c.type === 'text')
-    .map((c) => c.text ?? '')
-    .join('\n')
-}
-
-function jsonOf(result: ToolResult): Record<string, unknown> {
-  return JSON.parse(textOf(result)) as Record<string, unknown>
-}
-
-/** A Node HTTP listener that hands each request to a web-standard handler. Test-only adapter. */
-function listen(handler: (request: Request) => Promise<Response>): Promise<{ origin: string; server: Server }> {
-  return new Promise((resolve, reject) => {
-    const server = createServer(async (req, res) => {
-      const chunks: Buffer[] = []
-      for await (const chunk of req) chunks.push(chunk as Buffer)
-      const body = chunks.length > 0 && req.method !== 'GET' ? Buffer.concat(chunks) : undefined
-      const url = `http://127.0.0.1${req.url ?? '/'}`
-      const headers = new Headers()
-      for (const [key, value] of Object.entries(req.headers)) {
-        if (typeof value === 'string') headers.set(key, value)
-      }
-      const response = await handler(new Request(url, { method: req.method, headers, body }))
-      res.writeHead(response.status, Object.fromEntries(response.headers))
-      res.end(Buffer.from(await response.arrayBuffer()))
-    })
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      if (!address || typeof address === 'string') return reject(new Error('no address'))
-      resolve({ origin: `http://127.0.0.1:${address.port}`, server })
-    })
-    httpServers.push(server)
-  })
-}
-
-/** Deps for the MCP route, with the download route alongside it, the way the web app serves both. */
-function makeHandler(overrides: Partial<McpDeps> = {}) {
-  return async (request: Request): Promise<Response> => {
-    const url = new URL(request.url)
-    const download = /^\/api\/exports\/([^/]+)\/file$/.exec(url.pathname)
-    if (download) {
-      return handleExportDownload(download[1]!, { db: db!, storage: assetsStorage, userId: null }, exportsStorage, {
-        linkToken: url.searchParams.get('token'),
-      })
-    }
-    return handleMcpRequest(request, { ...baseDeps!, ...overrides })
-  }
-}
-
-async function client(token: string): Promise<Client> {
-  const mcp = new Client({ name: 'sleid-test', version: '0.0.0' })
-  const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers: { authorization: `Bearer ${token}` } } })
-  await mcp.connect(transport)
-  return mcp
-}
-
-async function tool(mcp: Client, name: string, args: Record<string, unknown>): Promise<ToolResult> {
-  return (await mcp.callTool({ name, arguments: args })) as ToolResult
-}
-
-async function tokenFor(userId: string, scopes: TokenScope[], deckIds: string[] | null = null): Promise<string> {
-  const { secret } = await createApiToken(db!, { userId, name: `test ${scopes.join(',')}`, scopes, deckIds })
-  return secret
-}
-
-async function person(label: string) {
-  const u = await makeUser(db!, label)
-  userIds.push(u.id)
-  return u
-}
+let mcpUrl = ''
 
 beforeAll(async () => {
-  db = await connectOrNull()
-  if (!db) return
-  const root = mkdtempSync(join(tmpdir(), 'sleid-mcp-test-'))
-  tempDirs.push(root)
-  exportsStorage = createLocalStorage(join(root, 'exports'))
-  assetsStorage = createLocalStorage(join(root, 'assets'))
-
-  collabServer = await createCollabServer({
-    db,
-    tokenSecret: TOKEN_SECRET,
-    internalSecret: INTERNAL_SECRET,
-    host: '127.0.0.1',
-    port: 0,
-    internalHost: '127.0.0.1',
-    internalPort: 0,
-    debounceMs: 100,
-    maxDebounceMs: 300,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-  })
-  const live = { baseUrl: collabServer.internalUrl, secret: INTERNAL_SECRET }
-  collab = createCollabInternalClient({ baseUrl: live.baseUrl, secret: live.secret })
-
-  // A test-only queue name and wizard prefix: a dev worker on the same database must not take this test's jobs.
-  const suffix = randomUUID().slice(0, 8)
-  queue = createJobQueue(TEST_DATABASE_URL, { queueName: `export-deck-mcp-${suffix}`, prefix: `mcp-${suffix}-`, importQueueName: `import-deck-mcp-${suffix}` })
-  await queue.start()
-  await startImportService({
-    db,
-    queue,
-    uploads: assetsStorage,
-    assets: assetsStorage,
-    concurrency: 2,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-  })
-  browser = createBrowserPool(BROWSER_OK ? CHROME : undefined)
-  const service = await startExportService({
-    db,
-    queue,
-    assets: assetsStorage,
-    exports: exportsStorage,
-    browser,
-    live,
-    concurrency: 2,
-    tmpRoot: join(root, 'tmp'),
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
-  })
-  stopWorker = () => service.stop()
-
-  const listener = await listen(makeHandler())
-  mcpUrl = `${listener.origin}/mcp`
-  baseDeps = {
-    db,
-    env: process.env,
-    publicUrl: listener.origin,
-    live,
-    collab,
-    getQueue: async () => queue!,
-    exportStorage: exportsStorage,
-    assetStorage: assetsStorage,
-    limiter: new FixedWindowLimiter(10_000, 60_000),
-    maxBodyBytes: 1024 * 1024,
-    renderTimeoutMs: 30_000,
-    logger: { warn: () => {}, error: () => {} },
-  }
+  h = await startHarness()
+  if (!h) return
+  db = h.db
+  collab = h.collab
+  collabServer = h.collabServer
+  queue = h.queue
+  assetsStorage = h.assetsStorage
+  baseDeps = h.baseDeps
+  mcpUrl = h.mcpUrl
 }, 120_000)
 
 afterAll(async () => {
-  for (const server of httpServers) await new Promise<void>((resolve) => server.close(() => resolve()))
-  await stopWorker?.().catch(() => undefined)
-  await queue?.stop().catch(() => undefined)
-  await collabServer?.close()
-  if (db) {
-    await removeUsers(db, userIds)
-    await db.$client.end({ timeout: 1 })
-  }
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })
-})
+  await stopHarness(h)
+}, 120_000)
+
+const client = (token: string) => clientFor(h!, token)
+const tokenFor = (userId: string, scopes: TokenScope[], deckIds: string[] | null = null) => tokenForFor(h!, userId, scopes, deckIds)
+const person = (label: string) => personFor(h!, label)
 
 describe('MCP over Streamable HTTP', () => {
   it('lists the tools, resources and prompt, and serves the schema resources', async () => {
@@ -231,35 +89,55 @@ describe('MCP over Streamable HTTP', () => {
         'add_slide',
         'apply_brand_kit',
         'apply_ops',
+        'apply_style_from_deck',
         'create_deck',
-        'delete_slide',
-        'export_deck',
         'create_deck_from_prompt',
+        'delete_slide',
+        'derive_theme_from_deck',
+        'export_deck',
         'generate_with_ai',
         'get_deck',
+        'get_deck_style',
         'get_wizard_status',
         'import_deck',
         'insert_chart',
+        'insert_component',
         'insert_diagram',
+        'insert_icon',
         'insert_image',
+        'lint_deck',
+        'list_assets',
         'list_brand_kits',
         'list_comments',
         'list_decks',
+        'list_icons',
         'list_templates',
         'list_versions',
         'move_slide',
+        'plan_deck',
+        'render_deck',
         'render_slide',
         'restore_version',
+        'set_deck_options',
         'set_notes',
         'set_theme',
         'share_deck',
+        'update_component',
         'update_text',
+        'upload_asset',
+        'validate_deck',
       ].sort(),
     )
     for (const t of tools) expect(t.description?.length ?? 0).toBeGreaterThan(20)
 
     const resources = await mcp.listResources()
-    expect(resources.resources.map((r) => r.uri).sort()).toEqual(['sleid://schema/deck', 'sleid://schema/ops', 'sleid://templates', 'sleid://themes'])
+    expect(resources.resources.map((r) => r.uri).sort()).toEqual([
+      'sleid://guide/elements',
+      'sleid://schema/deck',
+      'sleid://schema/ops',
+      'sleid://templates',
+      'sleid://themes',
+    ])
     const templates = await mcp.listResourceTemplates()
     expect(templates.resourceTemplates.map((t) => t.uriTemplate)).toEqual(['sleid://decks/{deckId}'])
 
@@ -405,7 +283,7 @@ describe('MCP over Streamable HTTP', () => {
       expect(downloadUrl).toContain('token=sleid_dl_')
       expect(downloadUrl).not.toContain('sleid_pat_')
       const exportId = /exports\/([^/]+)\/file/.exec(downloadUrl)![1]!
-      await waitForExport(exportId)
+      await waitForExportFor(h!, exportId)
       const first = await fetch(downloadUrl)
       expect(first.status).toBe(200)
       expect(first.headers.get('content-type')).toContain('presentationml')
@@ -493,7 +371,7 @@ describe('MCP over Streamable HTTP', () => {
     const ping = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' })
     const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${secret}` }
 
-    const limited = await listen(makeHandler({ limiter: new FixedWindowLimiter(3, 60_000) }))
+    const limited = await listen(h!, makeHandler(h!, { limiter: new FixedWindowLimiter(3, 60_000) }))
     const statuses: number[] = []
     let retryAfter: string | null = null
     for (let i = 0; i < 4; i++) {
@@ -504,7 +382,7 @@ describe('MCP over Streamable HTTP', () => {
     expect(statuses).toEqual([200, 200, 200, 429])
     expect(Number(retryAfter)).toBeGreaterThan(0)
 
-    const capped = await listen(makeHandler({ maxBodyBytes: 300 }))
+    const capped = await listen(h!, makeHandler(h!, { maxBodyBytes: 300 }))
     const big = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: { pad: 'x'.repeat(1000) } })
     const tooBig = await fetch(`${capped.origin}/mcp`, { method: 'POST', headers, body: big })
     expect(tooBig.status).toBe(413)
@@ -570,19 +448,6 @@ describe('MCP over Streamable HTTP', () => {
   }, 60_000)
 })
 
-async function waitForExport(exportId: string): Promise<void> {
-  const started = Date.now()
-  for (;;) {
-    const row = await getExportJob(db!, exportId)
-    if (row && (row.status === 'done' || row.status === 'failed')) {
-      if (row.status === 'failed') throw new Error(`export failed: ${row.error}`)
-      return
-    }
-    if (Date.now() - started > 90_000) throw new Error('export did not finish in time')
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
-}
-
 // ---- create_deck_from_prompt and get_wizard_status ----
 // A fake OpenAI-compatible model answers the wizard's structured calls (queries, outline, one slide) by schema name, and
 // the in-process wizard worker writes the slides through the collab service. No live model is involved.
@@ -644,7 +509,7 @@ async function startFakeModel(options: { failSlide?: number } = {}): Promise<Fak
     res.end(JSON.stringify({ id: 'fake', object: 'chat.completion', model: 'fake-local', choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  httpServers.push(server)
+  h!.httpServers.push(server)
   const port = (server.address() as AddressInfo).port
   return {
     url: `http://127.0.0.1:${port}/v1`,
@@ -861,6 +726,277 @@ describe('MCP templates and brand kits (M9)', () => {
     const audit = await db!.execute(sql`select ok from mcp_audit where user_id = ${owner.id} and tool = 'apply_brand_kit' order by created_at`)
     expect(audit.map((r) => (r as { ok: boolean }).ok)).toEqual([true, true, false])
     await mcp.close()
+  }, 120_000)
+})
+
+
+// ---- M11 phase D: assets, components, validation, renders and the compact read ----
+
+const TEST_PNG_B64 = Buffer.from(TEST_PNG).toString('base64')
+
+describe('MCP assets, components and checks (M11 phase D)', () => {
+  it('upload_asset to the library, then insert_image copies it into a deck; another user cannot copy it', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-assets')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const lib = jsonOf(await tool(mcp, 'upload_asset', { name: 'Logo', mime: 'png', base64: TEST_PNG_B64, library: true }))
+    expect(lib).toMatchObject({ scope: 'library', url: null, width: 1, height: 1 })
+    const libraryId = lib.assetId as string
+
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Assets' })).id as string
+    const slideId = jsonOf(await tool(mcp, 'add_slide', { deckId, layout: 'blank' })).slideId as string
+    const placed = await tool(mcp, 'insert_image', { deckId, slideId, assetId: libraryId, alt: 'Logo picture' })
+    expect(placed.isError).toBeFalsy()
+    const copyId = /\/api\/assets\/(.+)$/.exec(jsonOf(placed).src as string)![1]!
+    expect(copyId).not.toBe(libraryId)
+    const [row] = await db.select().from(assets).where(eq(assets.id, copyId))
+    expect(row).toMatchObject({ deckId, mime: 'image/png' })
+
+    const onDeck = jsonOf(await tool(mcp, 'upload_asset', { name: 'Shot', mime: 'png', base64: TEST_PNG_B64, deckId }))
+    expect(onDeck).toMatchObject({ scope: 'deck', url: `/api/assets/${onDeck.assetId}` })
+    const listed = jsonOf(await tool(mcp, 'list_assets', { deckId }))
+    expect((listed.assets as Array<{ assetId: string }>).map((a) => a.assetId)).toEqual(expect.arrayContaining([copyId, onDeck.assetId]))
+    const both = await tool(mcp, 'upload_asset', { name: 'x', mime: 'png', base64: TEST_PNG_B64, deckId, library: true })
+    expect(both.isError).toBe(true)
+
+    const other = await person('mcp-d-assets-other')
+    const otherMcp = await client(await tokenFor(other.id, ['decks:read', 'decks:write', 'decks:create']))
+    const otherDeck = jsonOf(await tool(otherMcp, 'create_deck', { title: 'Theirs' })).id as string
+    const otherSlide = jsonOf(await tool(otherMcp, 'add_slide', { deckId: otherDeck, layout: 'blank' })).slideId as string
+    const refused = await tool(otherMcp, 'insert_image', { deckId: otherDeck, slideId: otherSlide, assetId: libraryId, alt: 'Stolen' })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toBe('That asset was not found.')
+    await mcp.close()
+    await otherMcp.close()
+  }, 120_000)
+
+  it('insert_image fetches an http URL and stores it on the deck; the public policy refuses a loopback address', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-url')
+    const served = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/png' })
+      res.end(Buffer.from(TEST_PNG))
+    })
+    await new Promise<void>((resolve) => served.listen(0, '127.0.0.1', resolve))
+    h!.httpServers.push(served)
+    const port = (served.address() as AddressInfo).port
+    const token = await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create'])
+    // The test listener allows the local address; the default listener (public addresses only) does not.
+    const allowLocal = await listen(h!, makeHandler(h!, { imageFetchPolicy: { allowPrivate: true } }))
+    const testMcp = await clientFor(h!, token, `${allowLocal.origin}/mcp`)
+    const publicMcp = await client(token)
+    const deckId = jsonOf(await tool(publicMcp, 'create_deck', { title: 'From a URL' })).id as string
+    const slideId = jsonOf(await tool(publicMcp, 'add_slide', { deckId, layout: 'blank' })).slideId as string
+
+    const url = `http://127.0.0.1:${port}/shot.png`
+    const stored = await tool(testMcp, 'insert_image', { deckId, slideId, url, alt: 'A remote picture' })
+    expect(stored.isError).toBeFalsy()
+    const assetId = /\/api\/assets\/(.+)$/.exec(jsonOf(stored).src as string)![1]!
+    const [row] = await db.select().from(assets).where(eq(assets.id, assetId))
+    expect(row).toMatchObject({ deckId, mime: 'image/png' })
+
+    const refused = await tool(publicMcp, 'insert_image', { deckId, slideId, url, alt: 'Blocked' })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/could not be fetched/)
+    await testMcp.close()
+    await publicMcp.close()
+  }, 120_000)
+
+  it('validate_deck reports each problem with its path, and changes nothing', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-validate')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read']))
+    const bad = JSON.stringify({ slides: [{ elements: [{ type: 'text', x: 'left', y: 0, w: 10, h: 10, content: { type: 'doc' }, style: { align: 'sideways' } }] }] })
+    const result = jsonOf(await tool(mcp, 'validate_deck', { text: bad }))
+    expect(result.ok).toBe(false)
+    const issues = result.issues as Array<{ path: string; message: string }>
+    expect(issues).toHaveLength(2)
+    expect(issues.map((i) => i.path)).toEqual(expect.arrayContaining(['slides[0].elements[0].x', 'slides[0].elements[0].style.align']))
+    expect(jsonOf(await tool(mcp, 'validate_deck', { text: '{"title":"Q3","slides":[]}' }))).toMatchObject({ ok: true, issues: [] })
+    expect(jsonOf(await tool(mcp, 'validate_deck', { text: '{nope' })).ok).toBe(false)
+    await mcp.close()
+  }, 60_000)
+
+  it('import_deck takes a json deck with no id or version, and turns its data: image into an asset', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-json')
+    const mcp = await client(await tokenFor(owner.id, ['decks:create', 'decks:read']))
+    const doc = {
+      slides: [
+        {
+          elements: [
+            { type: 'text', x: 120, y: 80, w: 1680, h: 160, content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Hello' }] }] }, style: {} },
+            { type: 'image', x: 200, y: 300, w: 400, h: 300, src: `data:image/png;base64,${TEST_PNG_B64}`, alt: 'A dot' },
+          ],
+        },
+      ],
+    }
+    const made = jsonOf(await tool(mcp, 'import_deck', { format: 'json', text: JSON.stringify(doc), title: 'JSON import' }))
+    const read = jsonOf(await tool(mcp, 'get_deck', { deckId: made.deckId, format: 'json' }))
+    const image = (read.slides as Array<{ elements: Array<{ type: string; src?: string }> }>)[0]!.elements.find((e) => e.type === 'image')
+    expect(image!.src).toMatch(/^\/api\/assets\/[0-9a-f-]{36}$/)
+    await mcp.close()
+  }, 120_000)
+
+  it('add_slide with components is checked by lint_deck, rebuilds a component, reads back compact, and reports bad props', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-components')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Components' })).id as string
+    const made = jsonOf(
+      await tool(mcp, 'add_slide', {
+        deckId,
+        variant: 'light',
+        components: [
+          { kind: 'header', props: { label: 'Why', heading: 'One place for the team', subtitle: 'Docs, issues and automation' } },
+          {
+            kind: 'card_grid',
+            props: { cards: [{ icon: 'lock', title: 'Private', body: 'Only members see a page.' }, { icon: 'link', title: 'Linked', body: 'Every item links to its source.' }, { title: 'Fast', body: 'Search finds it.' }] },
+          },
+        ],
+      }),
+    )
+    const slideId = made.slideId as string
+    const header = (made.components as Array<{ kind: string; instance: string }>).find((c) => c.kind === 'header')!
+    expect(made.components).toHaveLength(2)
+    expect(jsonOf(await tool(mcp, 'lint_deck', { deckId }))).toMatchObject({ ok: true })
+
+    const icon = await tool(mcp, 'insert_icon', { deckId, slideId, name: 'check', size: 40 })
+    expect(icon.isError).toBeFalsy()
+    expect(jsonOf(icon).elementId).toBeTruthy()
+    const badIcon = await tool(mcp, 'insert_icon', { deckId, slideId, name: 'no-such-icon-xyz' })
+    expect(badIcon.isError).toBe(true)
+    expect(textOf(badIcon)).toMatch(/Unknown icon/)
+
+    const rebuilt = jsonOf(await tool(mcp, 'update_component', { deckId, instance: header.instance, props: { label: 'Why', heading: 'Two places, one login' } }))
+    expect(rebuilt.instance).toBe(header.instance)
+    const compact = jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'compact' }))
+    expect(JSON.stringify(compact)).toContain('Two places, one login')
+    const first = jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'compact', range: { from: 0, to: 0 } }))
+    expect((first.slides as unknown[]).length).toBe(1)
+    const byId = jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'outline', slideIds: [slideId] }))
+    expect((byId.slides as unknown[]).length).toBe(1)
+    expect(jsonOf(await tool(mcp, 'lint_deck', { deckId }))).toMatchObject({ ok: true })
+
+    const badCards = await tool(mcp, 'add_slide', { deckId, components: [{ kind: 'card_grid', props: { cards: [] } }] })
+    expect(badCards.isError).toBe(true)
+    expect(textOf(badCards)).toMatch(/components\[0\] \(card_grid\) is not valid/)
+
+    const plan = jsonOf(await tool(mcp, 'plan_deck', { brief: 'Team tool', slideCount: 5 }))
+    expect((plan.calls as Array<{ tool: string }>)[0]!.tool).toBe('create_deck')
+    expect((plan.slides as unknown[]).length).toBe(5)
+    await mcp.close()
+  }, 120_000)
+
+  it('create_deck with startEmpty makes a deck with no slides, and add_slide fills it', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-empty')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Empty', startEmpty: true })).id as string
+    expect(jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'outline' }))).toMatchObject({ slideCount: 0 })
+    await savedSlideCount(deckId, 0)
+    const made = jsonOf(await tool(mcp, 'add_slide', { deckId, variant: 'dark', components: [{ kind: 'header', region: 'center', props: { heading: 'Cover' } }] }))
+    expect(made.index).toBe(0)
+    expect(jsonOf(await tool(mcp, 'lint_deck', { deckId }))).toMatchObject({ ok: true })
+    await mcp.close()
+  }, 120_000)
+
+  it('set_deck_options and list_icons work through MCP', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-options')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Two languages' })).id as string
+    expect(jsonOf(await tool(mcp, 'set_deck_options', { deckId, secondaryLanguage: 'zh-TW' }))).toMatchObject({ secondaryLanguage: 'zh-TW' })
+    const read = jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'json' }))
+    expect(read.secondaryLanguage).toBe('zh-TW')
+    expect(jsonOf(await tool(mcp, 'set_deck_options', { deckId, secondaryLanguage: null })).secondaryLanguage).toBeNull()
+    const icons = jsonOf(await tool(mcp, 'list_icons', { query: 'eye' }))
+    expect(icons.icons as string[]).toEqual(expect.arrayContaining(['eye-off']))
+    await mcp.close()
+  }, 120_000)
+
+  it('render_deck returns a contact sheet as one PNG, and the slides mode returns one PNG per slide', async (ctx) => {
+    if (!db) return ctx.skip()
+    if (!BROWSER_OK) {
+      console.warn('[mcp test] CHROME_PATH is not set, so render_deck was not run')
+      return
+    }
+    const owner = await person('mcp-d-render')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Renders', theme: 'Midnight' })).id as string
+    const first = jsonOf(await tool(mcp, 'add_slide', { deckId, layout: 'title', title: 'One', body: 'Two' })).slideId as string
+    const second = jsonOf(await tool(mcp, 'add_slide', { deckId, layout: 'blank', title: 'Three' })).slideId as string
+
+    const sheet = await tool(mcp, 'render_deck', { deckId, mode: 'sheet' })
+    expect(sheet.isError).toBeFalsy()
+    const pictures = sheet.content.filter((c) => c.type === 'image')
+    expect(pictures).toHaveLength(1)
+    expect([...Buffer.from(pictures[0]!.data!, 'base64').subarray(0, 8)]).toEqual(PNG_SIGNATURE)
+
+    const slides = await tool(mcp, 'render_deck', { deckId, mode: 'slides', slideIds: [first, second] })
+    expect(slides.isError).toBeFalsy()
+    expect(slides.content.filter((c) => c.type === 'image')).toHaveLength(2)
+    const listed = JSON.parse(textOf(slides)) as { slides: Array<{ slideId: string }> }
+    expect(listed.slides.map((s) => s.slideId)).toEqual([first, second])
+    await mcp.close()
+  }, 240_000)
+})
+
+/**
+ * Waits until the saved state (read from the database, not the live document) has this many slides. The store runs a
+ * moment after a write, so a check of the saved state has to wait for it.
+ */
+async function savedSlideCount(deckId: string, expected: number): Promise<void> {
+  const started = Date.now()
+  for (;;) {
+    const saved = (await readDeck(db!, deckId)).deck.slides.length
+    if (saved === expected) return
+    if (Date.now() - started > 10_000) throw new Error(`the saved deck has ${saved} slides, expected ${expected}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+describe('MCP deletions reach the database (M11 phase D)', () => {
+  it('a deleted slide is gone from the saved state too, so a reload from the database does not bring it back', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-delete')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(mcp, 'create_deck', { title: 'Delete me' })).id as string
+    await savedSlideCount(deckId, 1)
+    const slideId = (jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'json' })).slides as Array<{ id: string }>)[0]!.id
+    expect((await tool(mcp, 'delete_slide', { deckId, slideId })).isError).toBeFalsy()
+    expect(jsonOf(await tool(mcp, 'get_deck', { deckId, format: 'outline' }))).toMatchObject({ slideCount: 0 })
+    await savedSlideCount(deckId, 0)
+    await mcp.close()
+  }, 120_000)
+})
+
+describe('MCP derive_theme_from_deck (M11 phase D)', () => {
+  it('reads the look of a deck, and saves it as a brand kit with its logo only when the token can write decks', async () => {
+    if (!db) return
+    const owner = await person('mcp-d-derive')
+    const writer = await client(await tokenFor(owner.id, ['decks:read', 'decks:write', 'decks:create']))
+    const deckId = jsonOf(await tool(writer, 'create_deck', { title: 'Brand source' })).id as string
+    const logo = `data:image/png;base64,${TEST_PNG_B64}`
+    const set = await tool(writer, 'set_theme', { deckId, theme: { components: { chrome: { logoLight: logo, footerText: 'Acme Ltd' } } } })
+    expect(set.isError).toBeFalsy()
+
+    const look = jsonOf(await tool(writer, 'derive_theme_from_deck', { deckId }))
+    expect((look.theme as { name: string }).name).toBe('Sheets Light')
+    expect(JSON.stringify(look)).not.toContain('base64,')
+
+    const readOnly = await client(await tokenFor(owner.id, ['decks:read']))
+    const refused = await tool(readOnly, 'derive_theme_from_deck', { deckId, saveAsBrandKit: { name: 'Nope' } })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toMatch(/decks:write/)
+    await readOnly.close()
+
+    const saved = jsonOf(await tool(writer, 'derive_theme_from_deck', { deckId, saveAsBrandKit: { name: 'Derived kit' } }))
+    expect(saved).toMatchObject({ name: 'Derived kit', logos: { light: true, dark: false } })
+    const kits = jsonOf(await tool(writer, 'list_brand_kits', {}))
+    const kit = (kits.brandKits as Array<{ id: string; name: string; owned: boolean; hasLogo: boolean }>).find((k) => k.id === saved.brandKitId)
+    expect(kit).toMatchObject({ name: 'Derived kit', owned: true, hasLogo: true })
+    await writer.close()
   }, 120_000)
 })
 

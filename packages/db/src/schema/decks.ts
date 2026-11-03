@@ -146,6 +146,9 @@ export const assets = pgTable(
     /** Size of the stored file in bytes. */
     bytes: integer('bytes').notNull(),
     sha256: text('sha256').notNull(),
+    /** Pixel size when known (M11). Null for images whose size could not be read. */
+    width: integer('width'),
+    height: integer('height'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index('assets_deck_id_idx').on(t.deckId)],

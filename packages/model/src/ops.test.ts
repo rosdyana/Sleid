@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { applyOps, createDeck, deckToYDoc, OpError, yDocToDeck, type Deck } from './index.ts'
+import { applyOps, BUILT_IN_THEMES, createDeck, deckToYDoc, deriveDarkVariant, OpError, yDocToDeck, type Deck } from './index.ts'
 
 function setup(): { doc: Y.Doc; deck: Deck } {
   const deck = createDeck('Ops')
@@ -414,5 +414,101 @@ describe('applyOps: M10 fields', () => {
         },
       ]),
     ).toThrow(OpError)
+  })
+})
+
+describe('applyOps: M11 variants, theme recolour and deck options', () => {
+  const textColours = (doc: Y.Doc, slideId: string) =>
+    yDocToDeck(doc)
+      .slides.find((s) => s.id === slideId)!
+      .elements.map((e) => (e.type === 'text' ? e.style.color : undefined))
+
+  it('setDeckOptions sets and clears the secondary language', () => {
+    const { doc } = setup()
+    applyOps(doc, [{ op: 'setDeckOptions', secondaryLanguage: 'id-ID' }])
+    expect(yDocToDeck(doc).secondaryLanguage).toBe('id-ID')
+    applyOps(doc, [{ op: 'setDeckOptions', secondaryLanguage: null }])
+    expect(yDocToDeck(doc)).not.toHaveProperty('secondaryLanguage')
+  })
+
+  it('setDeckOptions refuses a value that is not a language tag', () => {
+    const { doc } = setup()
+    expect(() => applyOps(doc, [{ op: 'setDeckOptions', secondaryLanguage: 'english please' }])).toThrow(OpError)
+  })
+
+  it('setTheme to Midnight recolours the title slide that createDeck built with Sheets colours', () => {
+    const { doc } = setup()
+    const midnight = BUILT_IN_THEMES.find((t) => t.name === 'Midnight')!
+    applyOps(doc, [{ op: 'setTheme', theme: midnight }])
+    const title = yDocToDeck(doc).slides[0]!
+    const colourOf = (role: 'title' | 'subtitle') => {
+      const el = title.elements.find((e) => e.type === 'text' && e.role === role)
+      return el?.type === 'text' ? el.style.color : undefined
+    }
+    expect(colourOf('title')).toBe(midnight.colors.text)
+    expect(colourOf('subtitle')).toBe(midnight.colors.muted)
+  })
+
+  it('setBrandKit recolours the existing slides with the kit palette', () => {
+    const { doc } = setup()
+    const kit = BUILT_IN_THEMES.find((t) => t.name === 'Warm Paper')!
+    applyOps(doc, [{ op: 'setBrandKit', brandKitId: 'kit-1', theme: kit }])
+    const title = yDocToDeck(doc).slides[0]!
+    expect(title.elements.find((e) => e.type === 'text' && e.role === 'title')).toMatchObject({ style: { color: kit.colors.text } })
+  })
+
+  it('addSlide with variant dark puts the dark colours on its placeholders and sets the dark background', () => {
+    const { doc } = setup()
+    const dark = deriveDarkVariant(yDocToDeck(doc).theme)
+    applyOps(doc, [{ op: 'addSlide', layout: 'title', slide: { id: 'dk', variant: 'dark' } }])
+    const slide = yDocToDeck(doc).slides.find((s) => s.id === 'dk')!
+    expect(slide).toMatchObject({ variant: 'dark', background: dark.background })
+    expect(textColours(doc, 'dk')).toEqual([dark.text, dark.muted])
+  })
+
+  it('addSlide without a variant stays light: no background, the theme colours', () => {
+    const { doc } = setup()
+    const theme = yDocToDeck(doc).theme
+    applyOps(doc, [{ op: 'addSlide', layout: 'title', slide: { id: 'lt' } }])
+    const slide = yDocToDeck(doc).slides.find((s) => s.id === 'lt')!
+    expect(slide.variant).toBeUndefined()
+    expect(slide.background).toBeUndefined()
+    expect(textColours(doc, 'lt')).toEqual([theme.colors.text, theme.colors.muted])
+  })
+
+  it('updateSlide to dark and back restores the light colours and removes the dark background', () => {
+    const { doc } = setup()
+    const theme = yDocToDeck(doc).theme
+    const dark = deriveDarkVariant(theme)
+    applyOps(doc, [{ op: 'addSlide', layout: 'title-content', slide: { id: 'tog' } }])
+    const light = textColours(doc, 'tog')
+    expect(light).toEqual([theme.colors.text, theme.colors.text])
+
+    applyOps(doc, [{ op: 'updateSlide', slideId: 'tog', patch: { variant: 'dark' } }])
+    expect(yDocToDeck(doc).slides.find((s) => s.id === 'tog')).toMatchObject({ variant: 'dark', background: dark.background })
+    expect(textColours(doc, 'tog')).toEqual([dark.text, dark.text])
+
+    applyOps(doc, [{ op: 'updateSlide', slideId: 'tog', patch: { variant: 'light' } }])
+    const back = yDocToDeck(doc).slides.find((s) => s.id === 'tog')!
+    expect(back.variant).toBe('light')
+    expect(back.background).toBeUndefined()
+    expect(textColours(doc, 'tog')).toEqual(light)
+  })
+
+  it('updateSlide to dark keeps an explicit background from the patch', () => {
+    const { doc } = setup()
+    applyOps(doc, [{ op: 'addSlide', layout: 'blank', slide: { id: 'bg' } }])
+    applyOps(doc, [{ op: 'updateSlide', slideId: 'bg', patch: { variant: 'dark', background: { type: 'color', value: '#101820' } } }])
+    expect(yDocToDeck(doc).slides.find((s) => s.id === 'bg')).toMatchObject({ variant: 'dark', background: { type: 'color', value: '#101820' } })
+  })
+
+  it('setTheme moves a dark slide to the new dark variant and to the new background when it had the old one', () => {
+    const { doc } = setup()
+    applyOps(doc, [{ op: 'addSlide', layout: 'title', slide: { id: 'dk2', variant: 'dark' } }])
+    const midnight = BUILT_IN_THEMES.find((t) => t.name === 'Midnight')!
+    applyOps(doc, [{ op: 'setTheme', theme: midnight }])
+    const slide = yDocToDeck(doc).slides.find((s) => s.id === 'dk2')!
+    expect(slide.background).toEqual(midnight.dark!.background)
+    expect(textColours(doc, 'dk2')).toEqual([midnight.dark!.text, midnight.dark!.muted])
   })
 })

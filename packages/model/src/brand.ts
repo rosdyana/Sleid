@@ -46,6 +46,8 @@ export const BrandTokensSchema = z.object({
     .partial()
     .optional(),
   radius: z.number().min(0).max(200).optional(),
+  /** M11. Footer text the kit puts on its slides. */
+  footerText: z.string().max(200).optional(),
 })
 export type BrandTokens = z.infer<typeof BrandTokensSchema>
 
