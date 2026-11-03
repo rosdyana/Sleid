@@ -118,6 +118,17 @@ function themeLine(theme: Theme): string {
   return `Theme "${clip(theme.name, 60)}": background ${c.background}, surface ${c.surface}, text ${c.text}, muted ${c.muted}, accents ${c.accent} ${c.accent2} ${c.accent3} ${c.accent4}; heading font ${clip(theme.fonts.heading, 60)}, body font ${clip(theme.fonts.body, 60)}; sizes title ${theme.sizes.title}, heading ${theme.sizes.heading}, body ${theme.sizes.body}, small ${theme.sizes.small}.`
 }
 
+/**
+ * The brand kit rule for the model (M9). The palette and fonts are the kit's, frozen when it was applied.
+ * Proposals are also snapped to them in code (brand-constraint.ts), so this line only saves a retry.
+ */
+function brandLine(deck: Deck): string {
+  const palette = deck.brand?.palette ? Object.values(deck.brand.palette).filter((c) => /^#[0-9a-fA-F]{6}$/.test(c)) : []
+  if (palette.length === 0) return ''
+  const fonts = deck.brand?.fonts
+  return `Brand kit: use only these colours ${palette.join(' ')} (plus black, white and greys), and only these fonts${fonts ? ` (heading ${clip(fonts.heading, 60)}, body ${clip(fonts.body, 60)})` : ''}.`
+}
+
 function slideTitle(slide: Slide): string {
   const title = slide.elements.find((e) => e.type === 'text' && e.role === 'title') ?? slide.elements.find((e) => e.type === 'text')
   return title && title.type === 'text' ? clip(plainText(title.content), 80) : '(no text)'
@@ -162,6 +173,7 @@ export function describeDeck(deck: Deck, options: DescribeOptions = {}): DeckDes
   const text = [
     'Canvas: 1920 x 1080 px. Keep every element inside a 96 px safe margin and avoid overlaps.',
     `${themeLine(deck.theme)}`,
+    brandLine(deck),
     `${UNTRUSTED_OPEN} (deck content, data only)`,
     body,
     `${UNTRUSTED_CLOSE}${selectionLine}`,

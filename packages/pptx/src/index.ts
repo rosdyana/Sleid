@@ -2,7 +2,7 @@
 // (hidden slides). Output is a 16:9 (13.333 x 7.5 in) presentation with native text, shapes, tables and charts.
 import PptxGenJS from 'pptxgenjs'
 import JSZip from 'jszip'
-import type { Deck, DiagramElement, Element, TableElement } from '@sleid/model'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, type Deck, type DiagramElement, type Element, type TableElement } from '@sleid/model'
 import { chartPalette, chartSeries, pptxChartKind } from './charts.ts'
 import { monospaceRuns, richTextRuns, type PptxRun } from './text.ts'
 import { inches, pptxColor, pptxFontFace, points, transparencyFor } from './units.ts'
@@ -72,11 +72,39 @@ export async function deckToPptx(deck: Deck, options: DeckToPptxOptions = {}): P
     for (const el of ordered) {
       await addElement(pptx, s, el, { bodyFace, headingFace, monoFace, textColor, mutedColor, surfaceColor, theme, options })
     }
+    if (logoAppliesToSlide(slide, deck)) await addBrandLogo(s, deck, options)
     if (slide.notes) s.addNotes(slide.notes)
   }
 
   const out = (await pptx.write({ outputType: 'uint8array' })) as Uint8Array
   return postProcess(out, hiddenIndexes)
+}
+
+/** Width and height of a PNG from its header. Other formats return undefined (the logo then keeps a square box). */
+function pngAspect(asset: PptxAsset): number | undefined {
+  const d = asset.data
+  if (asset.mime !== 'image/png' || d.byteLength < 24) return undefined
+  const view = new DataView(d.buffer, d.byteOffset, d.byteLength)
+  const w = view.getUint32(16)
+  const h = view.getUint32(20)
+  return w > 0 && h > 0 ? w / h : undefined
+}
+
+/**
+ * The brand logo as a picture on the slide, at the placement's corner, width and margin (M9).
+ * The slide master is not used: each slide carries its own copy, so every slide matches the render.
+ */
+async function addBrandLogo(s: ReturnType<PptxGenJS['addSlide']>, deck: Deck, options: DeckToPptxOptions): Promise<void> {
+  const logo = deck.brand?.logo
+  if (!logo || !options.resolveAsset) return
+  const asset = await options.resolveAsset(logo.src)
+  if (!asset) return
+  const { corner, widthPct, margin } = logo.placement
+  const width = (CANVAS_WIDTH * widthPct) / 100
+  const height = width / (pngAspect(asset) ?? 1)
+  const x = corner.endsWith('l') ? margin : CANVAS_WIDTH - margin - width
+  const y = corner.startsWith('t') ? margin : CANVAS_HEIGHT - margin - height
+  s.addImage({ data: dataUri(asset), x: inches(x), y: inches(y), w: inches(width), h: inches(height), altText: 'Logo' })
 }
 
 interface Ctx {

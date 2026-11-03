@@ -44,6 +44,11 @@ const Output = z.object({
 })
 
 export async function generateTheme(env: AbilityEnv, rawInput: GenerateThemeInput): Promise<AbilityOutcome> {
+  // M9 decision: a deck with a brand kit keeps the kit's theme. Generating a new one would replace the kit's
+  // palette, so it is refused. Varying the kit is not offered (the kit is the constraint, not a starting point).
+  if (env.deck.brand) {
+    throw new LlmError('bad-request', 'This deck has a brand kit, so its theme comes from the kit. Remove the kit to generate a theme.')
+  }
   const input = GenerateThemeInput.parse(rawInput)
   const brand = input.brandColors?.length ? `Brand colours (use them as the accents, in this order): ${input.brandColors.join(', ')}.` : ''
   const request = input.prompt ? `Request:\n${untrustedBlock('request', input.prompt)}` : 'Use the brand colours only.'

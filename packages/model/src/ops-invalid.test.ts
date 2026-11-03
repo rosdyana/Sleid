@@ -23,6 +23,7 @@ const invalid: Array<[string, Record<string, unknown>]> = [
   ['reorderElement', { op: 'reorderElement', slideId: 'S1', elementId: 'missing', z: 'front' }],
   ['setTheme (invalid value)', { op: 'setTheme', theme: { sizes: { title: -1 } } }],
   ['setTitle (invalid type)', { op: 'setTitle', title: 42 }],
+  ['setBrandKit (theme missing)', { op: 'setBrandKit', brandKitId: 'kit' }],
   ['addSection (duplicate id)', { op: 'addSection', id: 'SEC', name: 'again' }],
   ['renameSection', { op: 'renameSection', sectionId: 'missing', name: 'x' }],
   ['deleteSection', { op: 'deleteSection', sectionId: 'missing' }],
@@ -39,7 +40,7 @@ function fixture() {
 }
 
 describe('every op type rejects an invalid target without partial apply', () => {
-  it('covers all 15 op types', () => {
+  it('covers all 16 op types', () => {
     const covered = new Set(invalid.map(([, op]) => op.op as string))
     const all = (OpSchema.options as Array<{ shape: { op: { value: string } } }>).map((o) => o.shape.op.value)
     expect([...covered].sort()).toEqual([...all].sort())

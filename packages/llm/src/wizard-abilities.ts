@@ -6,6 +6,7 @@ import { richFromParagraphs } from './context.ts'
 import { layoutGuard } from './layout-guard.ts'
 import { structured } from './structured.ts'
 import { allowlist, checkOps } from './ops-check.ts'
+import { brandConstraintFor, constrainOpsToBrand } from './brand-constraint.ts'
 import { validateMermaid } from './mermaid.ts'
 import { systemPrompt, untrustedBlock } from './abilities/common.ts'
 import { Outline, OutlineSlide, withKnownSources, type Outline as OutlineT, type WizardBrief as BriefT } from './wizard-schema.ts'
@@ -541,8 +542,11 @@ export async function writeWizardSlide(call: ModelCall, input: WriteSlideInput):
       slide: { id: slideId, notes, elements: built.elements },
     },
   ]
-  const ops = checkOps(deck, raw, allowlist('addSlide'), 'wizard')
-  return { ops, warnings, usage, model, cited, estimates: estimateList, ...(chartKey ? { chartKey } : {}) }
+  const checked = checkOps(deck, raw, allowlist('addSlide'), 'wizard')
+  // A deck with a brand kit: the new slide is snapped to the kit's palette and fonts, and the changes are listed (M9).
+  const constraint = brandConstraintFor(deck)
+  const branded = constraint ? constrainOpsToBrand(checked, constraint) : { ops: checked, warnings: [] as string[] }
+  return { ops: branded.ops, warnings: [...warnings, ...branded.warnings], usage, model, cited, estimates: estimateList, ...(chartKey ? { chartKey } : {}) }
 }
 
 /**

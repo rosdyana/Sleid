@@ -269,6 +269,50 @@ export const SectionSchema = z.object({
 })
 export type Section = z.infer<typeof SectionSchema>
 
+// ---------------------------------------------------------------------------
+// Brand kit reference (M9). The deck keeps the kit id, and the logo already
+// resolved to an asset URL of this deck, so render and export need no lookups.
+// ---------------------------------------------------------------------------
+
+export const LOGO_CORNERS = ['tl', 'tr', 'bl', 'br'] as const
+export const LOGO_SLIDES = ['all', 'all-but-title', 'none'] as const
+
+export const LogoPlacementSchema = z.object({
+  corner: z.enum(LOGO_CORNERS),
+  /** Width of the logo as a percentage of the slide width (2 to 30). */
+  widthPct: z.number().min(2).max(30),
+  /** Distance from the two nearest edges, in canvas pixels (0 to 200). */
+  margin: z.number().min(0).max(200),
+  slides: z.enum(LOGO_SLIDES),
+})
+export type LogoPlacement = z.infer<typeof LogoPlacementSchema>
+
+/** A logo src is either a deck asset URL or a raster/SVG data URL (the editor's own images). */
+export const LogoSrcSchema = z
+  .string()
+  .min(1)
+  .refine((s) => s.startsWith('/api/assets/') || /^data:image\/(png|jpeg|webp|gif|svg\+xml);base64,/.test(s), {
+    message: 'logo must be a deck asset URL or an image data URL',
+  })
+
+export const BrandLogoSchema = z.object({
+  src: LogoSrcSchema,
+  placement: LogoPlacementSchema,
+})
+export type BrandLogo = z.infer<typeof BrandLogoSchema>
+
+export const BrandRefSchema = z.object({
+  brandKitId: z.string().min(1),
+  logo: BrandLogoSchema.optional(),
+  /**
+   * The kit's palette and fonts as they were when the kit was applied. The AI constraint reads these,
+   * not the theme, so a later hand edit of the theme does not widen what the assistant may use.
+   */
+  palette: z.record(z.string(), z.string()).optional(),
+  fonts: z.object({ heading: z.string(), body: z.string() }).optional(),
+})
+export type BrandRef = z.infer<typeof BrandRefSchema>
+
 export const DeckSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -277,6 +321,8 @@ export const DeckSchema = z.object({
   sections: z.array(SectionSchema),
   slides: z.array(SlideSchema),
   version: z.literal(1),
+  /** Set when a brand kit is applied. Absent for a deck without a kit. */
+  brand: BrandRefSchema.optional(),
 })
 export type Deck = z.infer<typeof DeckSchema>
 

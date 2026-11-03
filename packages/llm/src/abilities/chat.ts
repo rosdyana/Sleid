@@ -7,6 +7,7 @@ import type { Deck, Op } from '@sleid/model'
 import { describeDeck } from '../context.ts'
 import { LlmError, publicMessage } from '../errors.ts'
 import { checkOps, allowlist } from '../ops-check.ts'
+import { brandConstraintFor, constrainOpsToBrand } from '../brand-constraint.ts'
 import type { Message, ToolCall, ToolDef, Usage } from '../types.ts'
 import { addUsage, ZERO_USAGE } from '../types.ts'
 import { systemPrompt, ALL_OP_NAMES, type AbilityEnv, type AbilityOutcome } from './common.ts'
@@ -205,8 +206,10 @@ export async function runTool(env: AbilityEnv, call: ToolCall, focusSlideId: str
       }
       case 'apply_ops': {
         const i = ApplyOpsInput.parse(raw)
-        const ops = checkOps(env.deck, i.ops, allowlist(...ALL_OP_NAMES), 'the assistant')
-        outcome = { ability: 'apply_ops', summary: i.summary, ops, warnings: [], usage: ZERO_USAGE, model: env.provider.model }
+        const checked = checkOps(env.deck, i.ops, allowlist(...ALL_OP_NAMES), 'the assistant')
+        const constraint = brandConstraintFor(env.deck)
+        const brand = constraint && checked.length > 0 ? constrainOpsToBrand(checked, constraint) : { ops: checked, warnings: [] }
+        outcome = { ability: 'apply_ops', summary: i.summary, ops: brand.ops, warnings: brand.warnings, usage: ZERO_USAGE, model: env.provider.model }
         break
       }
       default:

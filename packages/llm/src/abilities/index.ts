@@ -13,6 +13,7 @@ import { suggestEffects, SuggestEffectsInput } from './suggest-effects.ts'
 import { speakerNotes, SpeakerNotesInput } from './speaker-notes.ts'
 import { altText, AltTextInput } from './alt-text.ts'
 import { explain, ExplainInput } from './explain.ts'
+import { brandConstraintFor, constrainOpsToBrand } from '../brand-constraint.ts'
 
 export const ABILITY_OPS: Record<string, readonly OpName[]> = {
   rewriteText: ['updateElement'],
@@ -57,8 +58,19 @@ export type AbilityInputs = {
   explain: ExplainInput
 }
 
-/** Runs a single-purpose ability. The input is checked against its schema first. */
+/**
+ * Runs a single-purpose ability. The input is checked against its schema first. When the deck has a brand
+ * kit, the outcome's ops are snapped to the kit's palette and fonts, and each change is added to the warnings.
+ */
 export async function runAbility<N extends keyof AbilityInputs>(name: N, env: AbilityEnv, input: unknown): Promise<AbilityOutcome> {
+  const outcome = await runAbilityUnconstrained(name, env, input)
+  const constraint = brandConstraintFor(env.deck)
+  if (!constraint || outcome.ops.length === 0) return outcome
+  const constrained = constrainOpsToBrand(outcome.ops, constraint)
+  return { ...outcome, ops: constrained.ops, warnings: [...outcome.warnings, ...constrained.warnings] }
+}
+
+async function runAbilityUnconstrained<N extends keyof AbilityInputs>(name: N, env: AbilityEnv, input: unknown): Promise<AbilityOutcome> {
   const schema = INPUTS[name]
   const parsed = schema.safeParse(input)
   if (!parsed.success) throw new LlmError('bad-request', `Invalid input for ${name}: ${parsed.error.issues.map((i) => i.message).join('; ')}`)

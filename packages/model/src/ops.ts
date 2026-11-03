@@ -21,6 +21,7 @@ import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { layoutElements } from './defaults.ts'
 import { mergePatch, writeFields, type PlainObject } from './patch.ts'
 import {
+  BrandLogoSchema,
   ElementInputSchema,
   ElementSchema,
   SLIDE_LAYOUTS,
@@ -88,6 +89,13 @@ export const OpSchema = z.discriminatedUnion('op', [
     z: z.enum(['front', 'back', 'forward', 'backward']),
   }),
   z.object({ op: z.literal('setTheme'), theme: z.record(z.string(), z.unknown()) }),
+  // M9. brandKitId null removes the kit (theme kept, logo cleared). Otherwise theme is the kit's full theme.
+  z.object({
+    op: z.literal('setBrandKit'),
+    brandKitId: Id.nullable(),
+    theme: ThemeSchema.optional(),
+    logo: BrandLogoSchema.nullish(),
+  }),
   z.object({ op: z.literal('setTitle'), title: z.string() }),
   z.object({
     op: z.literal('addSection'),
@@ -450,6 +458,32 @@ function setTheme(doc: Y.Doc, op: Extract<Op, { op: 'setTheme' }>): OpResult {
   return ok()
 }
 
+// Applies a brand kit: replaces the theme with the kit's theme and records the kit and its logo in the deck.
+// The theme is replaced whole (not merged), so no token of the previous theme survives.
+function setBrandKit(doc: Y.Doc, op: Extract<Op, { op: 'setBrandKit' }>): OpResult {
+  const root = getDeckMap(doc)
+  if (op.brandKitId === null) {
+    if (op.theme) fail('a theme cannot be set when a brand kit is removed')
+    root.delete('brand')
+    return ok()
+  }
+  if (!op.theme) fail('applying a brand kit needs its theme')
+  const themeMap = themeOf(doc)
+  for (const key of [...themeMap.keys()]) themeMap.delete(key)
+  writeFields(themeMap, op.theme as PlainObject)
+
+  root.delete('brand')
+  const brand = new Y.Map<unknown>()
+  root.set('brand', brand)
+  writeFields(brand, {
+    brandKitId: op.brandKitId,
+    palette: { ...op.theme.colors },
+    fonts: { heading: op.theme.fonts.heading, body: op.theme.fonts.body },
+    ...(op.logo ? { logo: op.logo } : {}),
+  })
+  return ok()
+}
+
 function setTitle(doc: Y.Doc, op: Extract<Op, { op: 'setTitle' }>): OpResult {
   getDeckMap(doc).set('title', op.title)
   return ok()
@@ -515,6 +549,8 @@ function applyOne(doc: Y.Doc, op: Op): OpResult {
       return reorderElement(doc, op)
     case 'setTheme':
       return setTheme(doc, op)
+    case 'setBrandKit':
+      return setBrandKit(doc, op)
     case 'setTitle':
       return setTitle(doc, op)
     case 'addSection':

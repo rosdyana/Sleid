@@ -1,6 +1,6 @@
 // Browser-safe renderers: slide and deck HTML for reveal.js.
 // Node-only parts (reading reveal.js files for standalone output) live in render-node.ts.
-import type { Deck, Element, Slide, Theme, TextElement, ShapeElement, ImageElement, TableElement, CodeElement, EmbedElement, DiagramElement } from '@sleid/model'
+import { logoAppliesToSlide, type Deck, type Element, type Slide, type Theme, type TextElement, type ShapeElement, type ImageElement, type TableElement, type CodeElement, type EmbedElement, type DiagramElement } from '@sleid/model'
 import { richTextToHtml } from './rich-text.ts'
 import { renderChartSvg } from './chart.ts'
 import { BASE_CSS, themeCssVariables } from './styles.ts'
@@ -68,7 +68,33 @@ export function renderSlideHtml(slide: Slide, deck: Deck, options: SlideRenderOp
     .map((el) => renderElement(el, theme, fragments))
     .join('')
   const notes = slide.notes ? `<aside class="notes">${escapeHtml(slide.notes)}</aside>` : ''
-  return `<section ${attrs.join(' ')}><div class="sleid-stage">${elements}</div>${notes}</section>`
+  return `<section ${attrs.join(' ')}><div class="sleid-stage">${elements}${logoOverlayHtml(slide, deck)}</div>${notes}</section>`
+}
+
+// ---------------------------------------------------------------------------
+// Brand logo (M9). A slide overlay, not an element: it cannot be selected or moved
+// by accident, and it is drawn the same way in present, HTML, PDF and PNG output.
+// ---------------------------------------------------------------------------
+
+const LOGO_POSITION: Record<string, (margin: string) => string> = {
+  tl: (m) => `left:${m}px;top:${m}px`,
+  tr: (m) => `right:${m}px;top:${m}px`,
+  bl: (m) => `left:${m}px;bottom:${m}px`,
+  br: (m) => `right:${m}px;bottom:${m}px`,
+}
+
+export function logoOverlayHtml(slide: Slide, deck: Deck): string {
+  if (!logoAppliesToSlide(slide, deck)) return ''
+  const logo = deck.brand!.logo!
+  // Same rule as the model's LogoSrcSchema: an asset URL or a raster data URL, never a remote one.
+  const isAsset = logo.src.startsWith('/api/assets/')
+  const isRaster = /^data:image\/(png|jpeg|webp|gif);base64,/.test(logo.src)
+  const src = isAsset || isRaster ? safeImageSrc(logo.src) : undefined
+  if (!src) return ''
+  const position = LOGO_POSITION[logo.placement.corner]
+  if (!position) return ''
+  const style = `position:absolute;${position(num(logo.placement.margin))};width:${num(logo.placement.widthPct)}%;height:auto;pointer-events:none;z-index:1000`
+  return `<img class="sleid-brand-logo" src="${escapeHtml(src)}" alt="Logo" style="${escapeHtml(style)}">`
 }
 
 function slideBackgroundCss(slide: Slide, theme: Theme): string {

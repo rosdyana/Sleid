@@ -3,6 +3,7 @@
 // Layout of the doc (root Y.Map 'deck'):
 //   id, title, version              primitives
 //   size, theme                     Y.Map (fields merge one by one)
+//   brand (optional, M9)            Y.Map { brandKitId, logo { src, placement } }; absent without a brand kit
 //   sections                        Y.Array<Y.Map { id, name }>
 //   slides                          Y.Map<slideId, Y.Map>. Each slide Y.Map has its
 //                                   meta fields, an `order` string (fractional index,
@@ -80,6 +81,12 @@ function writeDeckIntoRoot(root: Y.Map<unknown>, parsed: Deck): void {
   const theme = new Y.Map<unknown>()
   root.set('theme', theme)
   writeFields(theme, parsed.theme)
+
+  if (parsed.brand) {
+    const brand = new Y.Map<unknown>()
+    root.set('brand', brand)
+    writeFields(brand, parsed.brand as PlainObject)
+  }
 
   const sections: YSections = new Y.Array<Y.Map<unknown>>()
   root.set('sections', sections)
