@@ -131,6 +131,16 @@ describe('import service (real Postgres)', () => {
     return { id: u.id }
   }
 
+  it.skipIf(!db)('a Google Slides import is recorded as google-slides with its file id, and still goes through the pptx checks', async () => {
+    const a = await person('imp-google')
+    const fileId = '1AbCdEfGhIjKlMnOpQrStUvWxYz_-012'
+    const { importId } = await imports.startImport(deps, a, { format: 'pptx', fileName: `${fileId}.pptx`, bytes: PPTX_HEAD, google: { fileId } })
+    const row = await getImportJob(db!, importId)
+    expect(row).toMatchObject({ format: 'google-slides', googleFileId: fileId, sourceKey: `import/${importId}` })
+    const bad = await refused(imports.startImport(deps, a, { format: 'markdown', fileName: 'x.md', bytes: enc('# x'), google: { fileId } }))
+    expect(bad.status).toBe(400)
+  })
+
   it.skipIf(!db)('starts an import: stores the source under import/<id>, inserts a queued row and queues the job', async () => {
     const a = await person('imp-start')
     const bytes = enc('# Deck\n\nText')

@@ -29,6 +29,7 @@ import { CommentsPanel, elementName, pinNumbers, type PendingComment } from './c
 import { CommentPins, pinsFor } from './comments/CommentPins.tsx'
 import { useComments } from './comments/useComments.ts'
 import { HistoryPanel } from './HistoryPanel.tsx'
+import { ImportDialog } from '~/components/import/ImportDialog'
 
 export type EditorDeck = { id: string; title: string; starred: boolean; role: string }
 export type EditorUser = { id: string; name: string; email: string; image: string | null }
@@ -147,6 +148,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const [askOpen, setAskOpen] = useState(false)
   const [themeOpen, setThemeOpen] = useState(false)
   const [exportDialog, setExportDialog] = useState<DialogFormat | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
   const exportJobs = useExportJobs(meta.id)
   const [context, setContext] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null)
   const [starred, setStarredState] = useState(meta.starred)
@@ -384,6 +386,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
       )
     },
     openExport: (format) => setExportDialog(format),
+    openImport: () => setImportOpen(true),
     prompt: setPrompt,
     openShortcuts: () => setShortcutsOpen(true),
     toast,
@@ -771,6 +774,7 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
           }}
         />
       )}
+      {importOpen && <ImportDialog openInNewTab onClose={() => setImportOpen(false)} />}
       <ExportTray jobs={exportJobs.jobs} onDismiss={exportJobs.dismiss} />
       {context && context.items.length > 0 && <ContextMenu x={context.x} y={context.y} items={context.items} onClose={() => setContext(null)} />}
       <Toast message={toastMessage} onDone={onToastDone} />

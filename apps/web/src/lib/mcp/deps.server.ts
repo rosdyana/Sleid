@@ -7,7 +7,8 @@ import { FixedWindowLimiter } from './rate-limit.ts'
 import type { McpDeps } from './deps.ts'
 
 const DEFAULT_RATE_PER_MINUTE = 120
-const DEFAULT_MAX_BODY_BYTES = 1024 * 1024
+/** The MCP body is buffered in memory, so this bounds memory per request. 16 MB lets a pptx of about 12 MB through import_deck (base64). */
+const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 const RENDER_TIMEOUT_MS = 30_000
 
 let limiter: FixedWindowLimiter | null = null

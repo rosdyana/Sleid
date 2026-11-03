@@ -1,8 +1,8 @@
 # Sleid
 
-A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
+A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), import (PowerPoint, Google Slides, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 7** (comments, version history, presenter view and phone remote). See the status table in DESIGN.md.
+Status: **milestone 8** (import: PowerPoint, Google Slides, Markdown and JSON). See the status table in DESIGN.md.
 
 ## Layout
 
@@ -59,7 +59,9 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 | `SLEID_TEST_AUTH` | web | `1` enables email+password sign-in for the browser checks. Refused when `NODE_ENV=production`. |
 | `COLLAB_TOKEN_SECRET` | web (signs), collab (verifies) | HMAC key for the 5-minute collab tokens. At least 32 characters. Must match in both. |
 | `MCP_RATE_LIMIT_PER_MINUTE` | web | Calls to `/mcp` per token per minute (default 120). Counted per process, in memory. |
-| `MCP_MAX_BODY_BYTES` | web | Largest request body accepted by `/mcp` (default 1048576). |
+| `MCP_MAX_BODY_BYTES` | web | Largest request body accepted by `/mcp` (default 16777216, 16 MB). The body is held in memory. Through `import_deck` that is a pptx of about 12 MB. |
+| `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER` | web | Google Drive Picker for Slides import (M8). Both set: the **Choose from Google Drive** button shows. The key is a browser key and is sent to the browser on purpose. |
+| `SLEID_TEST_GOOGLE_EXPORT_ORIGIN` | web | Test only. Sends the Google Slides export to a local fake server (`tests/m8.mjs`). Honoured only with `SLEID_TEST_AUTH=1`, refused when `NODE_ENV=production`. |
 | `COLLAB_INTERNAL_SECRET` | web, collab | Sent as `x-sleid-internal` on every internal API call. At least 16 characters. |
 | `COLLAB_PORT` | collab | WebSocket port, default `3001` |
 | `COLLAB_HOST` | collab | WebSocket bind address, default `127.0.0.1`. Use `0.0.0.0` only in a container. |
@@ -85,6 +87,19 @@ Open http://localhost:3000, sign in with Google, and click **Blank deck**. Open 
 
 Anyone who can set the flag, or who uses a user provider on a private network, can probe that network through the error messages, so keep it off on a multi-user server.
 
+## Import (M8)
+
+**New ▸ Import file…** on the dashboard, or **File ▸ Import slides…** in the editor (the new deck opens in a new tab). Both open the same dialog:
+
+- **File**: a `.pptx`, `.md` / `.markdown` or `.json`, by drop or by choice. The server checks the content (the zip signature for pptx, UTF-8 and no NUL bytes for text, valid JSON for json), not the file name. PowerPoint up to 50 MB; Markdown and JSON up to 5 MB.
+- **Google Slides**: paste a link of the form `https://docs.google.com/presentation/d/<id>/…`. The presentation must be shared as **Anyone with the link**; a private one is refused with a message that says so. With `GOOGLE_PICKER_API_KEY` and `GOOGLE_CLOUD_PROJECT_NUMBER` set, **Choose from Google Drive** opens the Picker, after you connect Drive once (incremental consent for the `drive.file` scope).
+
+The import runs in the worker (`pnpm dev` runs it). The dialog polls its progress, then shows the new deck with a list of warnings (things that were left out, such as an unsupported shape or a picture that was too large). Each import counts toward a limit of 10 an hour per user.
+
+Markdown splits on `---` lines, and the title comes from the front matter or the first slide. JSON is the deck format the editor downloads. Speaker notes, charts (as native charts), tables and images come across from PowerPoint; theme colours and fonts are best effort (see DESIGN.md, M8).
+
+**MCP.** `import_deck` makes a deck from a file sent as base64 (pptx) or as text (markdown, json). Through MCP a pptx can be about 12 MB at most, because the request body is capped at 16 MB (`MCP_MAX_BODY_BYTES`) and base64 adds a third. Larger files: use the editor's import.
+
 ## Google OAuth client
 
 1. Open the Google Cloud Console, choose or create a project, and go to **APIs & Services → Credentials**.
@@ -93,6 +108,15 @@ Anyone who can set the flag, or who uses a user provider on a private network, c
 4. Under **Authorized JavaScript origins** add `http://localhost:3000`.
 5. Under **Authorized redirect URIs** add `http://localhost:3000/api/auth/callback/google`.
 6. Copy the client ID and secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+**Google Drive Picker (optional, for Slides import from Drive).** In the same Google Cloud project:
+
+1. Enable the **Google Picker API** and the **Google Drive API**.
+2. Under **Credentials**, create an **API key**. Restrict it to the Picker API and to your origin (`http://localhost:3000`). It is a browser key: the page loads Google's Picker with it, so it is visible to the browser. Put it in `.env` as `GOOGLE_PICKER_API_KEY`.
+3. Copy the project **number** (not the project id) into `GOOGLE_CLOUD_PROJECT_NUMBER`.
+4. The consent screen must list the scope `https://www.googleapis.com/auth/drive.file`. Sleid asks for it only when you connect Drive, and then reads only the presentations you pick.
+
+Restart `pnpm dev` after changing `.env`. Without these two values the Drive button does not show.
 
 Without these values the Google button will fail at sign-in. The server logs a warning at startup.
 
@@ -113,6 +137,7 @@ Without these values the Google button will fail at sign-in. The server logs a w
 | `pnpm --filter @sleid/web test:e2e:mcp` | MCP check over HTTP against the live editor (needs the dev servers and a token) |
 | `pnpm --filter @sleid/web test:e2e:wizard` | Prompt-to-deck check with a fake model and fake SearXNG (needs `node tests/fake-searxng.mjs 4412` and `SEARXNG_URL=http://127.0.0.1:4412`) |
 | `pnpm --filter @sleid/web test:e2e:m7` | Comments, version history, presenter and phone remote (needs the dev servers and Chrome; uses `COLLAB_INTERNAL_SECRET`) |
+| `pnpm --filter @sleid/web test:e2e:m8` | Import: PPTX (from a seeded deck), Markdown, JSON, a public Google Slides link (fake server), a private link, a text file named .pptx (needs the dev servers started with `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413`, Chrome and `COLLAB_INTERNAL_SECRET`) |
 
 ## Browser checks
 
@@ -128,6 +153,15 @@ SCREENSHOT_DIR=./test-results/screenshots \
 CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 SCREENSHOT_DIR=./test-results/screenshots \
   pnpm --filter @sleid/web test:e2e:collab    # terminal 2: co-editing
+```
+
+The import check (`test:e2e:m8`) starts a fake Google server itself, on port 4413, so the dev stack must run with the Google test override:
+
+```bash
+SLEID_TEST_AUTH=1 SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413 pnpm dev
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e:m8
 ```
 
 The export check (`test:e2e:export`) builds a deck with text, a chart, an uploaded image and a Mermaid diagram, exports PDF and PPTX from the menus, verifies both files, publishes the deck, opens the public page logged out, unpublishes it, and writes PNG renders of the outputs (macOS `sips`, and LibreOffice if `soffice` is installed). It needs the worker, so it runs under `pnpm dev`.

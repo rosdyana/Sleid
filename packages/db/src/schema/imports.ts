@@ -8,7 +8,7 @@ export const importStatus = pgEnum('import_status', ['queued', 'running', 'done'
 
 /**
  * One row per import request. The worker creates the deck and records its id and the warnings.
- * The uploaded bytes live in storage under `sourceKey`; a Google Slides import keeps its URL instead.
+ * The bytes live in storage under `sourceKey` until the worker is done; a Google Slides import also records the file id.
  */
 export const importJobs = pgTable(
   'import_jobs',
@@ -23,9 +23,9 @@ export const importJobs = pgTable(
     /** Deck title given by the caller (MCP). Null means the title comes from the file. */
     title: text('title'),
     bytes: integer('bytes'),
-    /** Storage key of the uploaded file. Null for Google Slides. */
+    /** Storage key of the bytes to convert (the upload, or the fetched Google Slides export). */
     sourceKey: text('source_key'),
-    /** Google Slides: the presentation id from a validated URL, or a Drive file id. */
+    /** Google Slides: the presentation id from a validated URL, or the Drive file id from the Picker. */
     googleFileId: text('google_file_id'),
     /** The deck the import created, once it is done. */
     deckId: uuid('deck_id').references(() => decks.id, { onDelete: 'set null' }),

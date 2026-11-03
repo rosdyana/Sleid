@@ -15,7 +15,7 @@ Living document. Update it as decisions change.
 | 5. MCP server + access tokens | **Done** (checks run, see M5 below; open gaps and unverified items listed there) |
 | 6. Wizard + reference ingestion + research | **Done** (checks run, see M6 below; open items listed there, including the research check on a live search provider and the visual defects of live run 3) |
 | 7. Comments, version history, presenter + phone remote | **Done** (checks run, see M7 below; open items and unverified parts listed there) |
-| 8. Import: PPTX, Google Slides, Markdown | Pending |
+| 8. Import: PPTX, Google Slides, Markdown, JSON | **Done** (checks run, see M8 below; open items and unverified parts listed there. Real Google OAuth, Picker and Drive were not run.) |
 | 9. Templates and brand kits | Pending |
 
 ### What M0 built, and decisions taken while building it
@@ -326,7 +326,7 @@ There's also a public "Publish to web" read-only present link.
 
 ### Import
 - **PPTX**: JSZip + DrawingML parse into the model. Best effort: text, shapes, images, tables, notes, basic theme.
-- **Google Slides**: Google Picker, then Drive export as PPTX, then the PPTX path.
+- **Google Slides**: Google Picker, then Drive export as PPTX, then the PPTX path. (Built in M8, see below; a public link is also supported, and it is the first path built.)
 - **Markdown**: reveal syntax.
 - **JSON**: native format.
 
@@ -1222,3 +1222,71 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
 - A follower who joins mid-presentation while the heartbeat is the only source of state (the follow check started after the presenter's last change, so it relied on the heartbeat).
 - Mentions of a person added to the deck after the comment was written.
 - Notifications beyond the in-app badge and list (no email, as the brief said).
+
+## M8: Import (PowerPoint, Google Slides, Markdown, JSON)
+
+Scope: the import core (converters, `import_jobs`, the worker job, the upload API and the MCP tool) from the first two commits of M8, then the three parts that finish it: Google Slides by public link (path A), Google Slides by the Drive Picker (path B), and the Import UI with the MCP body cap. Branch `m8-import`, not pushed.
+
+**Layout.**
+- `packages/pptx/src/import`: the PPTX converter (zip, package, theme, slide, chart, XML). `packages/model/src/import-json.ts`: the JSON format. `packages/render/src/markdown.ts`: Markdown.
+- `packages/db`: `schema/imports.ts` (`import_jobs`, enums `import_format` with `google-slides`, `import_status`), `import-jobs.ts` (rows, the per-user count), `import-deck.ts` (the deck, its images and its first snapshot in one transaction). Migrations `0011_m8_import_jobs.sql` and `0012_m8_import_title.sql`.
+- `apps/worker/src/import`: `runner.ts` (one job, end to end), `service.ts` (the queue).
+- `apps/web/src/lib`: `import.server.ts` (the rules: the size caps, the magic bytes, the rate limit, the upload and status; the storage and queue are injected), `import.functions.ts` (server functions), `google-slides.ts` (the link parser, the redirect allowlist, the test override; pure), `google-slides.server.ts` (path A fetch), `google-drive-account.ts` (the account rules: scopes, Picker config, access token; pure), `google-drive.server.ts` (path B wiring and the live deps), `drive.server.ts` (the `DriveExporter`).
+- `apps/web/src/routes/api/imports.ts` (`POST /api/imports`), `apps/web/src/lib/mcp/server.ts` (`import_deck`).
+- `apps/web/src/components/import`: `ImportDialog.tsx`, `import-client.ts` (upload and polling), `import-format.ts`, `google-picker.ts` (the Picker, loaded on click only).
+- Dashboard `routes/_authed/index.tsx` (the New split button), editor `MenuBar.tsx` (File ▸ Import slides…) and `EditorShell.tsx` (the dialog).
+- Browser check `apps/web/tests/m8.mjs` (`test:e2e:m8`).
+
+**What an import does.** The web app checks the bytes, stores them under `import/<id>`, inserts a `queued` row and queues a job, then answers 202 with the import id. The worker converts the file (PPTX, Markdown or JSON; a Google Slides import is a PPTX and takes the same path), moves the images into assets, creates the deck with its owner membership and its first snapshot, and records `done` with the deck id and the warnings. The dialog polls `getImportFn` once a second. A failure is written to the row with a message the user can read, and the uploaded bytes are deleted in every case.
+
+**Decisions.**
+- **Conversion runs in the worker.** A large PPTX takes seconds, so the request only stores and queues. The editor, the MCP tool and the dialog all wait for the same row. Concurrency is 2 (`import` queue).
+- **MCP waits up to 60 seconds** (`IMPORT_WAIT_MS`). If the worker has finished by then, `import_deck` returns the deck id and URL with the warnings. If not, it returns an error that gives the import id, and says the import keeps running and to look for the deck with `list_decks`. A failed import returns its message as the tool error.
+- **Security caps.** PPTX: 50 MB upload, 50 MB zip, 200 MB uncompressed, 5000 entries, 10 MB per image (the same as the editor's upload). Markdown and JSON: 5 MB, UTF-8, no NUL bytes; JSON must parse. Google Slides: the export is read while streaming, and stops at 50 MB even without a length header. The MCP request body is capped at 16 MB (see below).
+- **Magic bytes, not the file name.** The extension picks the format for the dialog only. The server checks a PPTX for the zip local-file header (`PK`) before anything is stored, so a text file renamed to `.pptx` is refused at upload with "This is not a PowerPoint file: its content is not a zip package." The worker checks again while converting, through the zip reader.
+- **Rate limit.** Ten imports per user per hour, counted in Postgres under an advisory lock on the user id, so it holds across processes. Failed imports count, because each one costs a fetch or a conversion.
+- **Google Slides, path A (public link).** The link is parsed strictly: https, host `docs.google.com` (no port, no user name), path `/presentation/d/<id>/…`, an id of at least 20 letters, digits, `_` or `-`. The export URL is `https://docs.google.com/presentation/d/<id>/export/pptx`, fetched through the same pinned fetch the wizard uses for URL references (`createPinnedFetch`, which checks every address and connects only to the vetted ones). Redirects are followed by hand, at most 5, and each target must be `https` to `docs.google.com` or to a subdomain of `googleusercontent.com` (the bare domain is refused), on the default port. An HTML answer (Google's login page for a private presentation) or a 401 or 403 becomes "This presentation isn't public. Share it as 'Anyone with the link' or use Google Drive." The file id is recorded in `import_jobs.google_file_id`, and the format is `google-slides`.
+- **Google Slides, path B (Drive Picker).**
+  - *Consent is incremental.* `auth.server.ts` sets `accessType: 'offline'` for Google, so a refresh token is issued at sign-in. Connecting Drive calls `authClient.linkSocial({ provider: 'google', scopes: ['https://www.googleapis.com/auth/drive.file'], callbackURL })` (Better Auth 1.7.15 `linkSocial` with `scopes`). Better Auth merges the scope into the existing Google account row (`linkOAuthAccount` in `oauth2/link-account.mjs`), so a later sign-in does not ask for Drive.
+  - *Tokens come from Better Auth.* The server finds the user's Google account row, checks that its `scope` includes `drive.file`, and calls `auth.api.getAccessToken({ body: { accountId, userId } })`. Better Auth refreshes the token when it is about to expire (`getValidAccessToken`). A missing scope asks the user to connect Drive (409). A failed refresh (revoked access) becomes the reconnect message (403).
+  - *The Picker needs the token in the browser.* Google's Picker lists the user's files only with an OAuth token from the page, so `drivePickerTokenFn` returns the user's access token to the signed-in user who asked for it. The token carries the scopes Google granted that account (the sign-in scopes and `drive.file`), and it is used for the Picker alone. The Drive export itself runs on the server. This is a decision to review: the token is in the page's memory while the Picker is open. The alternative (a server-side Picker) does not exist.
+  - *The export.* `DriveExporter.exportPptx` calls `GET https://www.googleapis.com/drive/v3/files/<id>/export?mimeType=application/vnd.openxmlformats-officedocument.presentationml.presentation` with the bearer token, with redirects refused. A 401 or 403 becomes "Google Drive refused access to this presentation. Reconnect Google Drive and try again." A 404 says the file was not found, a 429 or 5xx says Drive is busy, and anything else says it cannot be exported. The same 50 MB cap and zip check apply.
+  - *Picker configuration.* `GOOGLE_PICKER_API_KEY` and `GOOGLE_CLOUD_PROJECT_NUMBER` both set (the number digits only) turn the button on. `googleImportConfigFn` sends them to the signed-in user. The API key is a browser key: Google's Picker needs it in the page, so it is not a secret, and it should be restricted to the Picker API and the origin (documented in `.env.example` and the README).
+- **Test override for path A.** `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413` replaces `https://docs.google.com` as the export origin, and only that origin is added to the redirect allowlist. It is honoured only when `SLEID_TEST_AUTH=1` (the same gate as the test login), it is refused outright when `NODE_ENV=production`, and it must be a local http origin. The link parser still accepts only `docs.google.com`, so the test exercises the real parser.
+- **MCP body cap raised to 16 MB** (`MCP_MAX_BODY_BYTES` default, was 1 MB). The MCP handler buffers the whole body in memory, so the cap bounds memory per request: one request can hold the 16 MB body, its JSON text and the decoded PPTX (about 12 MB), so a few tens of MB at most per request, multiplied by the number of concurrent requests. The effective cap for `import_deck` is a pptx of about 12 MB (base64 adds a third). The tool's description and its `contentBase64` limit say so, and the README and `.env.example` give the same figure. Larger decks use the editor's import, which takes 50 MB.
+- **The theme is not guaranteed to round-trip through our own exporter.** The importer reads a basic theme only (colours and fonts, best effort). `m8.mjs` imports a deck with the default theme, and the imported deck shows the PowerPoint theme name "Office Theme". A custom theme (brand colours, fonts) was not tested, so whether it comes back is unknown. Native text, shapes, tables, charts, images and notes do come across (checked in `m8.mjs`).
+
+**Warnings.** The converter lists what it left out, one line each: a shape that is not supported (for example a wave is dropped, a rectangle is used for an unsupported preset), a picture that is missing or too large (over 10 MB), a chart type that is not supported, an unsupported object, a gradient background imported as its first colour, and a slide missing from the file. Markdown and JSON produce none. The dialog shows the count and the list, collapsed.
+
+**Errors the user sees.** Refusals at upload or at the Slides link are shown inline on the form, with the server's message. A conversion failure (the worker) is shown on the result screen with the row's message. The generic failure text is "The file could not be imported. Check that it is a valid file of the chosen type and try again." (the converter's own messages are shown when they are written for users).
+
+### M8 verification
+
+Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0.0.1:5433), Google Chrome (`CHROME_PATH`). Dev stack: `pnpm dev` with `SLEID_TEST_AUTH=1`, `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413`, a scratch `LLM_SECRET_KEY`, `LLM_USER_ALLOW_PRIVATE_URLS=1`, `SLEID_TEST_PRIVATE_WIZARD_URLS=1`, `SEARXNG_URL=http://127.0.0.1:4412` with `node tests/fake-searxng.mjs 4412` running.
+
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm test` (root): **76 files, 824 tests, all passing**. The baseline the brief named was 71 files and 779 tests. The new coverage: `google-slides.test.ts` (the link parser, the redirect allowlist, the test-origin gate), `google-slides.server.test.ts` (redirects, the allowlist, the HTML-means-private case, the streaming cap, the override against a local server through the real pinned fetch), `drive.server.test.ts` (against a local fake Drive server: the success with its bearer token, the 403 reconnect message, the declared and streamed size caps, a non-zip answer, 404, 503, a refused connection), `google-drive-account.test.ts` (scopes, connected state, the token and the reconnect cases, the Picker config), `import-format.test.ts`, and the DB test of a Google import row (`google-slides` with its file id).
+- `pnpm --filter @sleid/web build`: exit 0.
+- Browser checks against the dev stack, all passing (exit 0 each): `smoke` 22 checks, `collab` 24, `export` 21, `ai` 32, `mcp` 22, `wizard` 34 (with the fake SearXNG), `m7` 45, and `m8` 30 (new).
+- What `m8.mjs` covers. Owner A seeds a deck (three slides, a chart, a table, an uploaded image, notes), exports it as PPTX from File ▸ Download, and imports it through the Import dialog on the dashboard. The new deck has three slides, the notes, the chart and table on slide 2 and the image on slide 3. The chart draws in the editor. Present opens on slide 2 and shows the chart and the table. Then Markdown is imported from File ▸ Import slides… (the deck opens in a new tab; two slides, title from the front matter), JSON from the dashboard (the same number of slides and the new title), and a public Google Slides link through the test override (three slides, and the result lists the warning about the unsupported shape it adds to the served copy). A private link shows the share message, a link to another host is refused with the paste message, and a text file named `.pptx` is refused with "This is not a PowerPoint file: its content is not a zip package." The run ends with no page or console errors. The rate-limit message was not checked (optional, and it would need eleven imports).
+- The `m8.mjs` check found three problems in its own first drafts, and they were fixed in the test, not the app: the present check expected slide 1 when the window opens on the current slide; the private-link and bad-link refusals are inline errors on the form (so the footer is "Cancel", not "Close"); and the text-file refusal arrives as a start error, not a failed row, which the test already handles.
+- The existing suites were updated for the new dashboard labels ("New", and "More ways to start a deck" then "From wizard"): `smoke`, `collab`, `export`, `ai`, `m7`, `mcp` and `wizard`.
+- Screenshots, in `/private/tmp/claude-501/-Users-rosdyanakusuma-Ross-projects-sleid/c1400ba8-0388-449b-ad43-785f923a7331/scratchpad/shots-m8/`: `import-dialog.png` (the File tab), `import-result.png` (the result with its warning expanded), `imported-pptx-editor.png` (the imported deck, with the chart on slide 2), `imported-pptx-present.png` (present mode on slide 2). Each was looked at; the split button's caret was enlarged after the first look.
+
+### Unverified in M8
+
+- **Real Google, nothing here touched it.** The OAuth consent for `drive.file` through `linkSocial({ scopes })`, the refresh token from `accessType: 'offline'`, the Picker's rendering and its callback, the Drive export and its response, and the public `docs.google.com` export with its real redirect chain (to `googleusercontent.com`) and its real login page for a private file. The tests used fake servers that imitate the shapes the code expects. Google documents a size limit on Drive's `files.export` response, which the 50 MB cap does not reflect. Check it on a real file before relying on a big deck.
+- **Real files.** The PPTX tests used our own export of a seeded deck, plus one synthetic unsupported shape. Real PowerPoint files (themes, masters, SmartArt, grouped shapes, embedded fonts), Keynote exports and Google's own PPTX exports were not imported. The importer's fidelity on those is unknown.
+- Firefox and Safari. Chrome only.
+- A deck near the 50 MB limit: the time to convert and the memory of the worker were not measured.
+- The rate limit's message (not checked in the browser).
+
+### Known gaps (M8)
+
+- **No insert into the current deck.** Every import makes a new deck. Importing slides into the deck that is open is not built.
+- **The mark-done failure edge.** The worker creates the deck and its snapshot in one transaction, then marks the row `done` in a separate statement. If that last write fails (the database is down between the two), the row is set to `failed` and the deck stays. A retry creates a second deck. The fix is to mark the row in the same transaction as the deck; not built.
+- **The theme does not round-trip** (see the decision above).
+- **The Picker token** is visible to the page while the Picker is open (see the decision above).
+- **Rate limit and body cap are per process.** The MCP cap is per request, and the memory bound is per process (concurrent requests add up).
+- **Polling.** The dialog polls once a second and stops after five minutes, with a message that the import keeps running in the background. A deck that appears after that is found on the dashboard.
+- **Images over 10 MB** in a PPTX are left out, with a warning. Larger images in the editor's own upload (10 MB) and in the export match.

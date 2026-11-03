@@ -20,6 +20,9 @@ export const auth = betterAuth({
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID ?? '',
       clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? '',
+      // Refresh tokens, so the Drive import can get a new access token later (M8). Drive itself is requested with
+      // linkSocial({ scopes }) when the user connects it, not at sign-in.
+      accessType: 'offline',
     },
   },
   // Test-only path for Playwright. Only enabled when SLEID_TEST_AUTH=1 outside production.

@@ -36,7 +36,7 @@ export async function runImport(env: ImportRunnerEnv, importId: string): Promise
   try {
     const bytes = row.sourceKey ? await env.uploads.get(row.sourceKey) : null
     if (!bytes) throw new ImportProblem('The uploaded file is missing. Upload it again.')
-    const converted = await convert(row.format as ImportFormat, bytes)
+    const converted = await convert(row.format, bytes)
     const deck: Deck = row.title ? { ...converted.deck, title: row.title.slice(0, 200) } : converted.deck
     const created = await createImportedDeck(env.db, {
       userId: row.userId,
@@ -63,7 +63,8 @@ export async function runImport(env: ImportRunnerEnv, importId: string): Promise
 
 /** The deck for the file, with the converter's warnings. Each converter throws a message that is safe to show. */
 async function convert(format: ImportFormat, bytes: Uint8Array): Promise<{ deck: Deck; warnings: string[] }> {
-  if (format === 'pptx') return pptxToDeck(bytes)
+  // A Google Slides import is the PPTX export of the presentation, so it takes the PPTX path.
+  if (format === 'pptx' || format === 'google-slides') return pptxToDeck(bytes)
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   if (format === 'markdown') return { deck: markdownToDeck(text), warnings: [] }
   return { deck: jsonToDeck(text), warnings: [] }

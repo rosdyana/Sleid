@@ -57,10 +57,10 @@ try {
   if (!signIn.ok()) throw new Error(`sign-in failed: ${signIn.status()} ${await signIn.text()}`)
   log('sign-up and sign-in via /api/auth')
 
-  // 3. Dashboard renders and "Blank deck" creates a deck and opens the editor.
+  // 3. Dashboard renders and "New" creates a blank deck and opens the editor.
   await page.goto(`${base}/`)
   await page.waitForLoadState('networkidle')
-  const blank = page.getByRole('button', { name: 'Blank deck' })
+  const blank = page.getByRole('button', { name: 'New', exact: true })
   await blank.waitFor({ state: 'visible', timeout: 20000 })
   await blank.click()
   await page.waitForURL(/\/d\/[0-9a-f-]{36}/, { timeout: 20000 })

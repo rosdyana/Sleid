@@ -82,7 +82,7 @@ try {
   // ---- Open a deck in the editor (the live view).
   await page.goto(`${base}/`)
   await page.waitForLoadState('networkidle')
-  await page.getByRole('button', { name: 'Blank deck' }).click()
+  await page.getByRole('button', { name: 'New', exact: true }).click()
   await page.waitForURL(/\/d\/[0-9a-f-]{36}/, { timeout: 20000 })
   const deckId = new URL(page.url()).pathname.split('/')[2]
   await page.getByText('Extensions', { exact: true }).waitFor({ state: 'visible', timeout: 30000 })

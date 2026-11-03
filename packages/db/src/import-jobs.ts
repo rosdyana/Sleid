@@ -2,7 +2,7 @@ import { and, eq, gt, sql } from 'drizzle-orm'
 import type { Db } from './client.ts'
 import { importJobs, type ImportJobRow } from './schema/index.ts'
 
-export type ImportFormat = 'pptx' | 'markdown' | 'json'
+export type ImportFormat = 'pptx' | 'markdown' | 'json' | 'google-slides'
 
 export interface NewImportJob {
   id: string
@@ -11,7 +11,10 @@ export interface NewImportJob {
   fileName: string | null
   title: string | null
   bytes: number
+  /** Storage key of the bytes the worker converts (the upload, or the export fetched for Google Slides). */
   sourceKey: string
+  /** Google Slides only: the presentation id from the URL, or the Drive file id from the Picker. */
+  googleFileId?: string | null
 }
 
 /** Inserts the row with the id the caller chose (the storage key is derived from it). */

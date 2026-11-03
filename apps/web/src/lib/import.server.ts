@@ -16,7 +16,9 @@ export const IMPORT_LIMITS = {
   perHour: 10,
 } as const
 
-export const IMPORT_FORMATS: readonly ImportFormat[] = ['pptx', 'markdown', 'json']
+/** Formats an upload (or the raw-bytes route) may send. Google Slides imports come through their own path. */
+export type UploadFormat = Exclude<ImportFormat, 'google-slides'>
+export const IMPORT_FORMATS: readonly UploadFormat[] = ['pptx', 'markdown', 'json']
 const HOUR_MS = 60 * 60 * 1000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** A zip local file header: every .pptx starts with it. */
@@ -47,11 +49,14 @@ export interface ImportUser {
 }
 
 export interface StartImportInput {
-  format: ImportFormat
+  /** pptx, markdown or json. A Google Slides import is pptx with `google` set. */
+  format: UploadFormat
   fileName: string
   bytes: Uint8Array
   /** Deck title from the caller. Omitted, the title comes from the file. */
   title?: string
+  /** Set for a Google Slides import: the presentation id (public link) or the Drive file id. The row is recorded as google-slides. */
+  google?: { fileId: string }
 }
 
 export interface ImportStatusView {
@@ -64,12 +69,12 @@ export interface ImportStatusView {
 }
 
 /** Refuses a file by its content: the size cap, the magic bytes, and UTF-8 text for markdown and json. The extension is never trusted. */
-export function checkImportBytes(format: ImportFormat, bytes: Uint8Array): void {
+export function checkImportBytes(format: UploadFormat, bytes: Uint8Array): void {
   if (!IMPORT_FORMATS.includes(format)) throw new ImportError('Use pptx, markdown or json.', 400)
   if (bytes.byteLength === 0) throw new ImportError('The file is empty.', 400)
   if (format === 'pptx') {
     if (bytes.byteLength > IMPORT_LIMITS.pptxBytes) throw new ImportError(`PowerPoint files are limited to ${IMPORT_LIMITS.pptxBytes / MB} MB.`, 413)
-    if (!ZIP_MAGIC.every((b, i) => bytes[i] === b)) throw new ImportError('This is not a PowerPoint file: its content is not a zip package.', 415)
+    if (!hasZipMagic(bytes)) throw new ImportError('This is not a PowerPoint file: its content is not a zip package.', 415)
     return
   }
   if (bytes.byteLength > IMPORT_LIMITS.textBytes) throw new ImportError(`Markdown and JSON files are limited to ${IMPORT_LIMITS.textBytes / MB} MB.`, 413)
@@ -102,8 +107,13 @@ export function decodeBase64(value: string): Uint8Array {
  * Starts an import: checks the bytes, applies the rate limit, stores the source, inserts the row and queues the job.
  * Returns the import id at once. A storage or queue failure marks the row failed, so the caller sees why when it asks for the status.
  */
-export async function startImport(deps: ImportDeps, user: ImportUser, input: StartImportInput): Promise<{ importId: string }> {
+export interface StartImportResult {
+  importId: string
+}
+
+export async function startImport(deps: ImportDeps, user: ImportUser, input: StartImportInput): Promise<StartImportResult> {
   checkImportBytes(input.format, input.bytes)
+  if (input.google && input.format !== 'pptx') throw new ImportError('A Google Slides import is always a pptx file.', 400)
   const fileName = baseName(input.fileName).slice(0, 200) || 'import'
   const title = input.title?.trim().slice(0, 200) || null
   const importId = randomUUID()
@@ -120,11 +130,12 @@ export async function startImport(deps: ImportDeps, user: ImportUser, input: Sta
     await insertImportJob(tx as unknown as Db, {
       id: importId,
       userId: user.id,
-      format: input.format,
+      format: input.google ? 'google-slides' : input.format,
       fileName,
       title,
       bytes: input.bytes.byteLength,
       sourceKey,
+      googleFileId: input.google?.fileId ?? null,
     })
   })
 
@@ -159,8 +170,8 @@ export async function getImport(deps: ImportDeps, user: ImportUser, importId: st
 }
 
 /** A format from the x-import-format header. */
-export function formatFromHeader(value: string | null): ImportFormat {
-  const format = (value ?? '').trim() as ImportFormat
+export function formatFromHeader(value: string | null): UploadFormat {
+  const format = (value ?? '').trim() as UploadFormat
   if (!IMPORT_FORMATS.includes(format)) throw new ImportError('Send x-import-format: pptx, markdown or json.', 400)
   return format
 }
@@ -179,8 +190,13 @@ export function fileNameFromHeader(value: string | null): string {
 export async function readImportBody(request: Request, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(request.headers.get('content-length') ?? 0)
   if (declared > maxBytes) throw new ImportError('The file is too large.', 413)
-  if (!request.body) return new Uint8Array()
-  const reader = request.body.getReader()
+  return readStreamCapped(request.body, maxBytes)
+}
+
+/** Reads a stream to the end, refusing it as soon as it passes `maxBytes`. Used for uploads and for fetched exports. */
+export async function readStreamCapped(body: ReadableStream<Uint8Array> | null, maxBytes: number, tooLarge = 'The file is too large.'): Promise<Uint8Array> {
+  if (!body) return new Uint8Array()
+  const reader = body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
   for (;;) {
@@ -189,7 +205,7 @@ export async function readImportBody(request: Request, maxBytes: number): Promis
     size += value.byteLength
     if (size > maxBytes) {
       await reader.cancel().catch(() => undefined)
-      throw new ImportError('The file is too large.', 413)
+      throw new ImportError(tooLarge, 413)
     }
     chunks.push(value)
   }
@@ -202,7 +218,12 @@ export async function readImportBody(request: Request, maxBytes: number): Promis
   return out
 }
 
+/** Whether the bytes start with the zip local file header every .pptx starts with. */
+export function hasZipMagic(bytes: Uint8Array): boolean {
+  return ZIP_MAGIC.every((b, i) => bytes[i] === b)
+}
+
 /** The size cap for a format, for readImportBody. */
-export function maxBytesFor(format: ImportFormat): number {
+export function maxBytesFor(format: UploadFormat): number {
   return format === 'pptx' ? IMPORT_LIMITS.pptxBytes : IMPORT_LIMITS.textBytes
 }

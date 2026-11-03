@@ -121,7 +121,7 @@ try {
 
   await page.goto(`${base}/`)
   await page.waitForLoadState('networkidle')
-  const blank = page.getByRole('button', { name: 'Blank deck' })
+  const blank = page.getByRole('button', { name: 'New', exact: true })
   await blank.waitFor({ state: 'visible', timeout: 20000 })
   await blank.click()
   await page.waitForURL(/\/d\/[0-9a-f-]{36}/, { timeout: 20000 })

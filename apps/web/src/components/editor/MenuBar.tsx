@@ -24,6 +24,8 @@ export interface MenuDeps {
   startExport: (format: 'pptx' | 'html') => void
   /** Opens the options dialog for an export (PDF, PNG, JPG). */
   openExport: (format: 'pdf' | 'png' | 'jpg') => void
+  /** Opens the Import dialog (File, PowerPoint, Markdown or JSON, or a Google Slides link). It makes a new deck. */
+  openImport: () => void
   prompt: (request: PromptRequest) => void
   openShortcuts: () => void
   toast: (message: string) => void
@@ -52,6 +54,7 @@ type Menu = { label: string; items: MenuEntry[] }
 // Items that stay enabled for viewers and commenters. Everything else is disabled in read-only mode.
 const VIEWER_ITEMS = new Set([
   'New deck',
+  'Import slides…',
   'Make a copy',
   'JSON (.json)',
   'Markdown (.md)',
@@ -108,6 +111,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
       items: [
         item('New deck', () => void a.newDeck()),
         item('From prompt…', () => window.location.assign('/wizard/new')),
+        item('Import slides…', d.openImport),
         item('Make a copy', () => void a.makeCopy()),
         sep,
         group('Download', [

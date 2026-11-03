@@ -79,7 +79,7 @@ try {
   const idA = await signUpAndIn(ctxA, base, people.a)
   await pageA.goto(`${base}/`)
   await pageA.waitForLoadState('networkidle')
-  await pageA.getByRole('button', { name: 'Blank deck' }).click()
+  await pageA.getByRole('button', { name: 'New', exact: true }).click()
   await pageA.waitForURL(/\/d\/[0-9a-f-]{36}/, { timeout: 20000 }).catch((e) => {
     throw new Error(`A did not reach a new deck (at ${pageA.url()}): ${e.message.split('\n')[0]}`)
   })

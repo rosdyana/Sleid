@@ -95,7 +95,7 @@ try {
   // ---- A opens a new deck and gives it a title.
   await pageA.goto(`${base}/`)
   await pageA.waitForLoadState('networkidle')
-  await pageA.getByRole('button', { name: 'Blank deck' }).click()
+  await pageA.getByRole('button', { name: 'New', exact: true }).click()
   await pageA.waitForURL(/\/d\/[0-9a-f-]{36}/, { timeout: 20000 })
   const deckId = new URL(pageA.url()).pathname.split('/')[2]
   await pageA.getByText('Extensions', { exact: true }).waitFor({ state: 'visible', timeout: 30000 })

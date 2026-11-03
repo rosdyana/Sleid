@@ -87,7 +87,8 @@ try {
   // ---- 2. The brief.
   await page.goto(`${base}/`)
   await page.waitForLoadState('networkidle')
-  await page.getByRole('link', { name: '✨ New from prompt' }).click()
+  await page.getByRole('button', { name: 'More ways to start a deck' }).click()
+  await page.getByRole('menuitem', { name: 'From wizard', exact: true }).click()
   await page.waitForURL(/\/wizard\/new/, { timeout: 15000 })
   await page.getByLabel(/What is the deck about/).fill('Pitch deck: rooftop solar for small bakeries in Jakarta')
   await page.getByLabel(/Audience/).fill('bakery owners')

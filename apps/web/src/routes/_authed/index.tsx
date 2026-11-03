@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { createBlankDeckFn, listRecentDecksFn, setStarredFn } from '~/lib/decks.functions'
 import { markMentionsSeenFn, myMentionsFn } from '~/lib/comments.functions'
 import { authClient } from '~/lib/auth-client'
+import { ImportDialog, type Tab as ImportTab } from '~/components/import/ImportDialog'
 
 export const Route = createFileRoute('/_authed/')({
   loader: async () => ({ decks: await listRecentDecksFn(), mentions: await myMentionsFn() }),
@@ -21,6 +22,8 @@ function Dashboard() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [importTab, setImportTab] = useState<ImportTab | null>(null)
   const visible = useMemo(() => (filter === 'shared' ? decks.filter((d) => d.role !== 'owner') : decks), [decks, filter])
 
   async function newBlankDeck() {
@@ -77,6 +80,7 @@ function Dashboard() {
         </div>
       </header>
       {mentionsOpen && <MentionsList items={mentions.items} onClose={() => setMentionsOpen(false)} />}
+      {importTab && <ImportDialog initialTab={importTab} openInNewTab={false} onClose={() => setImportTab(null)} />}
 
       <main className="mx-auto max-w-6xl px-6 py-8">
         <div className="flex items-center justify-between">
@@ -99,15 +103,56 @@ function Dashboard() {
               </button>
             ))}
           </div>
-          <Link to="/wizard/new" className="rounded border border-accent px-4 py-2 font-medium text-accent hover:bg-hover">✨ New from prompt</Link>
-          <button
-            type="button"
-            onClick={newBlankDeck}
-            disabled={busy}
-            className="rounded bg-accent px-4 py-2 font-medium text-white hover:brightness-95 disabled:opacity-60"
-          >
-            {busy ? 'Creating…' : 'Blank deck'}
-          </button>
+          <div className="relative flex" data-testid="new-menu">
+            <button
+              type="button"
+              onClick={newBlankDeck}
+              disabled={busy}
+              className="rounded-l bg-accent px-4 py-2 font-medium text-white hover:brightness-95 disabled:opacity-60"
+            >
+              {busy ? 'Creating…' : 'New'}
+            </button>
+            <button
+              type="button"
+              aria-label="More ways to start a deck"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((open) => !open)}
+              className="grid place-items-center rounded-r border-l border-white/30 bg-accent px-2.5 text-white hover:brightness-95"
+            >
+              <svg width="10" height="6" viewBox="0 0 10 6" aria-hidden="true">
+                <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onMouseDown={() => setMenuOpen(false)} />
+                <ul role="menu" aria-label="New" className="absolute right-0 top-full z-40 mt-1 w-64 rounded border border-rule bg-white py-1 shadow-lg">
+                  <li role="none">
+                    <button role="menuitem" type="button" className="block w-full px-3 py-2 text-left hover:bg-hover" onClick={() => { setMenuOpen(false); void newBlankDeck() }}>
+                      Blank deck
+                    </button>
+                  </li>
+                  <li role="none">
+                    <Link role="menuitem" to="/wizard/new" className="block px-3 py-2 text-ink no-underline hover:bg-hover" onClick={() => setMenuOpen(false)}>
+                      From wizard
+                    </Link>
+                  </li>
+                  <li role="none" className="my-1 border-t border-rule" />
+                  <li role="none">
+                    <button role="menuitem" type="button" className="block w-full px-3 py-2 text-left hover:bg-hover" onClick={() => { setMenuOpen(false); setImportTab('file') }}>
+                      Import file…
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button role="menuitem" type="button" className="block w-full px-3 py-2 text-left hover:bg-hover" onClick={() => { setMenuOpen(false); setImportTab('google') }}>
+                      Import from Google Slides…
+                    </button>
+                  </li>
+                </ul>
+              </>
+            )}
+          </div>
         </div>
         {error && <p className="mt-3 text-red-700">{error}</p>}
 

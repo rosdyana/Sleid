@@ -376,10 +376,10 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
     {
       scope: 'decks:create',
       description:
-        'Make a new deck you own from a file. format is pptx, markdown or json. For pptx send contentBase64 (the .pptx file, base64 encoded). For markdown or json send either the text in text, or the file in contentBase64; send exactly one of the two. Markdown slides are split on "---" lines, and the title comes from the front matter or the first slide. title overrides the title in the file. Returns deckId, url and warnings. It waits up to 60 seconds for the import; the limits are 50 MB for pptx and 5 MB for markdown or json, and 10 imports per user per hour.',
+        'Make a new deck you own from a file. format is pptx, markdown or json. For pptx send contentBase64 (the .pptx file, base64 encoded). For markdown or json send either the text in text, or the file in contentBase64; send exactly one of the two. Markdown slides are split on "---" lines, and the title comes from the front matter or the first slide. title overrides the title in the file. Returns deckId, url and warnings. It waits up to 60 seconds for the import. Limits: through this tool a pptx can be about 12 MB at most (the request body is capped at 16 MB and base64 adds a third); markdown or json up to 5 MB; 10 imports per user per hour. Larger decks: upload the file in the editor (File > Import slides) or import a public Google Slides link there.',
       shape: {
         format: z.enum(['pptx', 'markdown', 'json']),
-        contentBase64: z.string().min(1).max(70 * 1024 * 1024).optional().describe('The file, base64 encoded. Required for pptx.'),
+        contentBase64: z.string().min(1).max(16 * 1024 * 1024).optional().describe('The file, base64 encoded. Required for pptx. At most 16 MB of text, so a pptx of about 12 MB.'),
         text: z.string().min(1).max(5 * 1024 * 1024).optional().describe('The text of a markdown or json file.'),
         title: z.string().min(1).max(200).optional().describe('Deck title. Defaults to the title in the file.'),
       },
