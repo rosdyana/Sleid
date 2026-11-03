@@ -1,6 +1,7 @@
 export * from './schema/index.ts'
 export * from './client.ts'
 export * from './deck-doc.ts'
+export * from './import-deck.ts'
 export * from './permissions.ts'
 export * from './deck-access.ts'
 export * from './sharing.ts'

@@ -170,11 +170,48 @@ export interface MarkdownImportOptions {
 // slide, so the slide count survives a round trip.
 export function markdownToDeck(md: string, options: MarkdownImportOptions = {}): Deck {
   const theme = cloneTheme(options.theme ?? DEFAULT_THEME)
-  const blocks = md.replace(/\r\n/g, '\n').split(/^---[ \t]*$/m)
+  const front = frontMatter(md.replace(/\r\n/g, '\n'))
+  const blocks = splitSlides(front.body)
   const slides = blocks.map((block) => parseSlide(block, theme))
   const firstTitle = slides.map(titleOf).find((t) => t.length > 0)
-  const base = createDeck(options.title ?? firstTitle ?? 'Untitled deck')
+  const base = createDeck(options.title ?? front.title ?? firstTitle ?? 'Untitled deck')
   return DeckSchema.parse({ ...base, theme, slides })
+}
+
+// A `title:` line in a front-matter block at the top of the file names the deck. The block is
+// only taken as front matter when every line in it is `key: value`. Otherwise it is slide content.
+function frontMatter(md: string): { title?: string; body: string } {
+  const match = /^---[ \t]*\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(md)
+  if (!match) return { body: md }
+  const fields = (match[1] ?? '').split('\n')
+  if (!fields.every((line) => line.trim() === '' || /^[A-Za-z_][\w-]*:/.test(line.trim()))) return { body: md }
+  const titleLine = fields.map((line) => /^title:\s*(.*)$/.exec(line.trim())).find((m) => m !== null)
+  const title = titleLine?.[1]?.trim().replace(/^["']|["']$/g, '').trim()
+  return { title: title || undefined, body: md.slice(match[0].length) }
+}
+
+// Slides are split on lines that are exactly "---" or "--" (a vertical separator flattens into the
+// same sequence). A file with no separator is split on its level 1 and 2 headings instead, so a
+// plain Markdown document becomes one slide per section. A file with neither stays one slide.
+function splitSlides(text: string): string[] {
+  if (/^(?:---|--)[ \t]*$/m.test(text)) return text.split(/^(?:---|--)[ \t]*$/m)
+  const lines = text.split('\n')
+  const blocks: string[][] = []
+  let fenced = false
+  for (const line of lines) {
+    if (/^```/.test(line)) fenced = !fenced
+    const heading = !fenced && /^(#{1,2})\s+\S/.exec(line)
+    if (heading) {
+      // A level 2 heading becomes the slide's title, the same as a level 1 heading.
+      blocks.push([line.replace(/^##\s+/, '# ')])
+    } else {
+      if (blocks.length === 0) blocks.push([])
+      blocks[blocks.length - 1]!.push(line)
+    }
+  }
+  const hasHeading = lines.some((line) => /^#{1,2}\s+\S/.test(line))
+  if (!hasHeading) return [text]
+  return blocks.map((b) => b.join('\n'))
 }
 
 function titleOf(slide: Slide): string {

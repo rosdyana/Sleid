@@ -308,3 +308,6 @@ export function keepFirstParagraphProps(xml: string): string {
     return `<a:p>${cleaned}</a:p>`
   })
 }
+
+export { pptxToDeck, PptxImportError, MAX_IMPORT_IMAGE_BYTES, DEFAULT_IMPORT_LIMITS } from './import/index.ts'
+export type { PptxToDeckOptions, PptxToDeckResult, ImportLimits } from './import/index.ts'

@@ -156,3 +156,51 @@ describe('deckToMarkdown and markdownToDeck', () => {
     expect(markdownToDeck(deckToMarkdown(deck), { title: 'Given' }).title).toBe('Given')
   })
 })
+
+describe('markdownToDeck import rules (M8)', () => {
+  it('flattens -- vertical separators into the same slide sequence', () => {
+    const deck = markdownToDeck('# A\n--\n# B\n---\n# C')
+    expect(deck.slides.map(slideTitle)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('reads Note: lines as speaker notes', () => {
+    const deck = markdownToDeck('# A\n- point\nNote: say this first\n---\n# B')
+    expect(deck.slides[0]!.notes).toContain('say this first')
+    expect(deck.slides[1]!.notes).toBe('')
+  })
+
+  it('takes the deck title from front matter title:', () => {
+    const deck = markdownToDeck('---\ntitle: Quarterly review\nauthor: Ross\n---\n# First slide\n---\n# Second')
+    expect(deck.title).toBe('Quarterly review')
+    expect(deck.slides.map(slideTitle)).toEqual(['First slide', 'Second'])
+  })
+
+  it('lets an explicit title option win over front matter', () => {
+    const deck = markdownToDeck('---\ntitle: From file\n---\n# A', { title: 'From option' })
+    expect(deck.title).toBe('From option')
+  })
+
+  it('does not take a block as front matter when it is slide content', () => {
+    const deck = markdownToDeck('---\n# Not front matter\n---\n# Second')
+    expect(deck.title).toBe('Not front matter')
+    // The leading --- opens an empty first slide, as before this change.
+    expect(deck.slides.map(slideTitle)).toEqual(['', 'Not front matter', 'Second'])
+  })
+
+  it('splits a plain document with no separators on its level 1 and 2 headings', () => {
+    const deck = markdownToDeck('Intro line before any heading.\n\n# One\n- a\n## Two\nbody text\n# Three\n- c')
+    expect(deck.slides.map(slideTitle)).toEqual(['', 'One', 'Two', 'Three'])
+    expect(deck.slides[0]!.elements.length).toBeGreaterThan(0)
+    expect(deck.slides[2]!.elements.some((e) => e.type === 'text' && e.role === 'body')).toBe(true)
+  })
+
+  it('does not split on a heading inside a code fence', () => {
+    const deck = markdownToDeck('# Code\n```\n# not a heading\n```\n# Next')
+    expect(deck.slides.map(slideTitle)).toEqual(['Code', 'Next'])
+  })
+
+  it('keeps a document with no headings and no separators as one slide', () => {
+    const deck = markdownToDeck('Just some text with no structure at all.')
+    expect(deck.slides).toHaveLength(1)
+  })
+})
