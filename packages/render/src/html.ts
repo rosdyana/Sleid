@@ -21,7 +21,8 @@ export function safeColor(value: unknown, fallback = 'transparent'): string {
   return typeof value === 'string' && COLOR_RE.test(value.trim()) ? value.trim() : fallback
 }
 
-const FONT_RE = /^[A-Za-z0-9 ,'"\-_.]{1,120}$/
+// 300 covers a full stack such as "Inter, Helvetica Neue, Arial, sans-serif" with room to spare.
+const FONT_RE = /^[A-Za-z0-9 ,'"\-_.]{1,300}$/
 
 export function safeFontFamily(value: unknown): string | undefined {
   return typeof value === 'string' && FONT_RE.test(value.trim()) ? value.trim() : undefined
@@ -38,6 +39,13 @@ export function fontStack(family: string, generic: string): string {
 export function safeLength(value: unknown): string | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return `${value}px`
   if (typeof value === 'string' && /^\d+(\.\d+)?(px|pt|em|rem|%)?$/.test(value.trim())) return value.trim()
+  return undefined
+}
+
+// Signed lengths for letter-spacing: a number (px) or "-0.02em", "1px". Negative values are allowed. No percentages.
+export function safeSignedLength(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return `${value}px`
+  if (typeof value === 'string' && /^-?\d+(\.\d+)?(px|em)?$/.test(value.trim())) return value.trim()
   return undefined
 }
 
@@ -77,6 +85,16 @@ export function safeImageSrc(value: unknown): string | undefined {
 export function safeEmbedUrl(value: unknown): string | undefined {
   const href = safeHref(value)
   return href && href.startsWith('http') ? href : undefined
+}
+
+// M10. CSS box-shadow / drop-shadow values from a model shadow. Every number is finite and the colour is checked.
+// `withSpread` is for box-shadow only. text-shadow and drop-shadow() have no spread argument.
+export function shadowList(
+  shadow: { x: number; y: number; blur: number; spread?: number | undefined; color: string },
+  withSpread = true,
+): string {
+  const spread = withSpread ? ` ${num(shadow.spread ?? 0)}px` : ''
+  return `${num(shadow.x)}px ${num(shadow.y)}px ${num(shadow.blur)}px${spread} ${safeColor(shadow.color, 'transparent')}`
 }
 
 const GRADIENT_RE = /^(linear|radial|conic)-gradient\([#\w\s%(),.\-]+\)$/

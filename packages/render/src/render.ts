@@ -1,6 +1,6 @@
 // Browser-safe renderers: slide and deck HTML for reveal.js.
 // Node-only parts (reading reveal.js files for standalone output) live in render-node.ts.
-import { logoAppliesToSlide, type Deck, type Element, type Slide, type Theme, type TextElement, type ShapeElement, type ImageElement, type TableElement, type CodeElement, type EmbedElement, type DiagramElement } from '@sleid/model'
+import { FONT_IMPORT_RE, VECTOR_PATH_D_RE, logoAppliesToSlide, type Deck, type Element, type GradientFill, type Slide, type Theme, type TextElement, type ShapeElement, type ImageElement, type TableElement, type CodeElement, type EmbedElement, type DiagramElement, type VectorElement } from '@sleid/model'
 import { richTextToHtml } from './rich-text.ts'
 import { mermaidConfigFor, readableTextOn } from '@sleid/model'
 import { renderChartSvg } from './chart.ts'
@@ -19,6 +19,7 @@ import {
   safeGradient,
   safeImageSrc,
   safeToken,
+  shadowList,
 } from './html.ts'
 
 export { chartToEchartsOption, renderChartSvg } from './chart.ts'
@@ -40,11 +41,20 @@ const EFFECT_CLASS: Record<string, string> = {
   shrink: 'shrink',
   'highlight-red': 'highlight-red',
   'zoom-in': 'zoom-in',
+  // M10. Exit effects map to reveal's own classes. `wipe` has no reveal class: BASE_CSS styles `sleid-wipe`.
+  'fade-out': 'fade-out',
+  'current-visible': 'current-visible',
+  'fade-in-then-out': 'fade-in-then-out',
+  'semi-fade-out': 'semi-fade-out',
+  wipe: 'sleid-wipe',
 }
 
 const TRANSITIONS = new Set(['none', 'fade', 'slide', 'convex', 'concave', 'zoom'])
 const VALIGN: Record<string, string> = { top: 'flex-start', middle: 'center', bottom: 'flex-end' }
 const ALIGN = new Set(['left', 'center', 'right', 'justify'])
+const TEXT_TRANSFORMS = new Set(['none', 'uppercase', 'lowercase', 'capitalize'])
+const LINE_CAPS = new Set(['butt', 'round', 'square'])
+const LINE_JOINS = new Set(['miter', 'round', 'bevel'])
 
 // ---------------------------------------------------------------------------
 // Slides
@@ -145,6 +155,8 @@ export function renderElement(el: Element, theme: Theme, fragments = true): stri
       return frame(el, renderCode(el), 'sleid-code-el', fragments)
     case 'embed':
       return frame(el, renderEmbed(el), 'sleid-embed-el', fragments)
+    case 'vector':
+      return frame(el, renderVector(el), 'sleid-vector-el', fragments)
   }
 }
 
@@ -157,9 +169,12 @@ function frame(el: Element, inner: string, kind: string, fragments = true): stri
     classes.push('fragment', EFFECT_CLASS[el.animation.effect] ?? 'fade-in')
     fragmentAttr = ` data-fragment-index="${num(el.animation.order)}"`
   }
+  // M10. Reveal's auto-animate matches elements by data-id across slides. A duplicated slide's copy
+  // carries the source's key, so the pair matches. The real id stays in data-el.
+  const matchId = el.animateKey ?? el.id
   const style = `left:${num(el.x)}px;top:${num(el.y)}px;width:${num(el.w)}px;height:${num(el.h)}px;z-index:${num(Math.round(el.z))}`
   const bodyStyle = `transform:rotate(${num(el.rotation)}deg);opacity:${num(Math.min(Math.max(el.opacity, 0), 1), 1)}`
-  return `<div class="${classes.join(' ')}"${fragmentAttr} data-id="${escapeHtml(el.id)}" style="${escapeHtml(style)}"><div class="sleid-body" style="${escapeHtml(bodyStyle)}">${inner}</div></div>`
+  return `<div class="${classes.join(' ')}"${fragmentAttr} data-id="${escapeHtml(matchId)}" data-el="${escapeHtml(el.id)}" style="${escapeHtml(style)}"><div class="sleid-body" style="${escapeHtml(bodyStyle)}">${inner}</div></div>`
 }
 
 function renderText(el: TextElement): string {
@@ -170,6 +185,11 @@ function renderText(el: TextElement): string {
   if (typeof s.fontSize === 'number') parts.push(`font-size:${num(s.fontSize)}px`)
   if (s.color) parts.push(`color:${safeColor(s.color, '')}`)
   if (typeof s.lineHeight === 'number') parts.push(`line-height:${num(s.lineHeight)}`)
+  // M10 typography. Each value is range-checked, so a bad one is simply left out.
+  if (typeof s.fontWeight === 'number' && s.fontWeight >= 100 && s.fontWeight <= 900) parts.push(`font-weight:${num(Math.round(s.fontWeight))}`)
+  if (typeof s.letterSpacing === 'number') parts.push(`letter-spacing:${num(s.letterSpacing)}em`)
+  if (s.textTransform && TEXT_TRANSFORMS.has(s.textTransform)) parts.push(`text-transform:${s.textTransform}`)
+  if (el.shadow) parts.push(`text-shadow:${shadowList(el.shadow, false)}`)
   const role = el.role ? ` data-role="${el.role}"` : ''
   return `<div class="sleid-text"${role} style="${escapeHtml(parts.filter((p) => !p.endsWith(':')).join(';'))}">${richTextToHtml(el.content)}</div>`
 }
@@ -184,22 +204,21 @@ const STAR_POINTS = (() => {
   return points.join(' ')
 })()
 
+// Rect, rounded rect and ellipse are drawn as styled divs, so CSS can do gradients, dashed borders
+// and radii. The other kinds stay SVG.
 function renderShape(el: ShapeElement, theme: Theme): string {
-  const fill = safeColor(el.fill, 'none')
+  const text = el.text ? `<div class="sleid-shape-text" style="color:${escapeHtml(safeColor(theme.colors.text, '#202124'))}">${richTextToHtml(el.text)}</div>` : ''
+  if (el.shape === 'rect' || el.shape === 'roundRect' || el.shape === 'ellipse') return boxShapeHtml(el) + text
+
+  const stops = el.gradient ? usableStops(el.gradient) : undefined
+  // An SVG shape has no gradient here: it takes the first stop as its flat fill.
+  const fill = stops ? stops[0]!.color : safeColor(el.fill, 'none')
   const stroke = safeColor(el.stroke, 'none')
-  const sw = num(Math.max(el.strokeWidth, 0))
-  const common = `fill="${escapeHtml(fill)}" stroke="${escapeHtml(stroke)}" stroke-width="${sw}" vector-effect="non-scaling-stroke"`
+  const sw = Math.max(el.strokeWidth, 0)
+  const dash = strokeDashAttr(el.strokeDash, sw)
+  const common = `fill="${escapeHtml(fill)}" stroke="${escapeHtml(stroke)}" stroke-width="${num(sw)}" vector-effect="non-scaling-stroke"${dash}`
   let geometry: string
   switch (el.shape) {
-    case 'rect':
-      geometry = `<rect x="0" y="0" width="100" height="100" ${common}/>`
-      break
-    case 'roundRect':
-      geometry = `<rect x="0" y="0" width="100" height="100" rx="12" ry="12" ${common}/>`
-      break
-    case 'ellipse':
-      geometry = `<ellipse cx="50" cy="50" rx="50" ry="50" ${common}/>`
-      break
     case 'triangle':
       geometry = `<polygon points="50,0 100,100 0,100" ${common}/>`
       break
@@ -207,29 +226,111 @@ function renderShape(el: ShapeElement, theme: Theme): string {
       geometry = `<polygon points="0,35 65,35 65,15 100,50 65,85 65,65 0,65" ${common}/>`
       break
     case 'line':
-      geometry = `<line x1="0" y1="50" x2="100" y2="50" fill="none" stroke="${escapeHtml(stroke)}" stroke-width="${sw}" vector-effect="non-scaling-stroke"/>`
+      geometry = `<line x1="0" y1="50" x2="100" y2="50" fill="none" stroke="${escapeHtml(stroke)}" stroke-width="${num(sw)}" vector-effect="non-scaling-stroke"${dash}/>`
       break
     case 'star':
       geometry = `<polygon points="${STAR_POINTS}" ${common}/>`
       break
   }
-  const svg = `<svg class="sleid-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">${geometry}</svg>`
-  const text = el.text ? `<div class="sleid-shape-text" style="color:${escapeHtml(safeColor(theme.colors.text, '#202124'))}">${richTextToHtml(el.text)}</div>` : ''
+  const filter = el.shadow ? ` style="${escapeHtml(`filter:drop-shadow(${shadowList(el.shadow, false)})`)}"` : ''
+  const svg = `<svg class="sleid-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"${filter}>${geometry}</svg>`
   return svg + text
+}
+
+const DASH_STYLES = new Set(['solid', 'dashed', 'dotted'])
+
+// Gradient stops with a bad colour or position are dropped. Fewer than two usable stops means no gradient.
+function usableStops(g: GradientFill): { color: string; at: number }[] | undefined {
+  const stops = g.stops.flatMap((s) => {
+    const color = safeColor(s.color, '')
+    return color && Number.isFinite(s.at) ? [{ color, at: Math.min(Math.max(s.at, 0), 1) }] : []
+  })
+  return stops.length >= 2 ? stops : undefined
+}
+
+function gradientCss(g: GradientFill): string | undefined {
+  const stops = usableStops(g)
+  if (!stops) return undefined
+  const list = stops.map((s) => `${s.color} ${num(s.at * 100)}%`).join(', ')
+  return g.type === 'radial' ? `radial-gradient(circle, ${list})` : `linear-gradient(${num(g.angle ?? 180, 180)}deg, ${list})`
+}
+
+// 'none' in the model means no paint. CSS has no 'none' colour, so it becomes transparent.
+function paintOr(value: string): string {
+  return value === 'none' ? 'transparent' : safeColor(value, 'transparent')
+}
+
+function boxShapeHtml(el: ShapeElement): string {
+  const parts = ['position:absolute', 'inset:0', 'box-sizing:border-box']
+  const background = el.gradient ? gradientCss(el.gradient) : undefined
+  parts.push(background ? `background:${background}` : `background-color:${paintOr(el.fill)}`)
+  if (el.strokeWidth > 0) {
+    const style = el.strokeDash && DASH_STYLES.has(el.strokeDash) ? el.strokeDash : 'solid'
+    parts.push(`border:${num(Math.max(el.strokeWidth, 0))}px ${style} ${paintOr(el.stroke)}`)
+  }
+  parts.push(`border-radius:${boxRadius(el)}`)
+  if (el.shadow) parts.push(`box-shadow:${shadowList(el.shadow)}`)
+  return `<div class="sleid-shape-box" style="${escapeHtml(parts.join(';'))}"></div>`
+}
+
+// Ellipse is a full circle or oval. A rounded rect with no radius keeps the legacy 12% corner.
+function boxRadius(el: ShapeElement): string {
+  if (el.shape === 'ellipse') return '50%'
+  if (el.shape === 'roundRect' && el.radius === undefined) return '12%'
+  return `${num(Math.max(el.radius ?? 0, 0))}px`
+}
+
+// SVG stroke dashes. Dotted uses round caps so each dash is a dot.
+function strokeDashAttr(dash: ShapeElement['strokeDash'], sw: number): string {
+  if (sw <= 0) return ''
+  if (dash === 'dashed') return ` stroke-dasharray="${num(3 * sw)} ${num(2 * sw)}"`
+  if (dash === 'dotted') return ` stroke-dasharray="0 ${num(2 * sw)}" stroke-linecap="round"`
+  return ''
 }
 
 function renderImage(el: ImageElement): string {
   const src = safeImageSrc(el.src)
-  if (!src) return `<div class="sleid-image sleid-image-empty"></div>`
+  if (!src) return `<div class="sleid-image sleid-image-empty"${imageWrapAttr(el)}></div>`
   const alt = escapeHtml(el.alt ?? '')
   const fit = el.fit === 'contain' ? 'contain' : 'cover'
   if (el.crop) {
     const cw = Math.max(el.crop.w, 0.0001)
     const ch = Math.max(el.crop.h, 0.0001)
     const style = `width:${num((1 / cw) * 100)}%;height:${num((1 / ch) * 100)}%;left:${num((-el.crop.x / cw) * 100)}%;top:${num((-el.crop.y / ch) * 100)}%;object-fit:${fit}`
-    return `<div class="sleid-image"><img src="${escapeHtml(src)}" alt="${alt}" style="${escapeHtml(style)}"></div>`
+    return `<div class="sleid-image"${imageWrapAttr(el)}><img src="${escapeHtml(src)}" alt="${alt}" style="${escapeHtml(style)}"></div>`
   }
-  return `<div class="sleid-image"><img src="${escapeHtml(src)}" alt="${alt}" style="object-fit:${fit}"></div>`
+  return `<div class="sleid-image"${imageWrapAttr(el)}><img src="${escapeHtml(src)}" alt="${alt}" style="object-fit:${fit}"></div>`
+}
+
+// M10. Radius and shadow of an image wrapper. The radius clips the picture (overflow hidden).
+function imageWrapAttr(el: ImageElement): string {
+  const parts: string[] = []
+  if (el.radius !== undefined) parts.push(`border-radius:${num(Math.max(el.radius, 0))}px`, 'overflow:hidden')
+  if (el.shadow) parts.push(`box-shadow:${shadowList(el.shadow)}`)
+  return parts.length > 0 ? ` style="${escapeHtml(parts.join(';'))}"` : ''
+}
+
+// M10. Vector icon. Each path's d is re-checked, and every paint and attribute is sanitised.
+// A path that fails the check is dropped; the rest still draw.
+function renderVector(el: VectorElement): string {
+  const paths: string[] = []
+  for (const p of el.paths) {
+    if (!VECTOR_PATH_D_RE.test(p.d)) continue
+    const attrs = [
+      `d="${escapeHtml(p.d)}"`,
+      `fill="${escapeHtml(paintOr(p.fill))}"`,
+      `stroke="${escapeHtml(paintOr(p.stroke))}"`,
+      `stroke-width="${num(Math.max(p.strokeWidth, 0))}"`,
+    ]
+    if (p.lineCap && LINE_CAPS.has(p.lineCap)) attrs.push(`stroke-linecap="${p.lineCap}"`)
+    if (p.lineJoin && LINE_JOINS.has(p.lineJoin)) attrs.push(`stroke-linejoin="${p.lineJoin}"`)
+    if (p.opacity !== undefined) attrs.push(`opacity="${num(Math.min(Math.max(p.opacity, 0), 1), 1)}"`)
+    paths.push(`<path ${attrs.join(' ')}/>`)
+  }
+  const vb = el.viewBox
+  const viewBox = `${num(vb.x)} ${num(vb.y)} ${num(vb.w, 1)} ${num(vb.h, 1)}`
+  const aspect = el.preserveAspectRatio ? 'xMidYMid meet' : 'none'
+  return `<svg class="sleid-vector" viewBox="${viewBox}" preserveAspectRatio="${aspect}" width="100%" height="100%" aria-hidden="true">${paths.join('')}</svg>`
 }
 
 // Mermaid reads the element's text content, so escaped source is correct here.
@@ -366,6 +467,28 @@ function mermaidScriptTags(script: MermaidScript, config: Record<string, unknown
   ]
 }
 
+/**
+ * M10. Google Fonts stylesheet URL for the theme's `fontImports`, or undefined when there are none.
+ * Each value is re-checked with the schema pattern, so a bad import is dropped rather than put in the URL.
+ * Used by renderDeckHtml, and by the editor.
+ */
+export function googleFontsHref(theme: Theme): string | undefined {
+  const families = (theme.fontImports ?? []).filter((f) => typeof f === 'string' && FONT_IMPORT_RE.test(f)).slice(0, 6)
+  if (families.length === 0) return undefined
+  const query = families.map((f) => `family=${encodeFamily(f)}`).join('&')
+  return `https://fonts.googleapis.com/css2?${query}&display=swap`
+}
+
+// Google's css2 format: spaces as '+', and the separators ':' ';' '@' ',' left readable.
+function encodeFamily(family: string): string {
+  return encodeURIComponent(family)
+    .replace(/%20/g, '+')
+    .replace(/%3A/g, ':')
+    .replace(/%3B/g, ';')
+    .replace(/%40/g, '@')
+    .replace(/%2C/g, ',')
+}
+
 export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
   const { mode } = options
   if (mode === 'standalone' && !options.assets) {
@@ -379,8 +502,10 @@ export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     `<title>${escapeHtml(deck.title)}</title>`,
-    `<style>\n${themeCssVariables(deck.theme)}\n${BASE_CSS}\n</style>`,
   ]
+  const fontsHref = googleFontsHref(deck.theme)
+  if (fontsHref) head.push(`<link rel="stylesheet" href="${escapeHtml(fontsHref)}">`)
+  head.push(`<style>\n${themeCssVariables(deck.theme)}\n${BASE_CSS}\n</style>`)
   if (mode === 'print' && options.showNotes) {
     // The last notes page would end with a page break and print an empty trailing page.
     head.push('<style>.reveal .slides > :last-child { page-break-after: auto !important; break-after: auto !important; }</style>')

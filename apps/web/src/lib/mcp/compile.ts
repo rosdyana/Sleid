@@ -114,6 +114,8 @@ export function summarizeElement(el: Element): Record<string, unknown> {
       return { ...base, language: el.language, firstLine: clip(el.code.split('\n')[0] ?? '', 120) }
     case 'embed':
       return { ...base, url: clip(el.url, 200) }
+    case 'vector':
+      return { ...base, paths: el.paths.length }
   }
 }
 

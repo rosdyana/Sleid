@@ -1,6 +1,6 @@
 // Native JSON deck import. The file is checked with the deck schema, then every id is replaced,
 // so an imported deck never shares ids with the deck it was exported from.
-import { DeckSchema, type Deck } from './schema.ts'
+import { ANIMATE_KEY_RE, DeckSchema, type Deck } from './schema.ts'
 import { newId } from './defaults.ts'
 import { summariseIssues } from './issues.ts'
 
@@ -27,7 +27,14 @@ export function jsonToDeck(text: string): Deck {
   return withFreshIds(parsed.data)
 }
 
-/** The same deck with new ids for the deck, its sections, its slides and its elements. */
+/**
+ * The same deck with new ids for the deck, its sections, its slides and its elements.
+ *
+ * animateKey values are kept. A duplicated slide's copies point their key at the source's old id
+ * (see duplicateSlide in ops.ts), and the source has no key of its own. So when a key names another
+ * element's old id, that element gets the old id as its key. Both still match after the new ids are
+ * assigned, because the renderer uses animateKey ?? id.
+ */
 export function withFreshIds(deck: Deck): Deck {
   const sectionIds = new Map<string, string>()
   const sections = deck.sections.map((section) => {
@@ -35,6 +42,14 @@ export function withFreshIds(deck: Deck): Deck {
     sectionIds.set(section.id, id)
     return { ...section, id }
   })
+  const allElements = deck.slides.flatMap((slide) => slide.elements)
+  const keyed = new Set(allElements.filter((el) => el.animateKey !== undefined).map((el) => el.animateKey))
+  // Old ids of elements that some key refers to and that have no key yet.
+  const promoted = new Set(
+    allElements
+      .filter((el) => el.animateKey === undefined && keyed.has(el.id) && ANIMATE_KEY_RE.test(el.id))
+      .map((el) => el.id),
+  )
   const slides = deck.slides.map((slide) => {
     const { sectionId, ...rest } = slide
     const mapped = sectionId !== undefined ? sectionIds.get(sectionId) : undefined
@@ -42,7 +57,10 @@ export function withFreshIds(deck: Deck): Deck {
       ...rest,
       id: newId(),
       ...(mapped !== undefined ? { sectionId: mapped } : {}),
-      elements: slide.elements.map((el) => ({ ...el, id: newId() })),
+      elements: slide.elements.map((el) => {
+        const animateKey = el.animateKey ?? (promoted.has(el.id) ? el.id : undefined)
+        return { ...el, id: newId(), ...(animateKey !== undefined ? { animateKey } : {}) }
+      }),
     }
   })
   return { ...deck, id: newId(), sections, slides }

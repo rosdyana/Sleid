@@ -442,7 +442,7 @@ export function createActions(c: ActionContext) {
     run([{ op: 'setTheme', theme: next }])
   }
 
-  function setThemeToken(path: { colors?: Partial<Theme['colors']>; fonts?: Partial<Theme['fonts']> }) {
+  function setThemeToken(path: { colors?: Partial<Theme['colors']>; fonts?: Partial<Theme['fonts']>; fontImports?: string[] }) {
     run([{ op: 'setTheme', theme: path }])
   }
 

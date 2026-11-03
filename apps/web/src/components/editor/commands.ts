@@ -1,6 +1,6 @@
 // Element templates, labels, clipboard and small geometry helpers shared by
 // the menus, the toolbar, the canvas and the side panel.
-import { ElementSchema, type Element, type Slide, type Theme } from '@sleid/model'
+import { ANIMATION_EFFECTS, ElementSchema, type Element, type Slide, type Theme } from '@sleid/model'
 import { plainToRich, richToPlain } from './rich.ts'
 
 export const CANVAS_W = 1920
@@ -52,6 +52,24 @@ export const CHART_LABELS: Record<string, string> = {
   area: 'Area',
   'stacked-bar': 'Stacked bar',
   scatter: 'Scatter',
+}
+
+/** M10. Friendly names for every reveal effect. The toolbar and the side panel both list ANIMATION_EFFECTS. */
+export const ANIMATION_LABELS: Record<(typeof ANIMATION_EFFECTS)[number], string> = {
+  'fade-in': 'Fade in',
+  'fade-up': 'Fade up',
+  'fade-down': 'Fade down',
+  'fade-left': 'Fade left',
+  'fade-right': 'Fade right',
+  grow: 'Grow',
+  shrink: 'Shrink',
+  'highlight-red': 'Highlight red',
+  'zoom-in': 'Zoom in',
+  'fade-out': 'Fade out',
+  'current-visible': 'Visible only while current',
+  'fade-in-then-out': 'Fade in then out',
+  'semi-fade-out': 'Semi fade out',
+  wipe: 'Wipe',
 }
 
 export function shapeDraft(theme: Theme, shape: string): ElementDraft {
@@ -131,6 +149,8 @@ export function elementLabel(el: Element): string {
       return 'Code'
     case 'embed':
       return 'Embed'
+    case 'vector':
+      return 'Vector icon'
   }
 }
 

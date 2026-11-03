@@ -6,9 +6,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import Moveable, { type OnDrag, type OnDragEnd, type OnDragStart, type OnResize, type OnResizeEnd, type OnRotate, type OnRotateEnd } from 'react-moveable'
 import type { Deck, Element, RichText, Slide, Theme } from '@sleid/model'
+import { fontStack } from '@sleid/render'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
 import type { PresencePeer } from './collab-session.ts'
 import { SlideSurface } from './ElementView.tsx'
+import { textBoxStyle } from './element-style.ts'
 import { TextEditor } from './TextEditor.tsx'
 import { CommentPins, type Pin } from './comments/CommentPins.tsx'
 
@@ -219,13 +221,9 @@ export function SlideCanvas(props: CanvasProps) {
               <TextEditor
                 key={el.id}
                 content={el.content}
-                style={{
-                  fontFamily: el.style.fontFamily,
-                  fontSize: (el.style.fontSize ?? theme.sizes.body) * scale,
-                  color: el.style.color,
-                  textAlign: el.style.align,
-                  height: '100%',
-                }}
+                // The same text style as the drawn box (M10), so editing does not visibly jump.
+                style={{ ...textBoxStyle(el, theme, scale), height: '100%' }}
+                headingFont={fontStack(theme.fonts.heading, 'sans-serif')}
                 onCommit={(content) => onCommitText(el.id, content)}
               />
             ) : null

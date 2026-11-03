@@ -325,3 +325,94 @@ describe('applyOps: invalid targets and no partial apply', () => {
     expect(slide.notes).toBe('built in one batch')
   })
 })
+
+describe('applyOps: M10 fields', () => {
+  it('duplicateSlide gives each copy the source key, or the source id when it has none (M10)', () => {
+    const { doc } = setup()
+    const src = firstSlideId(doc)
+    applyOps(doc, [
+      { op: 'addElement', slideId: src, element: rectElement({ id: 'plain' }) },
+      { op: 'addElement', slideId: src, element: rectElement({ id: 'hero-src', animateKey: 'hero' }) },
+    ])
+    applyOps(doc, [{ op: 'duplicateSlide', slideId: src, newSlideId: 'copy' }])
+    const [orig, copy] = yDocToDeck(doc).slides
+    const plainCopy = copy!.elements.find((e) => e.id !== 'plain' && e.id !== 'hero-src' && e.type === 'shape' && e.animateKey === 'plain')
+    const heroCopy = copy!.elements.find((e) => e.animateKey === 'hero')
+    expect(plainCopy).toBeDefined()
+    expect(heroCopy).toBeDefined()
+    // The source keeps its own keys: none for the plain element, so it matches the copy through its id.
+    expect(orig!.elements.find((e) => e.id === 'plain')!.animateKey).toBeUndefined()
+    expect(orig!.elements.find((e) => e.id === 'hero-src')!.animateKey).toBe('hero')
+  })
+
+  it('duplicateSlide leaves a copy without a key when the source id cannot be a reveal key', () => {
+    const { doc } = setup()
+    const src = firstSlideId(doc)
+    applyOps(doc, [{ op: 'addElement', slideId: src, element: rectElement({ id: 'has.dot' }) }])
+    const { results } = applyOps(doc, [{ op: 'duplicateSlide', slideId: src, newSlideId: 'copy2' }])
+    expect(results[0]).toEqual({ ok: true, id: 'copy2' })
+    const copy = yDocToDeck(doc).slides.find((s) => s.id === 'copy2')!
+    expect(copy.elements.some((e) => e.animateKey !== undefined && e.animateKey.includes('.'))).toBe(false)
+  })
+
+  it('updateElement writes the new fields, replaces paths whole, and removes a gradient on null', () => {
+    const { doc } = setup()
+    const src = firstSlideId(doc)
+    applyOps(doc, [
+      { op: 'addElement', slideId: src, element: rectElement({ id: 's1', gradient: { type: 'linear', stops: [{ color: '#000000', at: 0 }, { color: '#ffffff', at: 1 }] } }) },
+      {
+        op: 'addElement',
+        slideId: src,
+        element: {
+          type: 'vector',
+          id: 'v1',
+          x: 0,
+          y: 0,
+          w: 100,
+          h: 100,
+          rotation: 0,
+          locked: false,
+          opacity: 1,
+          viewBox: { x: 0, y: 0, w: 24, h: 24 },
+          paths: [{ d: 'M0 0L1 1', fill: '#000000', stroke: 'none', strokeWidth: 0 }],
+          preserveAspectRatio: true,
+        },
+      },
+    ])
+    applyOps(doc, [
+      { op: 'updateElement', slideId: src, elementId: 'v1', patch: { paths: [{ d: 'M2 2L3 3', fill: '#ff0000', stroke: 'none', strokeWidth: 0 }] } },
+      { op: 'updateElement', slideId: src, elementId: 's1', patch: { gradient: null, radius: 8, animateKey: 'key-1', shadow: { x: 1, y: 1, blur: 2, color: '#000000' } } },
+    ])
+    const deck = yDocToDeck(doc)
+    const els = deck.slides[0]!.elements
+    expect(els.find((e) => e.id === 'v1')).toMatchObject({ paths: [{ d: 'M2 2L3 3', fill: '#ff0000' }] })
+    expect(els.find((e) => e.id === 's1')).toMatchObject({ radius: 8, animateKey: 'key-1', shadow: { blur: 2 } })
+    expect(els.find((e) => e.id === 's1')).not.toHaveProperty('gradient')
+  })
+
+  it('rejects a vector path whose d has characters outside the path grammar', () => {
+    const { doc } = setup()
+    const src = firstSlideId(doc)
+    expect(() =>
+      applyOps(doc, [
+        {
+          op: 'addElement',
+          slideId: src,
+          element: {
+            type: 'vector',
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            rotation: 0,
+            locked: false,
+            opacity: 1,
+            viewBox: { x: 0, y: 0, w: 1, h: 1 },
+            paths: [{ d: 'M0 0" onload="x', fill: '#000000', stroke: 'none', strokeWidth: 0 }],
+            preserveAspectRatio: true,
+          },
+        },
+      ]),
+    ).toThrow(OpError)
+  })
+})

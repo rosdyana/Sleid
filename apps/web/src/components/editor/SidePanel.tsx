@@ -1,10 +1,11 @@
 // Right side panel: Format (selected element), Slide, Theme, AI, Comments and History. Comments and History
 // render outside the read-only fieldset, because commenters and viewers use them.
 import { useEffect, useState, type ReactNode } from 'react'
-import { ANIMATION_EFFECTS, BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
+import { ANIMATE_KEY_RE, ANIMATION_EFFECTS, BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, SLIDE_LAYOUTS, TRANSITIONS, type Deck, type Element, type Shadow, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
-import { CHART_LABELS, elementLabel, SHAPE_LABELS } from './commands.ts'
+import { ANIMATION_LABELS, CHART_LABELS, elementLabel, SHAPE_LABELS } from './commands.ts'
 import { BrandKitSection } from '~/components/brand/BrandKitSection'
+import { MAX_FONT_IMPORTS, parseFontImports } from '~/lib/theme-fonts'
 
 export function SidePanel({
   deck,
@@ -156,6 +157,51 @@ function ColorInput({ value, onChange }: { value: string | undefined; onChange: 
   return <input type="color" className="h-7 w-12 cursor-pointer rounded border border-rule" value={hex(value)} onChange={(e) => onChange(e.target.value)} aria-label="Colour" />
 }
 
+// M10. Text weights for the Weight select.
+const FONT_WEIGHTS: Array<[number, string]> = [
+  [100, 'Thin'],
+  [200, 'Extra Light'],
+  [300, 'Light'],
+  [400, 'Regular'],
+  [500, 'Medium'],
+  [600, 'Semi Bold'],
+  [700, 'Bold'],
+  [800, 'Extra Bold'],
+  [900, 'Black'],
+]
+
+// M10. Shadow presets. A shadow that matches none of them shows as Custom.
+const SHADOW_PRESETS: Record<'soft' | 'medium' | 'strong', Shadow> = {
+  soft: { x: 0, y: 8, blur: 24, color: 'rgba(0,0,0,0.12)' },
+  medium: { x: 0, y: 12, blur: 32, color: 'rgba(0,0,0,0.2)' },
+  strong: { x: 0, y: 24, blur: 60, color: 'rgba(0,0,0,0.3)' },
+}
+
+function shadowKey(shadow: Shadow | undefined): 'none' | 'custom' | keyof typeof SHADOW_PRESETS {
+  if (!shadow) return 'none'
+  const match = (Object.keys(SHADOW_PRESETS) as Array<keyof typeof SHADOW_PRESETS>).find((k) => {
+    const p = SHADOW_PRESETS[k]
+    return shadow.x === p.x && shadow.y === p.y && shadow.blur === p.blur && shadow.color === p.color && !shadow.spread
+  })
+  return match ?? 'custom'
+}
+
+function ShadowRow({ value, onChange }: { value: Shadow | undefined; onChange: (shadow: Shadow | null) => void }) {
+  return (
+    <Row label="Shadow">
+      <Select
+        value={shadowKey(value)}
+        options={[['none', 'None'], ['soft', 'Soft'], ['medium', 'Medium'], ['strong', 'Strong'], ['custom', 'Custom']]}
+        onChange={(v) => {
+          // Custom is what the value shows when it matches no preset. Choosing it changes nothing.
+          if (v === 'none') onChange(null)
+          else if (v === 'soft' || v === 'medium' || v === 'strong') onChange({ ...SHADOW_PRESETS[v] })
+        }}
+      />
+    </Row>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Format tab
 // ---------------------------------------------------------------------------
@@ -184,6 +230,27 @@ function FormatTab({
   }
   const el = single
   const update = (patch: Record<string, unknown>) => actions.updateEl(el.id, patch)
+  const anim = el.animation
+  const g = el.type === 'shape' ? el.gradient : undefined
+
+  // M10. Reveal auto-animate key. Empty clears it. A value outside ANIMATE_KEY_RE is refused, with a message.
+  const setAnimateKey = (raw: string) => {
+    const key = raw.trim()
+    if (key === '') update({ animateKey: null })
+    else if (ANIMATE_KEY_RE.test(key)) update({ animateKey: key })
+    else actions.toast('Match key: letters, digits, _ and - only, up to 64 characters')
+  }
+
+  // M10. Switching the fill type. Linear and radial keep the stops they already have, or start from the fill and the accent.
+  const setFillType = (v: string) => {
+    if (v === 'solid') {
+      update({ gradient: null })
+      return
+    }
+    const type = v === 'radial' ? 'radial' : 'linear'
+    const stops = g?.stops ?? [{ color: el.type === 'shape' ? el.fill : '#000000', at: 0 }, { color: actions.theme.colors.accent, at: 1 }]
+    update({ gradient: { type, stops, angle: type === 'linear' ? (g?.angle ?? 180) : null } })
+  }
 
   return (
     <div>
@@ -212,9 +279,17 @@ function FormatTab({
       <Row label="Animation">
         <Select
           value={el.animation?.effect ?? 'none'}
-          options={[['none', 'None'], ...ANIMATION_EFFECTS.map((e): [string, string] => [e, e])]}
+          options={[['none', 'None'], ...ANIMATION_EFFECTS.map((e): [string, string] => [e, ANIMATION_LABELS[e]])]}
           onChange={(v) => update({ animation: v === 'none' ? null : { effect: v, order: el.animation?.order ?? 0 } })}
         />
+      </Row>
+      {anim && (
+        <Row label="Order">
+          <NumberInput value={anim.order} onCommit={(n) => update({ animation: { effect: anim.effect, order: Math.max(0, Math.round(n)) } })} />
+        </Row>
+      )}
+      <Row label="Match key">
+        <TextInput value={el.animateKey ?? ''} placeholder="auto-animate key" onCommit={(s) => setAnimateKey(s)} />
       </Row>
 
       {el.type === 'text' && (
@@ -240,6 +315,27 @@ function FormatTab({
               onChange={(v) => actions.setTextStyle({ valign: v })}
             />
           </Row>
+          <Row label="Weight">
+            <Select
+              value={el.style.fontWeight === undefined ? 'default' : String(el.style.fontWeight)}
+              options={[['default', 'Default'], ...FONT_WEIGHTS.map(([w, label]): [string, string] => [String(w), label])]}
+              onChange={(v) => actions.setTextStyle({ fontWeight: v === 'default' ? null : Number(v) })}
+            />
+          </Row>
+          <Row label="Letter spacing">
+            <NumberInput
+              value={el.style.letterSpacing ?? 0}
+              step={0.01}
+              onCommit={(n) => actions.setTextStyle({ letterSpacing: n === 0 ? null : Math.min(2, Math.max(-0.5, n)) })}
+            />
+          </Row>
+          <Row label="Case">
+            <Select
+              value={el.style.textTransform ?? 'default'}
+              options={[['default', 'Default'], ['none', 'None'], ['uppercase', 'Uppercase'], ['lowercase', 'Lowercase'], ['capitalize', 'Capitalize']]}
+              onChange={(v) => actions.setTextStyle({ textTransform: v === 'default' ? null : v })}
+            />
+          </Row>
         </div>
       )}
 
@@ -250,14 +346,45 @@ function FormatTab({
             <Select value={el.shape} options={SHAPE_KINDS.map((k): [string, string] => [k, SHAPE_LABELS[k] ?? k])} onChange={(v) => update({ shape: v })} />
           </Row>
           <Row label="Fill">
-            <ColorInput value={el.fill} onChange={(v) => update({ fill: v })} />
+            {/* With a gradient, the first stop is the colour shown here. */}
+            <ColorInput
+              value={g ? g.stops[0]?.color : el.fill}
+              onChange={(v) => (g ? update({ gradient: { stops: g.stops.map((s, i) => (i === 0 ? { ...s, color: v } : s)) } }) : update({ fill: v }))}
+            />
           </Row>
+          <Row label="Fill type">
+            <Select value={g?.type ?? 'solid'} options={[['solid', 'Solid'], ['linear', 'Linear'], ['radial', 'Radial']]} onChange={setFillType} />
+          </Row>
+          {g && (
+            <>
+              <Row label="Colour 2">
+                <ColorInput value={g.stops[1]?.color} onChange={(v) => update({ gradient: { stops: g.stops.map((s, i) => (i === 1 ? { ...s, color: v } : s)) } })} />
+              </Row>
+              {g.type === 'linear' && (
+                <Row label="Angle">
+                  <NumberInput value={g.angle ?? 180} onCommit={(n) => update({ gradient: { angle: n } })} />
+                </Row>
+              )}
+            </>
+          )}
           <Row label="Stroke">
             <ColorInput value={el.stroke} onChange={(v) => update({ stroke: v })} />
           </Row>
           <Row label="Stroke width">
             <NumberInput value={el.strokeWidth} onCommit={(n) => update({ strokeWidth: Math.max(0, n) })} />
           </Row>
+          <Row label="Stroke style">
+            <Select value={el.strokeDash ?? 'solid'} options={[['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted']]} onChange={(v) => update({ strokeDash: v })} />
+          </Row>
+          {(el.shape === 'rect' || el.shape === 'roundRect') && (
+            <Row label="Corner radius">
+              <NumberInput value={el.radius ?? 0} onCommit={(n) => update({ radius: Math.max(0, n) })} />
+            </Row>
+          )}
+          {el.shape === 'roundRect' && el.radius === undefined && (
+            <p className="-mt-1 mb-2 text-[11px] text-ink-muted">Not set: the corners are 12%. Enter a radius to change them.</p>
+          )}
+          <ShadowRow value={el.shadow} onChange={(shadow) => update({ shadow })} />
         </div>
       )}
 
@@ -270,6 +397,10 @@ function FormatTab({
           <Row label="Fit">
             <Select value={el.fit} options={[['contain', 'Contain'], ['cover', 'Cover']]} onChange={(v) => update({ fit: v })} />
           </Row>
+          <Row label="Corner radius">
+            <NumberInput value={el.radius ?? 0} onCommit={(n) => update({ radius: Math.max(0, n) })} />
+          </Row>
+          <ShadowRow value={el.shadow} onChange={(shadow) => update({ shadow })} />
         </div>
       )}
 
@@ -376,6 +507,31 @@ function SlideTab({ deck, slide, actions }: { deck: Deck; slide: Slide; actions:
 
 const COLOR_KEYS: Array<keyof Theme['colors']> = ['background', 'surface', 'text', 'muted', 'accent', 'accent2', 'accent3', 'accent4']
 
+// M10. Comma-separated Google Fonts families. Entries that fail the check are not saved, and are named in a note.
+function WebFontsRow({ theme, actions }: { theme: Theme; actions: Actions }) {
+  const [dropped, setDropped] = useState<string[]>([])
+  return (
+    <>
+      <Row label="Web fonts">
+        <TextInput
+          value={(theme.fontImports ?? []).join(', ')}
+          placeholder="Inter:wght@400;600;700, Noto Sans TC"
+          onCommit={(text) => {
+            const parsed = parseFontImports(text)
+            setDropped(parsed.dropped)
+            actions.setThemeToken({ fontImports: parsed.kept })
+          }}
+        />
+      </Row>
+      {dropped.length > 0 && (
+        <p className="-mt-1 mb-2 text-[11px] text-red-700">
+          Not saved: {dropped.join(', ')}. Use Google Fonts family names, with an optional axis list such as Inter:wght@400;600. Up to {MAX_FONT_IMPORTS} families.
+        </p>
+      )}
+    </>
+  )
+}
+
 function ThemeTab({ theme, brand, deckId, readOnly, actions }: { theme: Theme; brand: Deck['brand']; deckId: string; readOnly: boolean; actions: Actions }) {
   return (
     <div>
@@ -416,7 +572,8 @@ function ThemeTab({ theme, brand, deckId, readOnly, actions }: { theme: Theme; b
       <Row label="Body">
         <TextInput value={theme.fonts.body} onCommit={(s) => actions.setThemeToken({ fonts: { body: s } })} />
       </Row>
-      <p className="mt-3 text-[11px] text-ink-muted">Fonts are referenced by name. Inter is not loaded from a font host yet.</p>
+      <WebFontsRow theme={theme} actions={actions} />
+      <p className="mt-3 text-[11px] text-ink-muted">Font names are used as written. Web fonts load from Google Fonts, so they need a connection. Without one, the font stack is used.</p>
     </div>
   )
 }

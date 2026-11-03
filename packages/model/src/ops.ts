@@ -21,6 +21,7 @@ import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { layoutElements } from './defaults.ts'
 import { mergePatch, writeFields, type PlainObject } from './patch.ts'
 import {
+  ANIMATE_KEY_RE,
   BrandLogoSchema,
   ElementInputSchema,
   ElementSchema,
@@ -341,7 +342,12 @@ function duplicateSlide(doc: Y.Doc, op: Extract<Op, { op: 'duplicateSlide' }>): 
   const copy = SlideSchema.parse({
     ...source,
     id: newId,
-    elements: source.elements.map((el) => ({ ...el, id: nanoid() })),
+    // A copy auto-animates against its source: the source's key, or the source id if it has none.
+    // Ids that cannot be reveal keys (ANIMATE_KEY_RE) are left without one rather than failing the copy.
+    elements: source.elements.map((el) => {
+      const key = el.animateKey ?? el.id
+      return { ...el, id: nanoid(), ...(ANIMATE_KEY_RE.test(key) ? { animateKey: key } : {}) }
+    }),
   })
   const others = slideEntriesInOrder(slides)
   const sourceIndex = others.findIndex((e) => e.id === op.slideId)

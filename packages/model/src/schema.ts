@@ -28,6 +28,9 @@ export const MarkSchema = z.discriminatedUnion('type', [
       color: z.string().nullish(),
       fontSize: z.string().nullish(),
       fontFamily: z.string().nullish(),
+      // M10. fontWeight is a CSS number (400) or keyword ('bold'); letterSpacing is a CSS length ('0.14em').
+      fontWeight: z.union([z.string(), z.number()]).nullish(),
+      letterSpacing: z.string().nullish(),
     }),
   }),
 ])
@@ -62,6 +65,9 @@ export type RichText = z.infer<typeof RichTextSchema>
 // Theme
 // ---------------------------------------------------------------------------
 
+/** One Google Fonts css2 `family` value: a family name, optionally with an axis list. */
+export const FONT_IMPORT_RE = /^[A-Za-z0-9 ]{1,60}(:[A-Za-z0-9,;@.]{1,80})?$/
+
 export const ThemeSchema = z.object({
   name: z.string(),
   colors: z.object({
@@ -88,6 +94,14 @@ export const ThemeSchema = z.object({
   radius: z.number().min(0),
   backgroundStyle: z.enum(['solid', 'gradient', 'image']),
   backgroundValue: z.string().optional(),
+  /**
+   * M10. Google Fonts css2 `family` values, e.g. `Inter:wght@400;600;700`. The render adds one stylesheet link.
+   * The pattern keeps the value to family names plus an axis list, so it cannot carry a URL or markup.
+   */
+  fontImports: z
+    .array(z.string().regex(FONT_IMPORT_RE))
+    .max(6)
+    .optional(),
 })
 export type Theme = z.infer<typeof ThemeSchema>
 
@@ -105,6 +119,12 @@ export const ANIMATION_EFFECTS = [
   'shrink',
   'highlight-red',
   'zoom-in',
+  // M10. Exit and wipe effects. The suggestion ability only uses the entrance effects (see packages/llm).
+  'fade-out',
+  'current-visible',
+  'fade-in-then-out',
+  'semi-fade-out',
+  'wipe',
 ] as const
 
 export const AnimationSchema = z.object({
@@ -119,7 +139,44 @@ export const TextStyleSchema = z.object({
   align: z.enum(['left', 'center', 'right', 'justify']),
   valign: z.enum(['top', 'middle', 'bottom']),
   lineHeight: z.number().positive().optional(),
+  // M10 typography. All optional, so existing decks are unchanged.
+  fontWeight: z.number().int().min(100).max(900).optional(),
+  /** In em, so it scales with fontSize. */
+  letterSpacing: z.number().min(-0.5).max(2).optional(),
+  textTransform: z.enum(['none', 'uppercase', 'lowercase', 'capitalize']).optional(),
 })
+
+// M10. Shared by shapes, images and text. Canvas pixels for offsets and blur.
+export const ShadowSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  blur: z.number().min(0),
+  spread: z.number().optional(),
+  color: z.string(),
+})
+export type Shadow = z.infer<typeof ShadowSchema>
+
+export const GradientFillSchema = z.object({
+  type: z.enum(['linear', 'radial']),
+  /** Degrees, linear only. Default 180 (top to bottom). */
+  angle: z.number().optional(),
+  stops: z.array(z.object({ color: z.string(), at: z.number().min(0).max(1) })).min(2).max(8),
+})
+export type GradientFill = z.infer<typeof GradientFillSchema>
+
+// M10. Vector paths are structured (d + paints), not raw SVG markup, so nothing needs an XML sanitiser.
+// The `d` regex allows only path commands and number syntax; the renderer re-checks it.
+export const VECTOR_PATH_D_RE = /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,\s+-]+$/
+export const VectorPathSchema = z.object({
+  d: z.string().max(20000).regex(VECTOR_PATH_D_RE),
+  fill: z.string(),
+  stroke: z.string(),
+  strokeWidth: z.number().min(0),
+  lineCap: z.enum(['butt', 'round', 'square']).optional(),
+  lineJoin: z.enum(['miter', 'round', 'bevel']).optional(),
+  opacity: z.number().min(0).max(1).optional(),
+})
+export type VectorPath = z.infer<typeof VectorPathSchema>
 
 export const SHAPE_KINDS = ['rect', 'roundRect', 'ellipse', 'triangle', 'arrow', 'line', 'star'] as const
 export const CHART_TYPES = ['bar', 'line', 'pie', 'area', 'scatter', 'donut', 'stacked-bar'] as const
@@ -140,6 +197,9 @@ export const ChartOptionsSchema = z.object({
   colors: z.array(z.string()).optional(),
 })
 
+/** Allowed reveal auto-animate keys. Also the only ids a duplicate can reuse as a key, so they stay safe in data-id. */
+export const ANIMATE_KEY_RE = /^[A-Za-z0-9_-]{1,64}$/
+
 // Shared by every element. `idSchema` and `zSchema` differ between the stored
 // element (both required) and the input accepted by addElement (both optional).
 function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSchema: Z) {
@@ -155,6 +215,8 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
     opacity: z.number().min(0).max(1),
     animation: AnimationSchema.optional(),
     alt: z.string().optional(),
+    /** M10. Reveal auto-animate match key. Two elements with the same key animate between slides. */
+    animateKey: z.string().regex(ANIMATE_KEY_RE).optional(),
   }
   return z.discriminatedUnion('type', [
     z.object({
@@ -163,6 +225,8 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
       content: RichTextSchema,
       style: TextStyleSchema,
       role: z.enum(['title', 'subtitle', 'body']).optional(),
+      /** M10. text-shadow. */
+      shadow: ShadowSchema.optional(),
     }),
     z.object({
       ...common,
@@ -172,6 +236,12 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
       stroke: z.string(),
       strokeWidth: z.number().min(0),
       text: RichTextSchema.optional(),
+      /** M10. Canvas px. Used by rect and roundRect. Absent on roundRect means the legacy 12% corner. */
+      radius: z.number().min(0).optional(),
+      strokeDash: z.enum(['solid', 'dashed', 'dotted']).optional(),
+      /** M10. Overrides `fill` when present. */
+      gradient: GradientFillSchema.optional(),
+      shadow: ShadowSchema.optional(),
     }),
     z.object({
       ...common,
@@ -181,6 +251,9 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
       crop: z
         .object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), w: z.number().min(0).max(1), h: z.number().min(0).max(1) })
         .optional(),
+      /** M10. Corner radius in canvas px. */
+      radius: z.number().min(0).optional(),
+      shadow: ShadowSchema.optional(),
     }),
     z.object({
       ...common,
@@ -213,6 +286,15 @@ function buildElement<I extends z.ZodType, Z extends z.ZodType>(idSchema: I, zSc
       type: z.literal('embed'),
       url: z.string(),
     }),
+    // M10. Vector icon. Paths are drawn inside the viewBox and scaled to the element box.
+    z.object({
+      ...common,
+      type: z.literal('vector'),
+      viewBox: z.object({ x: z.number(), y: z.number(), w: z.number().positive(), h: z.number().positive() }),
+      paths: z.array(VectorPathSchema).min(1).max(200),
+      /** true = xMidYMid meet (keep proportions); false = none (stretch to the box). */
+      preserveAspectRatio: z.boolean(),
+    }),
   ])
 }
 
@@ -230,6 +312,7 @@ export type DiagramElement = Extract<Element, { type: 'diagram' }>
 export type TableElement = Extract<Element, { type: 'table' }>
 export type CodeElement = Extract<Element, { type: 'code' }>
 export type EmbedElement = Extract<Element, { type: 'embed' }>
+export type VectorElement = Extract<Element, { type: 'vector' }>
 export type ChartData = z.infer<typeof ChartDataSchema>
 export type ChartOptions = z.infer<typeof ChartOptionsSchema>
 

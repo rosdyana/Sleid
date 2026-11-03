@@ -2,10 +2,11 @@
 // (hidden slides). Output is a 16:9 (13.333 x 7.5 in) presentation with native text, shapes, tables and charts.
 import PptxGenJS from 'pptxgenjs'
 import JSZip from 'jszip'
-import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, readableTextOn, type Deck, type DiagramElement, type Element, type TableElement } from '@sleid/model'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, readableTextOn, type Deck, type DiagramElement, type Element, type GradientFill, type Shadow, type ShapeElement, type TableElement, type VectorElement } from '@sleid/model'
 import { chartPalette, chartSeries, pptxChartKind } from './charts.ts'
-import { monospaceRuns, richTextRuns, type PptxRun } from './text.ts'
+import { letterSpacingPoints, monospaceRuns, richTextRuns, type PptxRun } from './text.ts'
 import { inches, pptxColor, pptxFontFace, points, transparencyFor } from './units.ts'
+import { vectorDataUri } from './vector.ts'
 
 export { chartSeries, pptxChartKind, chartPalette } from './charts.ts'
 export { richTextRuns, monospaceRuns } from './text.ts'
@@ -140,6 +141,10 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
         fontSize,
         color: pptxColor(style.color) ?? ctx.textColor,
         align: style.align,
+        // M10 typography: weight 600+ is bold, letter spacing in em scales with the font size, transform goes into the text.
+        bold: typeof style.fontWeight === 'number' && style.fontWeight >= 600,
+        charSpacing: letterSpacingPoints(style.letterSpacing !== undefined ? `${style.letterSpacing}em` : undefined, fontSize),
+        textTransform: style.textTransform,
       })
       s.addText(runs as never, {
         ...box(el),
@@ -152,12 +157,17 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
       return
     }
     case 'shape': {
-      const fill = pptxColor(el.fill)
+      const fill = gradientPaint(el.gradient) ?? pptxColor(el.fill)
       const line = pptxColor(el.stroke)
+      const dash = dashType(el.strokeDash)
+      const shadow = shadowOptions(el.shadow)
+      const rectRadius = el.shape === 'roundRect' && el.radius !== undefined ? roundRectRadius(el) : undefined
       const common = {
         ...box(el),
         fill: fill ? { color: fill, transparency } : { type: 'none' as const },
-        line: line && el.strokeWidth > 0 ? { color: line, width: points(el.strokeWidth) } : { type: 'none' as const },
+        line: line && el.strokeWidth > 0 ? { color: line, width: points(el.strokeWidth), ...(dash ? { dashType: dash } : {}) } : { type: 'none' as const },
+        ...(shadow ? { shadow } : {}),
+        ...(rectRadius ? { rectRadius } : {}),
       }
       if (el.shape === 'line') {
         const y = inches(el.y + el.h / 2)
@@ -166,7 +176,7 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
           y,
           w: inches(el.w),
           h: 0,
-          line: { color: line ?? ctx.textColor, width: Math.max(points(el.strokeWidth), 1) },
+          line: { color: line ?? ctx.textColor, width: Math.max(points(el.strokeWidth), 1), ...(dash ? { dashType: dash } : {}) },
           rotate: el.rotation || undefined,
         })
         return
@@ -189,7 +199,16 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
         sizing: el.crop ? undefined : { type: el.fit === 'contain' ? 'contain' : 'cover', w: inches(el.w), h: inches(el.h) },
         transparency,
         altText: el.alt,
+        // M10. PowerPoint can only crop a picture to an ellipse here, so a radius counts only when it reaches half
+        // the short side (a circle or oval). Smaller corner radii are left out rather than drawn wrong.
+        ...(el.radius !== undefined && el.radius > 0 && el.radius >= Math.min(el.w, el.h) / 2 ? { rounding: true } : {}),
       })
+      return
+    }
+    case 'vector': {
+      // Exported as an SVG picture built from the same paths the renderer draws. See vector.ts for the caveat.
+      const data = vectorDataUri(el)
+      if (data) s.addImage({ data, ...box(el), altText: el.alt ?? 'Vector icon', transparency })
       return
     }
     case 'chart': {
@@ -256,6 +275,44 @@ async function addElement(pptx: PptxGenJS, s: ReturnType<PptxGenJS['addSlide']>,
       s.addText(runs as never, { ...box(el), fill: { color: ctx.surfaceColor }, margin: 16, valign: 'middle', align: 'center' })
       return
     }
+  }
+}
+
+// PowerPoint has no gradient in pptxgenjs's shape options, so a gradient exports as a flat fill in its last
+// colour that PowerPoint can read. The gradient itself is lost; the flat colour is the closest single value.
+function gradientPaint(g: GradientFill | undefined): string | undefined {
+  if (!g) return undefined
+  let last: string | undefined
+  for (const stop of g.stops) last = pptxColor(stop.color) ?? last
+  return last
+}
+
+// Dashed and dotted outlines. pptxgenjs writes these as DrawingML preset dashes.
+function dashType(dash: ShapeElement['strokeDash']): 'dash' | 'sysDot' | undefined {
+  if (dash === 'dashed') return 'dash'
+  if (dash === 'dotted') return 'sysDot'
+  return undefined
+}
+
+// Canvas px radius to the inches pptxgenjs expects (it turns this into the roundRect adjust value). Clamped to half the short side.
+function roundRectRadius(el: ShapeElement): number {
+  return inches(Math.max(0, Math.min(el.radius ?? 0, el.w / 2, el.h / 2)))
+}
+
+// A CSS box-shadow as a DrawingML outer shadow. The offset becomes a distance and an angle (clockwise from
+// the x axis, as in DrawingML). The spread has no equivalent here and is left out.
+function shadowOptions(shadow: Shadow | undefined): PptxGenJS.ShadowProps | undefined {
+  if (!shadow) return undefined
+  const angle = ((Math.round((Math.atan2(shadow.y, shadow.x) * 180) / Math.PI) % 360) + 360) % 360
+  const alpha = /^rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(shadow.color.trim())
+  const opacity = alpha ? Math.min(Math.max(Number(alpha[1]), 0), 1) : 0.35
+  return {
+    type: 'outer',
+    blur: Math.min(Math.max(points(shadow.blur), 0), 100),
+    offset: Math.min(Math.max(points(Math.hypot(shadow.x, shadow.y)), 0), 200),
+    angle,
+    color: pptxColor(shadow.color) ?? '000000',
+    opacity,
   }
 }
 

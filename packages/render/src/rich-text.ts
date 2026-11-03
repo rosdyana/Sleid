@@ -1,7 +1,7 @@
 // Rich text (ProseMirror-style JSON) to HTML. Text is escaped, links are
 // filtered by protocol, and unknown node types render as their children.
 import type { RichMark, RichNode, RichText } from '@sleid/model'
-import { escapeHtml, safeColor, safeFontFamily, safeHref, safeLength } from './html.ts'
+import { escapeHtml, safeColor, safeFontFamily, safeHref, safeLength, safeSignedLength } from './html.ts'
 
 export function richTextToHtml(doc: RichText | RichNode | null | undefined): string {
   if (!doc) return ''
@@ -84,12 +84,25 @@ function applyMarks(html: string, marks: RichMark[]): string {
   return out
 }
 
-function textStyleCss(attrs: { color?: string | null; fontSize?: string | null; fontFamily?: string | null }): string {
+function textStyleCss(attrs: {
+  color?: string | null
+  fontSize?: string | null
+  fontFamily?: string | null
+  fontWeight?: string | number | null
+  letterSpacing?: string | null
+}): string {
   const parts: string[] = []
   if (attrs.color) parts.push(`color:${safeColor(attrs.color, '')}`)
   const size = safeLength(attrs.fontSize ?? undefined)
   if (size) parts.push(`font-size:${size}`)
   const family = safeFontFamily(attrs.fontFamily ?? undefined)
   if (family) parts.push(`font-family:${family}`)
+  // M10. A weight is a 100-900 number, or the keyword 'bold' or 'normal'. Anything else is left out.
+  // The editor stores weights read from HTML as strings ("650"), so a three-digit string counts as a number.
+  const weight = typeof attrs.fontWeight === 'string' && /^\d{3}$/.test(attrs.fontWeight) ? Number(attrs.fontWeight) : attrs.fontWeight
+  if (typeof weight === 'number' && Number.isInteger(weight) && weight >= 100 && weight <= 900) parts.push(`font-weight:${weight}`)
+  else if (weight === 'bold' || weight === 'normal') parts.push(`font-weight:${weight}`)
+  const spacing = safeSignedLength(attrs.letterSpacing ?? undefined)
+  if (spacing) parts.push(`letter-spacing:${spacing}`)
   return parts.filter((p) => !p.endsWith(':')).join(';')
 }

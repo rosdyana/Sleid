@@ -2,16 +2,17 @@
 // element like a cell reference, and its input edits whatever the element holds.
 import type { ReactNode, RefObject } from 'react'
 import { AlignCenter, AlignJustify, AlignLeft, AlignRight, Bold, Image as ImageIcon, Italic, MousePointer2, Plus, Presentation, Redo2, Sparkles, Star, Strikethrough, Table2, Type, Underline, Undo2 } from 'lucide-react'
-import { BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
+import { ANIMATION_EFFECTS, BUILT_IN_THEMES, CHART_TYPES, SHAPE_KINDS, TRANSITIONS, type Deck, type Element, type Slide, type Theme } from '@sleid/model'
 import type { Actions, UiState } from './actions.ts'
-import { CHART_LABELS, elementLabel, SHAPE_LABELS, slideTitle } from './commands.ts'
+import { ANIMATION_LABELS, CHART_LABELS, elementLabel, SHAPE_LABELS, slideTitle } from './commands.ts'
 import { deniedMessage, type PresencePeer, type SyncStatus } from './collab-session.ts'
 import { markOnEverything, plainToRich, richToPlain } from './rich.ts'
 import { safeImageSrc } from './ElementView.tsx'
 import { FONT_FAMILIES } from '~/lib/brand-fonts'
 
 const FONT_SIZES = [12, 14, 18, 24, 32, 40, 56, 72]
-const ANIMATIONS = ['none', 'fade-in', 'fade-up', 'fade-down', 'fade-left', 'fade-right', 'grow', 'shrink', 'highlight-red', 'zoom-in']
+// M10. Every reveal effect in the model, so the toolbar and the side panel offer the same list.
+const ANIMATIONS = ['none', ...ANIMATION_EFFECTS] as const
 
 // ---------------------------------------------------------------------------
 // Title bar
@@ -318,7 +319,7 @@ export function Toolbar({
       >
         {ANIMATIONS.map((a) => (
           <option key={a} value={a}>
-            {a === 'none' ? 'No animation' : a}
+            {a === 'none' ? 'No animation' : ANIMATION_LABELS[a]}
           </option>
         ))}
       </select>

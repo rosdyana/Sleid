@@ -27,3 +27,29 @@ body {
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
+
+/* M10. The text box editor uses the same spacing as the rendered text (BASE_CSS in packages/render/src/styles.ts). */
+.sleid-rich-edit p {
+  margin: 0 0 0.4em;
+}
+.sleid-rich-edit :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0 0 0.3em;
+  font-family: var(--sleid-heading-font, inherit);
+  font-size: 1.3em;
+  font-weight: 700;
+  line-height: 1.15;
+}
+.sleid-rich-edit ul,
+.sleid-rich-edit ol {
+  margin: 0 0 0.4em;
+  padding-left: 1.2em;
+}
+.sleid-rich-edit ul {
+  list-style: disc outside;
+}
+.sleid-rich-edit ol {
+  list-style: decimal outside;
+}
+.sleid-rich-edit ul ul {
+  list-style-type: circle;
+}

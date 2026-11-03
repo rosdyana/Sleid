@@ -90,6 +90,9 @@ function elementLine(el: Element, maxText: number): string {
     case 'embed':
       detail = 'embed'
       break
+    case 'vector':
+      detail = `vector icon (${el.paths.length} paths)`
+      break
   }
   return `    - ${el.type} id=${el.id}${role} ${box}${detail ? `: ${detail}` : ''}`
 }

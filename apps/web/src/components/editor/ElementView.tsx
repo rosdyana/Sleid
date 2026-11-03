@@ -4,10 +4,11 @@
 // react-moveable works in real pixels and the gesture maths stays simple.
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode, type PointerEvent as ReactPointerEvent } from 'react'
 import * as echarts from 'echarts'
-import { logoAppliesToBrand, type BrandLogo, type BrandRef, type ChartElement, type Element, type RichNode, type RichText, type Slide, type Theme } from '@sleid/model'
-import { chartToEchartsOption } from '@sleid/render'
+import { logoAppliesToBrand, type BrandLogo, type BrandRef, type ChartElement, type Element, type RichNode, type RichText, type ShapeElement, type Slide, type Theme } from '@sleid/model'
+import { chartToEchartsOption, fontStack, safeColor } from '@sleid/render'
 import { mermaidConfigFor, readableTextOn } from '@sleid/model'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
+import { boxShapeStyle, imageWrapStyle, shapeSvgPaint, textBoxStyle, textStyleMarkCss, vectorPathProps, vectorViewBox, visibleVectorPaths } from './element-style.ts'
 
 export function safeImageSrc(src: string): string | undefined {
   return /^(https?:\/\/|data:image\/(png|jpeg|gif|webp|svg\+xml);|\/)/i.test(src) ? src : undefined
@@ -94,42 +95,41 @@ export function SlideSurface({
 }
 
 export function ElementBody({ el, theme, scale }: { el: Element; theme: Theme; scale: number }) {
+  const headingFont = fontStack(theme.fonts.heading, 'sans-serif')
   switch (el.type) {
-    case 'text': {
-      const s = el.style
+    case 'text':
       return (
-        <div
-          className="flex h-full w-full overflow-hidden"
-          style={{
-            flexDirection: 'column',
-            justifyContent: s.valign === 'middle' ? 'center' : s.valign === 'bottom' ? 'flex-end' : 'flex-start',
-            textAlign: s.align,
-            fontFamily: s.fontFamily,
-            fontSize: (s.fontSize ?? theme.sizes.body) * scale,
-            color: s.color,
-            lineHeight: s.lineHeight ?? 1.25,
-            overflowWrap: 'anywhere',
-          }}
-        >
-          <RichView doc={el.content} />
+        <div className="h-full w-full overflow-hidden" style={textBoxStyle(el, theme, scale)}>
+          <RichView doc={el.content} headingFont={headingFont} />
         </div>
       )
-    }
     case 'shape':
       return (
         <div className="relative h-full w-full">
-          <ShapeSvg kind={el.shape} fill={el.fill} stroke={el.stroke} strokeWidth={el.strokeWidth * scale} />
+          {el.shape === 'rect' || el.shape === 'roundRect' || el.shape === 'ellipse' ? (
+            <div style={boxShapeStyle(el, scale)} />
+          ) : (
+            <ShapeSvg el={el} scale={scale} />
+          )}
           {el.text && (
-            <div className="absolute inset-0 flex items-center justify-center p-2" style={{ fontSize: theme.sizes.body * scale }}>
-              <RichView doc={el.text} />
+            <div
+              className="absolute inset-0 flex flex-col justify-center text-center"
+              style={{ padding: '0.5em', fontSize: theme.sizes.body * scale, color: safeColor(theme.colors.text, '#202124') }}
+            >
+              <RichView doc={el.text} headingFont={headingFont} />
             </div>
           )}
         </div>
       )
     case 'image': {
       const src = safeImageSrc(el.src)
-      if (!src) return <div className="grid h-full w-full place-items-center bg-[#eceff1] text-[12px] text-[#5f6368]">Image</div>
-      return <img src={src} alt={el.alt ?? ''} draggable={false} className="h-full w-full select-none" style={{ objectFit: el.fit }} />
+      const wrap = imageWrapStyle(el, scale)
+      if (!src) return <div className="grid h-full w-full place-items-center bg-[#eceff1] text-[12px] text-[#5f6368]" style={wrap}>Image</div>
+      return (
+        <div className="h-full w-full" style={wrap}>
+          <img src={src} alt={el.alt ?? ''} draggable={false} className="h-full w-full select-none" style={{ objectFit: el.fit }} />
+        </div>
+      )
     }
     case 'chart':
       return <ChartView key={scale < 0.5 ? 'lo' : 'hi'} el={el} theme={theme} scale={scale} />
@@ -171,56 +171,80 @@ export function ElementBody({ el, theme, scale }: { el: Element; theme: Theme; s
       if (!src) return <div className="grid h-full w-full place-items-center bg-[#eceff1]">Embed URL must be http(s)</div>
       return <iframe src={src} title="Embed" sandbox="allow-scripts allow-popups" className="h-full w-full border-0" />
     }
+    // M10. Same attributes as renderVector in the renderer. Paths failing the d check are skipped.
+    case 'vector':
+      return (
+        <svg
+          className="block h-full w-full overflow-visible"
+          viewBox={vectorViewBox(el)}
+          preserveAspectRatio={el.preserveAspectRatio ? 'xMidYMid meet' : 'none'}
+          width="100%"
+          height="100%"
+          aria-hidden="true"
+        >
+          {visibleVectorPaths(el).map((p, i) => (
+            <path key={i} {...vectorPathProps(p)} />
+          ))}
+        </svg>
+      )
   }
 }
 
 const STAR_POINTS = (() => {
   const pts: string[] = []
   for (let i = 0; i < 10; i++) {
-    const r = i % 2 === 0 ? 50 : 22
+    const r = i % 2 === 0 ? 50 : 20
     const a = (Math.PI / 5) * i - Math.PI / 2
-    pts.push(`${(50 + r * Math.cos(a)).toFixed(2)},${(52 + r * Math.sin(a)).toFixed(2)}`)
+    pts.push(`${(50 + r * Math.cos(a)).toFixed(2)},${(50 + r * Math.sin(a)).toFixed(2)}`)
   }
   return pts.join(' ')
 })()
 
-function ShapeSvg({ kind, fill, stroke, strokeWidth }: { kind: string; fill: string; stroke: string; strokeWidth: number }) {
-  const common = { fill, stroke, strokeWidth, vectorEffect: 'non-scaling-stroke' as const }
+// Geometry matches the renderer's renderShape for the SVG kinds (triangle, arrow, line, star).
+function ShapeSvg({ el, scale }: { el: ShapeElement; scale: number }) {
+  const paint = shapeSvgPaint(el, scale)
+  const common = { fill: paint.fill, stroke: paint.stroke, strokeWidth: paint.strokeWidth, vectorEffect: 'non-scaling-stroke', strokeDasharray: paint.strokeDasharray, strokeLinecap: paint.strokeLinecap }
   const body = (() => {
-    switch (kind) {
-      case 'roundRect':
-        return <rect x="0" y="0" width="100" height="100" rx="12" ry="12" {...common} />
-      case 'ellipse':
-        return <ellipse cx="50" cy="50" rx="50" ry="50" {...common} />
+    switch (el.shape) {
       case 'triangle':
         return <polygon points="50,0 100,100 0,100" {...common} />
       case 'arrow':
-        return <polygon points="0,35 60,35 60,0 100,50 60,100 60,65 0,65" {...common} />
+        return <polygon points="0,35 65,35 65,15 100,50 65,85 65,65 0,65" {...common} />
       case 'line':
-        return <line x1="0" y1="50" x2="100" y2="50" stroke={stroke} strokeWidth={Math.max(strokeWidth, 2)} vectorEffect="non-scaling-stroke" />
+        return <line x1="0" y1="50" x2="100" y2="50" {...common} fill="none" />
       case 'star':
         return <polygon points={STAR_POINTS} {...common} />
       default:
-        return <rect x="0" y="0" width="100" height="100" {...common} />
+        // rect, roundRect and ellipse are drawn as boxes (boxShapeStyle), not here.
+        return null
     }
   })()
   return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full overflow-visible">
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full overflow-visible" style={paint.filter ? { filter: paint.filter } : undefined} aria-hidden="true">
       {body}
     </svg>
   )
 }
 
 /** Rich text (ProseMirror-style JSON) as React nodes. Unknown nodes keep their children. */
-export function RichView({ doc }: { doc: RichText | RichNode | undefined }) {
-  return <>{renderNodes(doc?.content)}</>
+export function RichView({ doc, headingFont }: { doc: RichText | RichNode | undefined; headingFont?: string | undefined }) {
+  return <>{renderNodes(doc?.content, { headingFont, listDepth: 0 })}</>
 }
 
-function renderNodes(nodes: RichNode[] | undefined): ReactNode[] {
-  return (nodes ?? []).map((node, i) => renderNode(node, i))
+interface RichCtx {
+  headingFont: string | undefined
+  /** How many lists enclose this node. A bullet list inside a bullet list uses a circle, as BASE_CSS does. */
+  listDepth: number
 }
 
-function renderNode(node: RichNode, key: number): ReactNode {
+function renderNodes(nodes: RichNode[] | undefined, ctx: RichCtx): ReactNode[] {
+  return (nodes ?? []).map((node, i) => renderNode(node, i, ctx))
+}
+
+const HEADINGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const
+
+// Spacing and line height follow BASE_CSS in the renderer (paragraphs 0 0 0.4em, headings 0 0 0.3em at 1.15, lists 0 0 0.4em with 1.2em indent).
+function renderNode(node: RichNode, key: number, ctx: RichCtx): ReactNode {
   if (node.type === 'text') {
     let out: ReactNode = node.text ?? ''
     for (const mark of node.marks ?? []) {
@@ -240,11 +264,9 @@ function renderNode(node: RichNode, key: number): ReactNode {
         case 'code':
           out = <code>{out}</code>
           break
-        case 'textStyle': {
-          const a = mark.attrs
-          out = <span style={{ color: a.color ?? undefined, fontSize: a.fontSize ?? undefined, fontFamily: a.fontFamily ?? undefined }}>{out}</span>
+        case 'textStyle':
+          out = <span style={textStyleMarkCss(mark.attrs)}>{out}</span>
           break
-        }
         case 'link':
           out = <span className="text-accent underline">{out}</span>
           break
@@ -253,20 +275,40 @@ function renderNode(node: RichNode, key: number): ReactNode {
     return <span key={key}>{out}</span>
   }
   if (node.type === 'hardBreak') return <br key={key} />
-  const children = renderNodes(node.content)
+  const inner = (next: RichCtx = ctx) => renderNodes(node.content, next)
   switch (node.type) {
     case 'bulletList':
-      return <ul key={key} className="m-0 list-disc pl-[1.2em]">{children}</ul>
+      return (
+        <ul key={key} style={{ margin: '0 0 0.4em', paddingLeft: '1.2em', listStyle: ctx.listDepth > 0 ? 'circle outside' : 'disc outside' }}>
+          {inner({ ...ctx, listDepth: ctx.listDepth + 1 })}
+        </ul>
+      )
     case 'orderedList':
-      return <ol key={key} className="m-0 list-decimal pl-[1.2em]">{children}</ol>
+      return (
+        <ol key={key} style={{ margin: '0 0 0.4em', paddingLeft: '1.2em', listStyle: 'decimal outside' }}>
+          {inner({ ...ctx, listDepth: ctx.listDepth + 1 })}
+        </ol>
+      )
     case 'listItem':
-      return <li key={key}>{children}</li>
-    case 'heading':
-      return <div key={key} style={{ fontWeight: 700, fontSize: '1.3em' }}>{children}</div>
+      return <li key={key}>{inner()}</li>
+    case 'heading': {
+      const level = node.attrs?.level
+      const n = typeof level === 'number' ? Math.round(level) : 1
+      const Tag = HEADINGS[Math.min(Math.max(n, 1), 6) - 1]!
+      return (
+        <Tag key={key} style={{ margin: '0 0 0.3em', lineHeight: 1.15, fontFamily: ctx.headingFont, fontWeight: 700, fontSize: '1.3em' }}>
+          {inner()}
+        </Tag>
+      )
+    }
     case 'paragraph':
-      return <div key={key} style={{ minHeight: '1em' }}>{children}</div>
+      return (
+        <p key={key} style={{ margin: '0 0 0.4em', minHeight: '1em' }}>
+          {inner()}
+        </p>
+      )
     default:
-      return <div key={key}>{children}</div>
+      return <div key={key}>{inner()}</div>
   }
 }
 

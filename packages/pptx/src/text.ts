@@ -14,6 +14,38 @@ export interface TextBase {
   fontSize: number
   color: string
   align: 'left' | 'center' | 'right' | 'justify'
+  /** M10. Every run bold. Set when the element's font weight is 600 or more (PowerPoint has no 600 or 700 run weights). */
+  bold?: boolean
+  /** M10. Letter spacing for every run, in points (pptxgenjs charSpacing). */
+  charSpacing?: number
+  /** M10. Applied to the text of every run when exporting (PowerPoint has no text-transform). */
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize'
+}
+
+/**
+ * M10. A CSS letter-spacing ("0.14em", "-0.02em", "1.5px") as points, at the font size in canvas px.
+ * Other units return undefined and are left out.
+ */
+export function letterSpacingPoints(value: string | undefined, fontSizePx: number): number | undefined {
+  if (value === undefined) return undefined
+  const m = /^(-?\d+(?:\.\d+)?)(em|px)$/.exec(value.trim())
+  if (!m) return undefined
+  const px = m[2] === 'em' ? Number(m[1]) * fontSizePx : Number(m[1])
+  return Number.isFinite(px) ? points(px) : undefined
+}
+
+/** M10. The text as the element's text-transform shows it. */
+export function transformText(text: string, mode: TextBase['textTransform']): string {
+  switch (mode) {
+    case 'uppercase':
+      return text.toUpperCase()
+    case 'lowercase':
+      return text.toLowerCase()
+    case 'capitalize':
+      return text.replace(/(^|\s)(\S)/g, (_m, space: string, ch: string) => space + ch.toUpperCase())
+    default:
+      return text
+  }
 }
 
 // pptxgenjs writes a bullet glyph only for `characterCode` (bullets) or `type: 'number'` (numbered lists).
@@ -105,7 +137,7 @@ export function richTextRuns(doc: RichText | RichNode | null | undefined, base: 
       return
     }
     if (typeof node.text === 'string') {
-      runs.push({ text: node.text, options: runOptions(node.marks ?? [], ctx) })
+      runs.push({ text: transformText(node.text, base.textTransform), options: runOptions(node.marks ?? [], ctx) })
       return
     }
     for (const child of Array.isArray(node.content) ? node.content : []) {
@@ -119,8 +151,9 @@ export function richTextRuns(doc: RichText | RichNode | null | undefined, base: 
       fontSize: points(ctx.size),
       color: base.color,
     }
-    if (ctx.bold) options.bold = true
+    if (ctx.bold || base.bold) options.bold = true
     if (ctx.italic) options.italic = true
+    if (base.charSpacing !== undefined) options.charSpacing = base.charSpacing
     for (const mark of marks) {
       switch (mark.type) {
         case 'bold':
@@ -147,10 +180,20 @@ export function richTextRuns(doc: RichText | RichNode | null | undefined, base: 
           const color = pptxColor(mark.attrs.color ?? undefined)
           if (color) options.color = color
           const size = mark.attrs.fontSize
+          let sizePx = ctx.size
           if (size) {
             const px = parseFloat(String(size))
-            if (Number.isFinite(px) && px > 0) options.fontSize = points(px)
+            if (Number.isFinite(px) && px > 0) {
+              options.fontSize = points(px)
+              sizePx = px
+            }
           }
+          // M10. A weight of 600 or more is bold, as for the whole element.
+          // The editor stores weights read from HTML as strings ("650"), so numeric strings count too.
+          const weight = typeof mark.attrs.fontWeight === 'string' && /^\d{3}$/.test(mark.attrs.fontWeight) ? Number(mark.attrs.fontWeight) : mark.attrs.fontWeight
+          if ((typeof weight === 'number' && weight >= 600) || weight === 'bold') options.bold = true
+          const spacing = letterSpacingPoints(typeof mark.attrs.letterSpacing === 'string' ? mark.attrs.letterSpacing : undefined, sizePx)
+          if (spacing !== undefined) options.charSpacing = spacing
           break
         }
       }

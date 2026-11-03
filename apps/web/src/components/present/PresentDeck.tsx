@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, type MutableRefObject } from 'react'
 import 'reveal.js/dist/reveal.css'
 import type { Deck } from '@sleid/model'
 import { BASE_CSS, renderSlideHtml, themeCssVariables } from '@sleid/render'
+import { useGoogleFontsLink } from '~/lib/theme-fonts'
 
 interface RevealInstance {
   initialize(): Promise<unknown>
@@ -47,6 +48,7 @@ export function PresentDeck({
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const css = useMemo(() => `${themeCssVariables(deck.theme)}\n${BASE_CSS}`, [deck.theme])
+  useGoogleFontsLink(deck.theme)
   const slidesHtml = useMemo(() => deck.slides.map((s) => renderSlideHtml(s, deck)).join('\n'), [deck])
   const firstSlide = useRef(startSlide)
   const positionListener = useRef(onPosition)

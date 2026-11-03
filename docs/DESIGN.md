@@ -17,6 +17,7 @@ Living document. Update it as decisions change.
 | 7. Comments, version history, presenter + phone remote | **Done** (checks run, see M7 below; open items and unverified parts listed there) |
 | 8. Import: PPTX, Google Slides, Markdown, JSON | **Done** (checks run, see M8 below; open items and unverified parts listed there. Real Google OAuth, Picker and Drive were not run.) |
 | 9. Templates and brand kits | **Done** (checks run, see M9 below; open items and known gaps listed there) |
+| 10. Fidelity: typography, shapes, vectors, animation | **Done** (typecheck, unit tests and build run, see M10 below; no browser check yet, and the open items are listed there) |
 
 ### What M0 built, and decisions taken while building it
 
@@ -1359,3 +1360,56 @@ Scope: built-in templates, a brand kit (palette, fonts, logo placement) that a d
 - Viewer and commenter read-only checks for the brand section are code-only (see unverified).
 - The PPTX table header colour was checked by unit tests of the colour rule, not in PowerPoint or LibreOffice.
 - The worker's thumbnail integration test returns early (passes without asserting) when Chrome cannot start, and prints a message when that happens.
+
+## M10: Fidelity (typography, shapes, vectors, animation)
+
+Scope: the deck schema gains text weight, letter spacing and case, text and box shadows, corner radius, dashed and dotted strokes, linear and radial gradients, a vector element, more reveal effects, a reveal auto-animate key, and theme web fonts. The renderer draws all of them, and the editor canvas, the thumbnails and the inspector follow it. Part A is the model, renderer and PPTX export. Part B is the editor.
+
+**Layout.**
+- `packages/model`: `schema.ts` (the new fields, `VECTOR_PATH_D_RE`, `FONT_IMPORT_RE`, `ANIMATE_KEY_RE`, the new effects), `import-json.ts` (keys for JSON imports), `ops.ts` (a duplicated slide copies its keys).
+- `packages/render`: `render.ts` (`boxShapeHtml`, `boxRadius`, `renderVector`, `frame` with the animate key, `googleFontsHref`), `styles.ts` (`BASE_CSS` for the wipe and the box shapes), `rich-text.ts` (weight and spacing marks).
+- `packages/pptx`: `vector.ts` (vectors as SVG pictures), `text.ts` and `index.ts` (gradient and shape export).
+- `packages/llm`: `suggest-effects.ts` (entrance effects only), `context.ts`.
+- `apps/web/src/components/editor`: `ElementView.tsx` and `element-style.ts` (the canvas and thumbnail drawing), `TextEditor.tsx` and `text-style-attrs.ts` (the TipTap mark attributes), `Canvas.tsx` (the text editing style), `SidePanel.tsx` (the inspector), `Chrome.tsx` (the toolbar's effect list), `commands.ts` (`ANIMATION_LABELS`), `EditorShell.tsx` (the font link), `actions.ts` (`setThemeToken` takes `fontImports`).
+- `apps/web/src`: `lib/theme-fonts.ts` (the font link hook and the web font list parser), `components/present/PresentDeck.tsx` (the font link in the in-app present view), `styles.css` (the editor's text spacing).
+- Tests: `packages/model` (schema and ops), `packages/render/src/render.test.ts`, `packages/pptx` (deck-to-pptx), `apps/web/src/components/editor/text-style-attrs.test.ts`, `apps/web/src/components/editor/element-style.test.ts`, `apps/web/src/lib/theme-fonts.test.ts`.
+
+**What it does.**
+- Text: weight (100-900), letter spacing (em), case, and a text shadow. Text with no font uses the theme's body font, or the heading font for a title. A line height that is not set is `normal`.
+- Shapes: rect, roundRect and ellipse are CSS boxes with a gradient or solid background, a border (solid, dashed or dotted), a radius and a box shadow. Triangle, arrow, line and star stay SVG, with a drop shadow and the first gradient stop as their fill.
+- Images: corner radius (clipped) and a box shadow.
+- Vectors: a `vector` element holds a viewBox and up to 200 paths. Each path has a fill, a stroke, a stroke width, optional caps, joins and opacity. The `d` attribute must match `VECTOR_PATH_D_RE`. A path that fails the check is skipped.
+- Animation: all the reveal effects in `ANIMATION_EFFECTS` are offered in the toolbar and the side panel, with the same labels. An element can also have an order and a match key (`animateKey`).
+- Web fonts: the theme's `fontImports` (Google Fonts `css2` family values, up to six) add one stylesheet link in the present output and the editor.
+
+**Decisions.**
+- Vectors are stored as structured paths, not raw SVG. The model holds numbers, colours and a `d` string that the pattern checks. No XML sanitiser is needed, and every mode draws the same thing.
+- rect, roundRect and ellipse now render as CSS boxes. A border is drawn inside the box, not centred on its edge, so a stroke on an existing deck moves inward by half its width. This is a small visual change for existing decks.
+- A roundRect with no `radius` keeps the legacy 12% elliptical corner. Setting a radius replaces it.
+- `animateKey` drives reveal auto-animate: the renderer writes it as the fragment's `data-id`. Elements with the same key animate between slides. A duplicated slide copies each element's key (or its id, when it has no key). `withFreshIds` keeps the pairs.
+- Exit effects map to reveal fragment classes. `wipe` is a clip-path fragment (`sleid-wipe`), because reveal has no wipe class.
+- The toolbar and the side panel read the same list, `ANIMATION_EFFECTS`, so a new effect appears in both.
+- PPTX: a gradient exports as its last stop's solid colour. A vector exports as an SVG picture, which needs PowerPoint 2016 or later. Older viewers show a broken image. Text shadow and image shadow are not exported.
+- Web fonts load from `fonts.googleapis.com` in every mode. An offline bundle falls back to the font stack.
+- `suggest-effects` suggests entrance effects only. An exit effect is never suggested.
+- The editor's Theme panel accepts comma-separated families. A comma also separates an axis list (`Roboto:ital,wght@0,400`), so a piece that does not start with a family name joins the family before it. An invalid entry is not saved, and a note names it.
+- The TipTap text box keeps the textStyle attributes through `TextStyleAttrs`. The mark's weight is stored as a number, and the renderer and the editor also accept a three-digit string or `bold` or `normal`.
+- Editor changes that match the renderer: the arrow and star points, the line width (no two-pixel minimum), the paragraph, heading and list spacing, the shape text padding and centring, and the text box's vertical alignment while it is edited. A gradient's first stop is the colour shown in the Fill row.
+
+**Checks run.**
+- `pnpm typecheck`: exit 0 in every workspace.
+- `pnpm test`: exit 0. 85 files passed, 1 skipped. 954 tests passed, 6 skipped. The skipped files are the DB and integration suites, which need environment variables that this run did not set.
+- `pnpm --filter @sleid/web build`: exit 0. The build prints TanStack `"use client"` directive warnings, which were already there.
+- The new unit tests (20) cover the TipTap attribute parse and render rules, the box, image, text and vector style helpers, and the font list parser.
+- End-to-end with a real deck: a hand-built 19-slide reveal.js deck (Kompast stakeholder deck) was converted to Sleid JSON by a one-off measuring script, checked with `jsonToDeck`, rendered with `renderStandaloneDeckHtml` and compared slide by slide in Chrome against the original. Typography, radii, shadows, gradients, dashed borders and vector icons match closely. In reveal, slides 3 and 4 share 26 animate keys and morph. A four-step screenshot stack shows exactly one caption per step (fade-out and current-visible). The four wipe lines carry `sleid-wipe`. This check found that the editor stores a weight read from HTML as a string ("650"), so the renderer and the PPTX export now accept a three-digit string too.
+
+**Unverified.**
+- No browser check of the editor. The canvas, the thumbnails and the inspector have not been looked at in Chrome. The present output (renderer and reveal) was checked, see above.
+- The TipTap extension is not run inside an editor. The test checks the attribute functions, and the merge of the style entries was read in `@tiptap/core`.
+- PowerPoint and LibreOffice were not used to open the vector pictures.
+
+**Known gaps.**
+- The editor's image crop is not drawn, as before. The renderer draws crops.
+- Shape text in the editor uses the body font through the app's default, not the renderer's section font.
+- Text box shadows are not in the inspector. Only the model and renderer have them.
+- The heading style in the editor (1.3em, bold) is the editor's own, not reveal's heading sizes.

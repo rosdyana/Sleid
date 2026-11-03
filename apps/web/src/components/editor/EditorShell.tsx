@@ -11,6 +11,7 @@ import { CollabSession, deniedMessage, useDeck, usePeers, useReady, useSyncStatu
 import { Filmstrip } from './Filmstrip.tsx'
 import { SlideCanvas } from './Canvas.tsx'
 import { SidePanel } from './SidePanel.tsx'
+import { useGoogleFontsLink } from '~/lib/theme-fonts'
 import { DataGrid } from './DataGrid.tsx'
 import { BottomBar } from './BottomBar.tsx'
 import { MenuBar, buildMenus } from './MenuBar.tsx'
@@ -198,6 +199,8 @@ function EditorWorkspace({ session, meta, user, readOnly, banner }: { session: C
   const preview = assistant.preview
   const viewDeck = assistant.viewDeck(deck)
   const shownDeck = versionPreview ? versionPreview.deck : viewDeck
+  // M10. The theme's web fonts (Google Fonts) are loaded while the editor is open.
+  useGoogleFontsLink(shownDeck.theme)
   const viewSlide = versionPreview ? currentSlide(shownDeck, slideIdState) : preview ? currentSlide(viewDeck, preview.slideId) : slide
   const blocked = versionPreview ? 'You are looking at an older version. Back to current, or restore it, first.' : undefined
   const previewCard = preview ? assistant.findCard(preview.cardId) : undefined

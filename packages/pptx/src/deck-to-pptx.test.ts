@@ -200,3 +200,170 @@ describe('deckToPptx', () => {
     expect(await read('ppt/slides/slide2.xml')).toContain('sz="2000"')
   })
 })
+
+// ---------------------------------------------------------------------------
+// M10 fidelity: typography, shape styling, images and vector icons
+// ---------------------------------------------------------------------------
+
+const m10Base = { rotation: 0, locked: false, opacity: 1, z: 0 }
+
+function m10Deck(elements: Deck['slides'][number]['elements']): Deck {
+  const deck = createDeck('M10 export')
+  return {
+    ...deck,
+    slides: [{ id: 's1', layout: 'blank', notes: '', transition: 'none', autoAnimate: false, hidden: false, elements }],
+  }
+}
+
+function m10Text(style: Record<string, unknown>, content: Record<string, unknown> = {}): Deck['slides'][number]['elements'][number] {
+  return {
+    ...m10Base,
+    id: 't',
+    type: 'text',
+    x: 100,
+    y: 100,
+    w: 800,
+    h: 200,
+    style: { align: 'left', valign: 'top', fontSize: 40, ...style },
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello', ...content }] }] },
+  } as never
+}
+
+function m10Shape(overrides: Record<string, unknown>): Deck['slides'][number]['elements'][number] {
+  return {
+    ...m10Base,
+    id: 'sh',
+    type: 'shape',
+    x: 100,
+    y: 100,
+    w: 400,
+    h: 300,
+    shape: 'rect',
+    fill: '#ff0000',
+    stroke: '#000000',
+    strokeWidth: 2,
+    ...overrides,
+  } as never
+}
+
+describe('deckToPptx: M10 typography', () => {
+  it('makes the whole element bold from a weight of 600 or more, and a mark of 600 or more too', async () => {
+    const heavy = await open(await deckToPptx(m10Deck([m10Text({ fontWeight: 700 })])))
+    expect(await heavy.read('ppt/slides/slide1.xml')).toMatch(/<a:rPr[^>]*b="1"[^>]*>[\s\S]*?<a:t>hello<\/a:t>/)
+    const light = await open(await deckToPptx(m10Deck([m10Text({ fontWeight: 400 })])))
+    expect(await light.read('ppt/slides/slide1.xml')).not.toMatch(/b="1"/)
+    const mark = await open(await deckToPptx(m10Deck([m10Text({}, { marks: [{ type: 'textStyle', attrs: { fontWeight: 600 } }] })])))
+    expect(await mark.read('ppt/slides/slide1.xml')).toMatch(/<a:rPr[^>]*b="1"[^>]*>[\s\S]*?<a:t>hello<\/a:t>/)
+  })
+
+  it('converts letter spacing in em to points at the font size (charSpacing is in hundredths of a point)', async () => {
+    // 0.14em at 40 px is 5.6 px, about 2.8 pt, so spc="280".
+    const { read } = await open(await deckToPptx(m10Deck([m10Text({ letterSpacing: 0.14 })])))
+    expect(await read('ppt/slides/slide1.xml')).toContain('spc="280"')
+  })
+
+  it('applies text-transform to the run text', async () => {
+    const { read } = await open(await deckToPptx(m10Deck([m10Text({ textTransform: 'uppercase' })])))
+    const xml = await read('ppt/slides/slide1.xml')
+    expect(xml).toContain('<a:t>HELLO</a:t>')
+    expect(xml).not.toContain('<a:t>hello</a:t>')
+  })
+})
+
+describe('deckToPptx: M10 shapes and images', () => {
+  it('maps dashed and dotted strokes to DrawingML preset dashes', async () => {
+    const dashed = await open(await deckToPptx(m10Deck([m10Shape({ strokeDash: 'dashed' })])))
+    expect(await dashed.read('ppt/slides/slide1.xml')).toContain('<a:prstDash val="dash"/>')
+    const dotted = await open(await deckToPptx(m10Deck([m10Shape({ strokeDash: 'dotted' })])))
+    expect(await dotted.read('ppt/slides/slide1.xml')).toContain('<a:prstDash val="sysDot"/>')
+  })
+
+  it('writes a corner radius for roundRect as the rounded-rectangle adjust value', async () => {
+    // radius 300 px on a 400 x 300 box is clamped to half the short side (150 px), so adj = 50000.
+    const { read } = await open(await deckToPptx(m10Deck([m10Shape({ shape: 'roundRect', radius: 300 })])))
+    expect(await read('ppt/slides/slide1.xml')).toContain('<a:gd name="adj" fmla="val 50000"/>')
+  })
+
+  it('writes an outer shadow from the offset, blur and colour', async () => {
+    // offset (0, 30) px is 30 px down: 90 * 0.75 * 0.6667 pt is about 22.5 pt, and the direction is 90 degrees.
+    const { read } = await open(await deckToPptx(m10Deck([m10Shape({ shadow: { x: 0, y: 30, blur: 10, color: 'rgba(0,0,0,0.5)' } })])))
+    const xml = await read('ppt/slides/slide1.xml')
+    expect(xml).toContain('<a:outerShdw')
+    expect(xml).toContain('dir="5400000"')
+    expect(xml).toMatch(/<a:srgbClr val="000000">\s*<a:alpha val="50000"\/>/)
+  })
+
+  it('exports a gradient as a flat fill in its last colour', async () => {
+    const { read } = await open(
+      await deckToPptx(
+        m10Deck([
+          m10Shape({
+            fill: '#ff0000',
+            gradient: {
+              type: 'linear',
+              stops: [
+                { color: '#112233', at: 0 },
+                { color: '#0000ff', at: 1 },
+              ],
+            },
+          }),
+        ]),
+      ),
+    )
+    const xml = await read('ppt/slides/slide1.xml')
+    expect(xml).not.toContain('gradFill')
+    expect(xml).toContain('<a:srgbClr val="0000FF"/>')
+    expect(xml).not.toContain('val="FF0000"')
+  })
+
+  it('rounds a picture only when the radius makes it a circle or oval', async () => {
+    const circle = await open(
+      await deckToPptx(m10Deck([{ ...m10Base, id: 'i1', type: 'image', x: 0, y: 0, w: 400, h: 400, src: '/api/assets/0f3c9a52-1b2c-4d5e-8f90-a1b2c3d4e5f6', fit: 'cover', radius: 200 } as never]), {
+        resolveAsset,
+      }),
+    )
+    expect(await circle.read('ppt/slides/slide1.xml')).toContain('prst="ellipse"')
+
+    const corner = await open(
+      await deckToPptx(
+        m10Deck([{ ...m10Base, id: 'i2', type: 'image', x: 0, y: 0, w: 400, h: 400, src: '/api/assets/0f3c9a52-1b2c-4d5e-8f90-a1b2c3d4e5f6', fit: 'cover', radius: 20 } as never]),
+        { resolveAsset },
+      ),
+    )
+    expect(await corner.read('ppt/slides/slide1.xml')).not.toContain('prst="ellipse"')
+  })
+})
+
+describe('deckToPptx: M10 vector icons', () => {
+  const icon = {
+    ...m10Base,
+    id: 'v1',
+    type: 'vector',
+    x: 100,
+    y: 100,
+    w: 200,
+    h: 200,
+    viewBox: { x: 0, y: 0, w: 24, h: 24 },
+    paths: [
+      { d: 'M0 0L24 24', fill: '#112233', stroke: 'none', strokeWidth: 0 },
+      { d: 'M2 2h20v20H2z', fill: 'none', stroke: '#ff0000', strokeWidth: 2, lineCap: 'round' },
+    ],
+    preserveAspectRatio: true,
+  }
+
+  it('exports the paths as an SVG picture', async () => {
+    const { names, zip } = await open(await deckToPptx(m10Deck([icon as never])))
+    const svgNames = names.filter((n) => n.startsWith('ppt/media/') && n.endsWith('.svg'))
+    expect(svgNames.length).toBeGreaterThanOrEqual(1)
+    const svg = await zip.file(svgNames[0]!)!.async('string')
+    expect(svg).toContain('viewBox="0 0 24 24"')
+    expect(svg).toContain('<path d="M0 0L24 24" fill="#112233" stroke="none" stroke-width="0"/>')
+    expect(svg).toContain('stroke="#FF0000"')
+  })
+
+  it('skips a vector whose paths all fail the path check (nothing is written for it)', async () => {
+    const broken = { ...icon, paths: [{ d: 'M0 0" onload="x', fill: '#000000', stroke: 'none', strokeWidth: 0 }] }
+    const { names } = await open(await deckToPptx(m10Deck([broken as never])))
+    expect(names.some((n) => n.startsWith('ppt/media/') && n.endsWith('.svg'))).toBe(false)
+  })
+})

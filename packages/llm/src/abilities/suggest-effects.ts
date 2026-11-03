@@ -17,6 +17,13 @@ export const MAX_ANIMATIONS = 4
 /** Slides per model request. */
 export const SUGGEST_BATCH = 6
 const TRANSITIONS = ['none', 'fade', 'slide', 'convex'] as const
+// M10. The exit effects and 'wipe' are left out. The prompt asks for entrance effects only, and a model that
+// suggests "fade-out" on every key point would hide the content it was meant to show. Authors can still set them by hand.
+const NON_ENTRANCE_EFFECTS = new Set<string>(['fade-out', 'current-visible', 'fade-in-then-out', 'semi-fade-out', 'wipe'])
+const ENTRANCE_EFFECTS = ANIMATION_EFFECTS.filter((e) => !NON_ENTRANCE_EFFECTS.has(e)) as [
+  (typeof ANIMATION_EFFECTS)[number],
+  ...(typeof ANIMATION_EFFECTS)[number][],
+]
 
 export const SuggestEffectsInput = z.object({
   slideIds: z.array(z.string().min(1)).min(1).max(MAX_IDS),
@@ -30,7 +37,7 @@ const Output = z.object({
       transition: z.enum(TRANSITIONS),
       autoAnimate: z.boolean(),
       animations: z
-        .array(z.object({ elementId: z.string().min(1), effect: z.enum(ANIMATION_EFFECTS), order: z.number().int().min(0).max(50) }))
+        .array(z.object({ elementId: z.string().min(1), effect: z.enum(ENTRANCE_EFFECTS), order: z.number().int().min(0).max(50) }))
         .max(12),
     }),
   ),

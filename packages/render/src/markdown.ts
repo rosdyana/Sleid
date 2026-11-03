@@ -62,6 +62,9 @@ function slideToMarkdown(slide: Slide): string {
       case 'embed':
         blocks.push(`[${el.url}](${el.url})`)
         break
+      // M10. A vector icon has no markdown form, so it is skipped. Import never creates one.
+      case 'vector':
+        break
     }
   }
   const notes = slide.notes.trim()

@@ -70,4 +70,12 @@ export const BASE_CSS = `
 .sleid-code { margin: 0; width: 100%; height: 100%; overflow: hidden; box-sizing: border-box; padding: 24px; background: var(--sleid-surface); color: var(--sleid-text); font-family: var(--sleid-font-mono); font-size: var(--sleid-size-small); border-radius: var(--sleid-radius); white-space: pre; }
 .sleid-embed { width: 100%; height: 100%; border: 0; display: block; }
 .sleid-embed-blocked { display: flex; align-items: center; justify-content: center; background: var(--sleid-surface); color: var(--sleid-muted); font-size: var(--sleid-size-small); }
+/* M10. Rect, rounded rect and ellipse fill the element box. The styles come inline (gradient, border, radius, shadow). */
+.sleid-shape-box { position: absolute; inset: 0; box-sizing: border-box; }
+.sleid-vector { display: block; width: 100%; height: 100%; overflow: visible; }
+/* M10. Wipe: the element is shown and clipped to nothing, then the clip opens from left to right. Reveal's
+   .reveal .fragment:not(.custom) (opacity 0, specificity 0,3,0) and .reveal .fragment.visible are beaten by these
+   selectors (0,4,0 and 0,5,0). Reveal's !important fragment rule is print-only, and print renders no fragments. */
+.reveal .slides .fragment.sleid-wipe { opacity: 1; visibility: inherit; clip-path: inset(0 100% 0 0); transition: clip-path 0.8s ease; }
+.reveal .slides .fragment.sleid-wipe.visible { clip-path: inset(0 0 0 0); }
 `

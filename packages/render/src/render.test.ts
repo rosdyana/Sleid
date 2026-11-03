@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createDeck, type ChartElement, type Deck, type Element, type Slide, type TextElement } from '@sleid/model'
-import { chartToEchartsOption, renderChartSvg, renderDeckHtml, renderSlideHtml } from './render.ts'
+import { chartToEchartsOption, googleFontsHref, renderChartSvg, renderDeckHtml, renderSlideHtml } from './render.ts'
 import { renderStandaloneDeckHtml } from './render-node.ts'
+import { BASE_CSS } from './styles.ts'
+import { richTextToHtml } from './rich-text.ts'
 
 const base = { rotation: 0, locked: false, opacity: 1, z: 0 }
 
@@ -342,5 +344,326 @@ describe('table headers and diagram theme (M9)', () => {
     expect(html).toContain('"mainBkg":"#151c33"')
     expect(html).toContain('"textColor":"#f5f5f5"')
     expect(html).not.toContain("mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' })")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M10 fidelity: typography, shapes, gradients, shadows, vectors, animate keys, fonts
+// ---------------------------------------------------------------------------
+
+function shapeEl(overrides: Record<string, unknown>): Element {
+  return {
+    ...base,
+    id: 'shape-1',
+    type: 'shape',
+    x: 0,
+    y: 0,
+    w: 400,
+    h: 200,
+    shape: 'rect',
+    fill: '#ff0000',
+    stroke: '#000000',
+    strokeWidth: 0,
+    ...overrides,
+  } as Element
+}
+
+function imageEl(overrides: Record<string, unknown> = {}): Element {
+  return {
+    ...base,
+    id: 'img-1',
+    type: 'image',
+    x: 0,
+    y: 0,
+    w: 400,
+    h: 300,
+    src: 'https://example.com/a.png',
+    fit: 'cover',
+    ...overrides,
+  } as Element
+}
+
+function vectorEl(paths: Record<string, unknown>[], overrides: Record<string, unknown> = {}): Element {
+  return {
+    ...base,
+    id: 'vec-1',
+    type: 'vector',
+    x: 0,
+    y: 0,
+    w: 200,
+    h: 200,
+    viewBox: { x: 0, y: 0, w: 24, h: 24 },
+    paths: paths.map((p) => ({ d: 'M0 0L24 24', fill: '#112233', stroke: 'none', strokeWidth: 0, ...p })),
+    preserveAspectRatio: true,
+    ...overrides,
+  } as Element
+}
+
+function htmlOf(el: Element): string {
+  return renderSlideHtml(slideWith([el]), deckWith([]))
+}
+
+describe('M10 typography', () => {
+  it('emits weight, letter spacing, text transform and text shadow on the text box', () => {
+    const el = textEl('t1', { type: 'doc', content: [] } as TextElement['content'], {
+      style: {
+        align: 'left',
+        valign: 'top',
+        fontWeight: 700,
+        letterSpacing: 0.14,
+        textTransform: 'uppercase',
+      },
+      shadow: { x: 2, y: 4, blur: 8, color: 'rgba(0,0,0,0.4)' },
+    })
+    const html = htmlOf(el)
+    expect(html).toContain('font-weight:700')
+    expect(html).toContain('letter-spacing:0.14em')
+    expect(html).toContain('text-transform:uppercase')
+    expect(html).toContain('text-shadow:2px 4px 8px rgba(0,0,0,0.4)')
+  })
+
+  it('drops an out-of-range weight and a bad shadow colour', () => {
+    const el = textEl('t2', { type: 'doc', content: [] } as TextElement['content'], {
+      style: { align: 'left', valign: 'top', fontWeight: 1200 },
+      shadow: { x: 0, y: 0, blur: 0, color: 'red;}body{' },
+    })
+    const html = htmlOf(el)
+    expect(html).not.toContain('font-weight:1200')
+    expect(html).toContain('text-shadow:0px 0px 0px transparent')
+    expect(html).not.toContain('red;}')
+  })
+
+  it('applies mark weight and letter spacing, and rejects unsafe values', () => {
+    const doc = {
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'a', marks: [{ type: 'textStyle', attrs: { fontWeight: 600, letterSpacing: '0.14em' } }] },
+            { type: 'text', text: 'b', marks: [{ type: 'textStyle', attrs: { fontWeight: 'bold', letterSpacing: '-0.02em' } }] },
+            { type: 'text', text: 'c', marks: [{ type: 'textStyle', attrs: { fontWeight: 'x; color:red', letterSpacing: '50%' } }] },
+            { type: 'text', text: 'd', marks: [{ type: 'textStyle', attrs: { letterSpacing: '2rem' } }] },
+            { type: 'text', text: 'e', marks: [{ type: 'textStyle', attrs: { fontWeight: '650' } }] },
+            { type: 'text', text: 'f', marks: [{ type: 'textStyle', attrs: { fontWeight: '1200' } }] },
+          ],
+        },
+      ],
+    }
+    const html = richTextToHtml(doc as never)
+    expect(html).toContain('font-weight:600')
+    // The editor stores weights read from HTML as strings.
+    expect(html).toContain('font-weight:650')
+    expect(html).not.toContain('font-weight:1200')
+    expect(html).toContain('letter-spacing:0.14em')
+    expect(html).toContain('font-weight:bold')
+    expect(html).toContain('letter-spacing:-0.02em')
+    expect(html).not.toContain('color:red')
+    expect(html).not.toContain('50%')
+    expect(html).not.toContain('2rem')
+  })
+})
+
+describe('M10 shapes', () => {
+  it('draws rect, roundRect and ellipse as styled boxes with the legacy corner when radius is absent', () => {
+    const rect = htmlOf(shapeEl({ shape: 'rect', fill: '#ff0000', radius: 6 }))
+    expect(rect).toContain('sleid-shape-box')
+    expect(rect).toContain('background-color:#ff0000')
+    expect(rect).toContain('border-radius:6px')
+
+    expect(htmlOf(shapeEl({ shape: 'roundRect' }))).toContain('border-radius:12%')
+    expect(htmlOf(shapeEl({ shape: 'roundRect', radius: 24 }))).toContain('border-radius:24px')
+    expect(htmlOf(shapeEl({ shape: 'ellipse' }))).toContain('border-radius:50%')
+  })
+
+  it('draws a dashed border, a dotted border and a box shadow', () => {
+    const dashed = htmlOf(shapeEl({ shape: 'roundRect', strokeWidth: 3, stroke: '#00ff00', strokeDash: 'dashed' }))
+    expect(dashed).toContain('border:3px dashed #00ff00')
+    expect(htmlOf(shapeEl({ shape: 'rect', strokeWidth: 2, stroke: '#000000', strokeDash: 'dotted' }))).toContain('border:2px dotted #000000')
+    const shadowed = htmlOf(shapeEl({ shape: 'rect', shadow: { x: 0, y: 10, blur: 20, spread: 2, color: 'rgba(0,0,0,0.3)' } }))
+    expect(shadowed).toContain('box-shadow:0px 10px 20px 2px rgba(0,0,0,0.3)')
+  })
+
+  it('builds a linear gradient from the stops, with the angle, and a radial one', () => {
+    const linear = htmlOf(
+      shapeEl({
+        shape: 'rect',
+        gradient: {
+          type: 'linear',
+          angle: 90,
+          stops: [
+            { color: '#111111', at: 0 },
+            { color: '#eeeeee', at: 0.5 },
+          ],
+        },
+      }),
+    )
+    expect(linear).toContain('background:linear-gradient(90deg, #111111 0%, #eeeeee 50%)')
+
+    const radial = htmlOf(
+      shapeEl({
+        shape: 'ellipse',
+        gradient: {
+          type: 'radial',
+          stops: [
+            { color: '#ffffff', at: 0 },
+            { color: '#000000', at: 1 },
+          ],
+        },
+      }),
+    )
+    expect(radial).toContain('radial-gradient(circle, #ffffff 0%, #000000 100%)')
+  })
+
+  it('drops a bad colour stop, and falls back to the flat fill when fewer than two stops remain', () => {
+    const mixed = htmlOf(
+      shapeEl({
+        shape: 'rect',
+        gradient: {
+          type: 'linear',
+          stops: [
+            { color: 'red" onload="x', at: 0 },
+            { color: '#0000ff', at: 0.2 },
+            { color: '#00ff00', at: 1 },
+          ],
+        },
+      }),
+    )
+    expect(mixed).toContain('linear-gradient(180deg, #0000ff 20%, #00ff00 100%)')
+    expect(mixed).not.toContain('onload')
+
+    const oneLeft = htmlOf(
+      shapeEl({
+        shape: 'rect',
+        fill: '#abcdef',
+        gradient: {
+          type: 'linear',
+          stops: [
+            { color: 'javascript:alert(1)', at: 0 },
+            { color: '#0000ff', at: 1 },
+          ],
+        },
+      }),
+    )
+    expect(oneLeft).toContain('background-color:#abcdef')
+    expect(oneLeft).not.toContain('linear-gradient')
+  })
+
+  it('keeps dash, gradient and shadow on the SVG shapes', () => {
+    const tri = htmlOf(shapeEl({ shape: 'triangle', strokeWidth: 2, stroke: '#000000', strokeDash: 'dashed' }))
+    expect(tri).toContain('stroke-dasharray="6 4"')
+    const dot = htmlOf(shapeEl({ shape: 'star', strokeWidth: 2, stroke: '#000000', strokeDash: 'dotted' }))
+    expect(dot).toContain('stroke-dasharray="0 4"')
+    expect(dot).toContain('stroke-linecap="round"')
+    const grad = htmlOf(
+      shapeEl({
+        shape: 'arrow',
+        fill: '#999999',
+        gradient: {
+          type: 'linear',
+          stops: [
+            { color: '#123456', at: 0 },
+            { color: '#654321', at: 1 },
+          ],
+        },
+      }),
+    )
+    expect(grad).toContain('fill="#123456"')
+    const shadowed = htmlOf(shapeEl({ shape: 'triangle', shadow: { x: 3, y: 4, blur: 5, color: '#000000' } }))
+    expect(shadowed).toContain('filter:drop-shadow(3px 4px 5px #000000)')
+  })
+})
+
+describe('M10 images', () => {
+  it('rounds the wrapper and adds a shadow', () => {
+    const html = htmlOf(imageEl({ radius: 32, shadow: { x: 0, y: 6, blur: 12, color: '#000000' } }))
+    expect(html).toContain('border-radius:32px')
+    expect(html).toContain('overflow:hidden')
+    expect(html).toContain('box-shadow:0px 6px 12px 0px #000000')
+  })
+})
+
+describe('M10 vector icons', () => {
+  it('renders one path per entry with the viewBox and aspect mode', () => {
+    const html = htmlOf(
+      vectorEl(
+        [
+          { d: 'M0 0L24 24', fill: '#112233', lineCap: 'round', lineJoin: 'bevel', opacity: 0.5 },
+          { d: 'M2 2h20v20H2z', fill: 'none', stroke: '#ff0000', strokeWidth: 2 },
+        ],
+        { preserveAspectRatio: false },
+      ),
+    )
+    expect(html).toContain('<svg class="sleid-vector" viewBox="0 0 24 24" preserveAspectRatio="none"')
+    expect(html).toContain('<path d="M0 0L24 24" fill="#112233" stroke="transparent"')
+    expect(html).toContain('stroke-linecap="round"')
+    expect(html).toContain('stroke-linejoin="bevel"')
+    expect(html).toContain('opacity="0.5"')
+    expect(html).toContain('d="M2 2h20v20H2z" fill="transparent" stroke="#ff0000" stroke-width="2"')
+  })
+
+  it('keeps xMidYMid meet when the aspect is preserved', () => {
+    expect(htmlOf(vectorEl([{}]))).toContain('preserveAspectRatio="xMidYMid meet"')
+  })
+
+  it('drops a path whose d fails the check, and sanitises paints', () => {
+    const html = htmlOf(
+      vectorEl([
+        { d: 'M0 0" onload="alert(1)' },
+        { d: 'M1 1L2 2', fill: 'red" onmouseover="x', stroke: '#00ff00' },
+      ]),
+    )
+    expect(html).not.toContain('onload')
+    expect(html).not.toContain('onmouseover')
+    expect(html).toContain('d="M1 1L2 2"')
+    expect(html.match(/<path /g)?.length).toBe(1)
+  })
+})
+
+describe('M10 animations and auto-animate keys', () => {
+  it('uses animateKey as data-id and keeps the real id in data-el', () => {
+    const html = htmlOf(imageEl({ id: 'real-1', animateKey: 'hero' }))
+    expect(html).toContain('data-id="hero"')
+    expect(html).toContain('data-el="real-1"')
+    expect(htmlOf(imageEl({ id: 'real-2' }))).toContain('data-id="real-2"')
+  })
+
+  it('maps the exit effects to reveal classes and wipe to sleid-wipe', () => {
+    for (const effect of ['fade-out', 'current-visible', 'fade-in-then-out', 'semi-fade-out'] as const) {
+      const html = htmlOf(imageEl({ animation: { effect, order: 0 } }))
+      expect(html).toContain(`fragment ${effect}`)
+    }
+    expect(htmlOf(imageEl({ animation: { effect: 'wipe', order: 0 } }))).toContain('fragment sleid-wipe')
+  })
+
+  it('styles the wipe fragment so it wins over reveal', () => {
+    const css = BASE_CSS
+    expect(css).toContain('.reveal .slides .fragment.sleid-wipe { opacity: 1; visibility: inherit; clip-path: inset(0 100% 0 0);')
+    expect(css).toContain('.reveal .slides .fragment.sleid-wipe.visible { clip-path: inset(0 0 0 0); }')
+  })
+})
+
+describe('M10 web fonts', () => {
+  it('builds one css2 URL from fontImports, with spaces as + and the axis list kept', () => {
+    const deck = deckWith([])
+    const themed = { ...deck, theme: { ...deck.theme, fontImports: ['Inter:wght@400;600;700', 'Playfair Display'] } }
+    const href = googleFontsHref(themed.theme)
+    expect(href).toBe('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Playfair+Display&display=swap')
+    expect(googleFontsHref(deck.theme)).toBeUndefined()
+  })
+
+  it('emits the stylesheet link in every mode, and drops a bad import', () => {
+    const deck = deckWith([slideWith([textEl('t', { type: 'doc', content: [] } as TextElement['content'])])])
+    const withFonts = {
+      ...deck,
+      theme: { ...deck.theme, fontImports: ['Inter:wght@400', 'Bad"><script>alert(1)</script>'] },
+    }
+    for (const mode of ['present', 'print'] as const) {
+      const html = renderDeckHtml(withFonts as Deck, { mode })
+      expect(html).toContain('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400&amp;display=swap">')
+      expect(html).not.toContain('<script>alert')
+    }
+    const plain = renderDeckHtml(deck, { mode: 'present' })
+    expect(plain).not.toContain('fonts.googleapis.com')
   })
 })

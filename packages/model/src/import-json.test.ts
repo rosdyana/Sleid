@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { fullDeck } from './fixtures.ts'
 import { DeckImportError, jsonToDeck } from './import-json.ts'
-import { DeckSchema } from './schema.ts'
+import { DeckSchema, type Deck } from './schema.ts'
 
 describe('jsonToDeck', () => {
   it('imports a native export with fresh ids everywhere, and keeps the content', () => {
@@ -55,5 +55,43 @@ describe('jsonToDeck', () => {
     const deck = fullDeck()
     const broken = { ...deck, slides: [{ ...deck.slides[0]!, elements: [{ type: 'text', id: 'x' }] }, ...deck.slides.slice(1)] }
     expect(() => jsonToDeck(JSON.stringify(broken))).toThrow(DeckImportError)
+  })
+})
+
+describe('jsonToDeck: animateKey (M10)', () => {
+  // A deck where a duplicated pair has been made: the copy keys off the source's old id.
+  function pairDeck(): Deck {
+    const deck = fullDeck()
+    const el = (id: string, animateKey?: string) => ({
+      ...deck.slides[0]!.elements[0]!,
+      id,
+      animateKey,
+    })
+    const elements = [el('old-a'), el('old-b', 'old-a')]
+    return { ...deck, slides: [{ ...deck.slides[0]!, elements }, ...deck.slides.slice(1)] } as Deck
+  }
+
+  it('keeps animateKey values and gives the referenced source the old id as its key', () => {
+    const out = jsonToDeck(JSON.stringify(pairDeck()))
+    const [source, copy] = out.slides[0]!.elements
+    expect(copy!.animateKey).toBe('old-a')
+    expect(source!.animateKey).toBe('old-a')
+    expect(source!.id).not.toBe('old-a')
+    expect(copy!.id).not.toBe('old-b')
+  })
+
+  it('leaves elements with no key alone when nothing refers to them', () => {
+    const out = jsonToDeck(JSON.stringify(fullDeck()))
+    for (const slide of out.slides) for (const el of slide.elements) expect(el.animateKey).toBeUndefined()
+  })
+
+  it('does not change a source that already has its own key', () => {
+    const deck = pairDeck()
+    const els = deck.slides[0]!.elements
+    els[0] = { ...els[0]!, animateKey: 'own-key' }
+    const out = jsonToDeck(JSON.stringify(deck))
+    const [source, copy] = out.slides[0]!.elements
+    expect(source!.animateKey).toBe('own-key')
+    expect(copy!.animateKey).toBe('old-a')
   })
 })
