@@ -78,6 +78,7 @@ function Dashboard() {
               </button>
             ))}
           </div>
+          <Link to="/wizard/new" className="rounded border border-accent px-4 py-2 font-medium text-accent hover:bg-hover">✨ New from prompt</Link>
           <button
             type="button"
             onClick={newBlankDeck}

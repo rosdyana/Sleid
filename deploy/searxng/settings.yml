@@ -1,0 +1,12 @@
+# SearXNG settings for the wizard's research step (see compose.yml, profile "research").
+# The defaults stay on. JSON output is what Sleid reads, so it is enabled here. Set SEARXNG_SECRET in the environment.
+use_default_settings: true
+server:
+  # Only Sleid calls this instance, on localhost. The bot limiter would block it.
+  limiter: false
+  secret_key: "replace-with-SEARXNG_SECRET"
+  bind_address: "0.0.0.0"
+search:
+  formats:
+    - html
+    - json

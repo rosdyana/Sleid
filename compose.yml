@@ -19,6 +19,20 @@ services:
       timeout: 3s
       retries: 20
 
+  # Optional web search for the wizard's research step. Start with: docker compose --profile research up -d searxng
+  # Then set SEARXNG_URL=http://127.0.0.1:8888 in .env. Bound to localhost only.
+  searxng:
+    image: searxng/searxng:latest
+    profiles: [research]
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-local-only}
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - 127.0.0.1:8888:8080
+
   # M2 note: the collab service (apps/collab, Hocuspocus, WebSocket port 3001) has no container image yet.
   # It runs with `pnpm dev` next to web. A Dockerfile needs COLLAB_HOST=0.0.0.0 and the two secrets.
   # TODO(M3): worker service (pg-boss jobs: export, import, wizard).

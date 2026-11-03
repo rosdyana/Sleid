@@ -93,7 +93,7 @@ export async function setDefaultLlmProvider(db: Db, row: Pick<LlmProviderRow, 'i
 
 export async function recordLlmUsage(
   db: Db,
-  row: { userId: string; deckId: string; providerId: string | null; ability: string; inputTokens: number; outputTokens: number; latencyMs: number; ok: boolean },
+  row: { userId: string; deckId: string | null; providerId: string | null; ability: string; inputTokens: number; outputTokens: number; latencyMs: number; ok: boolean },
 ): Promise<void> {
   await db.insert(llmUsage).values(row)
 }

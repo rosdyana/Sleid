@@ -1,7 +1,8 @@
 // Settings › AI: the model providers the assistant can use. Keys are write-only: the page shows
 // "••••• set" and never gets the key back. A test sends one tiny request and reports the outcome.
 import { Link, createFileRoute } from '@tanstack/react-router'
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { researchStatusFn } from '~/lib/wizard.functions'
 import { listAiProvidersFn, saveAiProviderFn, deleteAiProviderFn, setDefaultAiProviderFn, testAiProviderFn } from '~/lib/llm-settings.functions'
 import type { ProviderView } from '~/lib/llm-settings.server'
 
@@ -195,6 +196,7 @@ function AiSettings() {
       </header>
 
       <main className="mx-auto max-w-4xl space-y-6 px-6 py-8">
+        <ResearchStatus />
         <section className="space-y-2 text-[14px] text-ink-muted">
           <p>
             The assistant sends deck content to the provider you pick, for each request. Choose a provider you trust with that content. A deployment
@@ -466,5 +468,20 @@ function ProviderRow({
         )}
       </div>
     </li>
+  )
+}
+
+/** Research (web search) is set by the server's environment, so this line is read-only. */
+function ResearchStatus() {
+  const [line, setLine] = useState('Research: checking…')
+  useEffect(() => {
+    void researchStatusFn().then(setLine).catch(() => setLine('Research: unavailable'))
+  }, [])
+  return (
+    <section className="rounded border border-rule bg-white p-3 text-[14px]">
+      <h2 className="text-base font-medium">Research (web search)</h2>
+      <p className="mt-1 text-ink-muted">{line}</p>
+      <p className="mt-1 text-ink-muted">Set SEARXNG_URL, BRAVE_API_KEY or TAVILY_API_KEY on the server. See the README.</p>
+    </section>
   )
 }

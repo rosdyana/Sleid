@@ -225,6 +225,26 @@ Usage counts are kept per request. A user can make `AI_RATE_LIMIT_MAX` requests 
 
 Status of the live runs: the adapters are tested against fake HTTP servers. A live run against Foundry or a local server has **not** been done for this milestone. See DESIGN.md (M4, unverified).
 
+## Prompt-to-deck wizard and research (M6)
+
+From the dashboard, **✨ New from prompt** (or File ▸ From prompt…) makes a whole deck: brief, optional references (files and web addresses), optional research, an outline you can edit, then slides written into the editor as they are made. The wizard uses your AI provider (see AI assistant above). It needs the collab service (`pnpm dev` runs it) and the worker (`pnpm dev` runs it too, when `COLLAB_INTERNAL_SECRET` is set).
+
+**References.** Up to 10 files (PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, PNG, JPG; 20 MB each, 50 MB in all) and 10 web addresses. Text is extracted on the worker. Images are listed by name only (no OCR).
+
+**Research (optional).** "Let AI research this topic" needs a search provider. Set one of these in `.env`; the first one set is used:
+
+| Provider | Variable | Notes |
+|---|---|---|
+| SearXNG (self-hosted, recommended) | `SEARXNG_URL=http://127.0.0.1:8888` | Its host is the one private address research may reach. Start it with `docker compose --profile research up -d searxng`. The compose service uses `deploy/searxng/settings.yml`, which turns on JSON output. Set `SEARXNG_SECRET` first for anything but local use. |
+| Brave Search API | `BRAVE_API_KEY` | Hosted. The key is sent only to `api.search.brave.com`. |
+| Tavily | `TAVILY_API_KEY` | Hosted. The key is sent only to `api.tavily.com`. |
+
+The AI settings page (Settings › AI) shows which provider is active, never the key. With none set, the research box is disabled and says why.
+
+**Safety.** User-supplied web addresses always go through the SSRF-safe fetch: loopback, private, link-local and metadata addresses are refused on every redirect hop, with a 5 MB cap, a 15 s timeout, and only HTML, PDF, text and CSV read. Reference text is untrusted: it is wrapped as data for the model, and the model's answer can only become an `addSlide` operation. Robots.txt is not checked (see docs/DESIGN.md).
+
+**MCP.** `create_deck_from_prompt` (scopes `decks:create` and `ai`) and `get_wizard_status` (scope `decks:read`).
+
 ## MCP (AI agents)
 
 Sleid runs an MCP server at `/mcp` (Streamable HTTP). An agent can create decks, add slides, insert charts and diagrams, look at a slide as a PNG, export the deck and share it, using the same deck operations as the editor. Open editors see every change live.

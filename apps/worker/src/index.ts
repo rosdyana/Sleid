@@ -6,6 +6,9 @@ import { loadWorkerConfig } from './config.ts'
 import { createBrowserPool } from './browser.ts'
 import { consoleLogger } from './logger.ts'
 import { startExportService } from './service.ts'
+import { startWizardService } from './wizard/service.ts'
+import { createWizardCollab } from './wizard/collab.ts'
+import { createSearchProvider, researchFromEnv } from '@sleid/research'
 
 const config = loadWorkerConfig()
 const db = createDb(config.databaseUrl, { max: 6 })
@@ -27,11 +30,34 @@ const service = await startExportService({
 })
 consoleLogger.info(`[worker] listening for export jobs (concurrency ${config.concurrency})`)
 
+// Wizard jobs need the collab service (slides land in the live deck). Without its secret they cannot run.
+const researchConfig = (() => {
+  try {
+    return researchFromEnv(process.env)
+  } catch (err) {
+    consoleLogger.warn(`[worker] research is off: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+})()
+const wizardService = config.live
+  ? await startWizardService({
+      db,
+      queue,
+      uploads: assetStorageFromEnv(),
+      collab: createWizardCollab({ baseUrl: config.live.baseUrl, secret: config.live.secret }),
+      search: researchConfig ? createSearchProvider(researchConfig) : null,
+      env: process.env,
+      logger: consoleLogger,
+    })
+  : null
+if (!config.live) consoleLogger.warn('COLLAB_INTERNAL_SECRET is not set: the wizard cannot generate decks (it needs the collab service)')
+
 let stopping = false
 async function shutdown() {
   if (stopping) return
   stopping = true
   await service.stop()
+  await wizardService?.stop()
   await db.$client.end({ timeout: 2 })
   process.exit(0)
 }

@@ -35,6 +35,8 @@ import { runAbilityForDeck } from '~/lib/ai.server'
 import { ToolError } from './errors.ts'
 import { buildSlide, builtInTheme, builtInThemeNames, findElement, outlineOf, pngSize, resolveSlide, textPatchFor } from './compile.ts'
 import type { McpDeps } from './deps.ts'
+import { createDeckFromPrompt, getRun as getWizardRunView, type WizardDeps } from '~/lib/wizard.server'
+import { resolveProvider } from '~/lib/llm-settings.server'
 
 const NOT_FOUND = 'Deck not found.'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -248,6 +250,17 @@ const slideRef = {
 /** Builds the MCP server for one request and one verified token. */
 export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): McpServer {
   const server = new McpServer({ name: 'sleid', version: '0.5.0' }, { instructions: INSTRUCTIONS })
+  /** The wizard's dependencies for this token's user, built from the same services as the rest of the server. */
+  const wizardDepsFor = async (): Promise<WizardDeps> => {
+    const queue = await deps.getQueue()
+    return {
+      db: deps.db,
+      uploads: deps.assetStorage,
+      queue: { enqueueWizard: (kind, payload) => queue.enqueueWizard(kind, payload) },
+      env: deps.env,
+      resolveProvider: (userId, providerId) => resolveProvider({ db: deps.db, env: deps.env }, { id: userId, email: principal.userEmail }, providerId),
+    }
+  }
   const tool = <S extends z.ZodRawShape>(
     name: string,
     spec: { description: string; shape: S; scope?: TokenScope; readOnly?: boolean },
@@ -689,6 +702,66 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
         ops: proposal.ops,
         applied: false,
         next: 'Nothing was changed. Review the ops, then call apply_ops with them to apply.',
+      })
+    },
+  )
+
+  tool(
+    'create_deck_from_prompt',
+    {
+      scope: 'decks:create',
+      description:
+        'Make a whole deck from a prompt, the same wizard as the New from prompt button. It needs the decks:create and ai scopes. It drafts an outline and starts generation; slides appear in the editor as they are written. urls are added as references (up to 10). research: true lets the assistant search the web (only when the server has a search provider). It waits up to about a minute for references, then returns deckId and runId; use get_wizard_status to follow the run.',
+      shape: {
+        prompt: z.string().min(1).max(4000),
+        slideCount: z.number().int().min(3).max(30).optional(),
+        audience: z.string().max(200).optional(),
+        language: z.string().min(2).max(35).optional(),
+        urls: z.array(z.string().min(1).max(2000)).max(10).optional(),
+        research: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      if (!tokenHasScope(principal, 'ai')) throw new ToolError('This token does not have the ai scope, so create_deck_from_prompt is not allowed.')
+      const result = await createDeckFromPrompt(await wizardDepsFor(), { id: principal.userId }, {
+        brief: {
+          prompt: args.prompt,
+          ...(args.slideCount !== undefined ? { slideCount: args.slideCount } : {}),
+          ...(args.audience !== undefined ? { audience: args.audience } : {}),
+          ...(args.language !== undefined ? { language: args.language } : {}),
+        },
+        ...(args.urls?.length ? { urls: args.urls } : {}),
+        research: args.research ?? false,
+      })
+      return asText({
+        deckId: result.deckId,
+        runId: result.runId,
+        status: result.status,
+        url: result.deckId ? `${deps.publicUrl}/d/${result.deckId}` : `${deps.publicUrl}/wizard/${result.runId}`,
+        next: result.deckId ? 'Slides are being written into the deck now. Call get_wizard_status with runId to follow progress.' : 'The references are still being read. Call get_wizard_status with runId, then draft the outline in the web app.',
+      })
+    },
+  )
+
+  tool(
+    'get_wizard_status',
+    {
+      scope: 'decks:read',
+      description: 'The status of a prompt-to-deck run: draft, ingesting, outlining, ready, generating, done, failed or cancelled, with progress, the references and any error.',
+      shape: { runId: z.uuid() },
+    },
+    async (args) => {
+      const run = await getWizardRunView(await wizardDepsFor(), { id: principal.userId }, args.runId).catch((err: unknown) => {
+        throw new ToolError(err instanceof Error ? err.message : 'That run was not found.')
+      })
+      return asText({
+        runId: run.id,
+        status: run.status,
+        progress: run.progress,
+        total: run.total,
+        deckId: run.deckId,
+        error: run.error,
+        sources: run.sources.map((s) => ({ title: s.title, url: s.url, status: s.status, words: s.wordCount })),
       })
     },
   )

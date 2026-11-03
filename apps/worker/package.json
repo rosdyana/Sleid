@@ -13,10 +13,13 @@
   },
   "dependencies": {
     "@sleid/db": "workspace:^",
+    "@sleid/ingest": "workspace:^",
     "@sleid/jobs": "workspace:^",
+    "@sleid/llm": "workspace:^",
     "@sleid/model": "workspace:^",
     "@sleid/pptx": "workspace:^",
     "@sleid/render": "workspace:^",
+    "@sleid/research": "workspace:^",
     "@sleid/storage": "workspace:^",
     "jszip": "^3.10.2",
     "mermaid": "^12.2.0",

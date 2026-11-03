@@ -1,5 +1,6 @@
 import { ClientOnly, createFileRoute, notFound, useRouteContext } from '@tanstack/react-router'
 import { EditorShell } from '~/components/editor/EditorShell'
+import { WizardBanner } from '~/components/editor/WizardBanner'
 import { getDeckFn } from '~/lib/decks.functions'
 import { redeemShareLinkFn } from '~/lib/sharing.functions'
 
@@ -26,7 +27,10 @@ function DeckPage() {
   const { session } = useRouteContext({ from: '/_authed' })
   return (
     <ClientOnly fallback={<div className="grid h-screen place-items-center text-ink-muted">Opening deck…</div>}>
-      <EditorShell key={deck.id} deck={deck} user={session} />
+      <>
+        <WizardBanner deckId={deck.id} />
+        <EditorShell key={deck.id} deck={deck} user={session} />
+      </>
     </ClientOnly>
   )
 }

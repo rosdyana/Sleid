@@ -41,9 +41,8 @@ export const llmUsage = pgTable(
     userId: text('user_id')
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
-    deckId: uuid('deck_id')
-      .notNull()
-      .references(() => decks.id, { onDelete: 'cascade' }),
+    /** Null for calls made before a deck exists (wizard research and outline). */
+    deckId: uuid('deck_id').references(() => decks.id, { onDelete: 'cascade' }),
     providerId: uuid('provider_id').references(() => llmProviders.id, { onDelete: 'set null' }),
     ability: text('ability').notNull(),
     inputTokens: integer('input_tokens').notNull().default(0),

@@ -13,7 +13,7 @@ Living document. Update it as decisions change.
 | 3. Export worker: PDF, PNG, PPTX, HTML, MD, JSON, asset storage, publish to web | **Done** (checks run, see M3 below; open gaps listed there) |
 | 4. LLM providers + assistant panel + fx-bar "Ask AI" | **Done** (checks run, see M4 below; open gaps and unverified items listed there) |
 | 5. MCP server + access tokens | **Done** (checks run, see M5 below; open gaps and unverified items listed there) |
-| 6. Wizard + reference ingestion + research | Pending |
+| 6. Wizard + reference ingestion + research | **Partly done** (backend, worker, live model path and unit/integration checks done; browser e2e, live PNG review and the re-run of the browser suites are **not done**, see M6 below) |
 | 7. Comments, version history, presenter + phone remote | Pending |
 | 8. Import: PPTX, Google Slides, Markdown | Pending |
 | 9. Templates and brand kits | Pending |
@@ -876,3 +876,96 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
 - **Generate with AI through MCP** was not run against a live model (the live LLM was not called in M5; the test checks only the scope and the viewer refusal). The M4 live model check was not repeated.
 - **Firefox and Safari.** Chrome only.
 - **Production serving** (`node .output/server/index.mjs`) of `/mcp`. The build passes; the server was not run.
+
+### What M6 built, and decisions taken while building it
+
+Scope: the prompt-to-deck wizard end to end (brief, references, research, outline, live generation), the two new packages `packages/ingest` and `packages/research`, wizard tables and jobs, editor banner, MCP tools.
+
+**Layout.**
+- `packages/ingest` (`@sleid/ingest`): `extract.ts` (PDF via unpdf, DOCX via mammoth, PPTX via JSZip slide and notes XML, XLSX and CSV via SheetJS, TXT and MD, PNG and JPG as image references only), `sanitize.ts` (Readability on a happy-dom DOM with scripts, styles, frames and `head` removed), `chunk.ts`, `bm25.ts` (BM25 in TypeScript), `url.ts` (the URL fetch), `source.ts` (`IngestedSource`, caps, chunk and table helpers), `limits.ts`.
+- `packages/research` (`@sleid/research`): `config.ts` (env, and the read-only status line), `providers.ts` (SearXNG, Brave, Tavily), `dedupe.ts`.
+- `packages/llm`: `config.ts` (env policy helpers moved from the web app, which re-exports them), `wizard-schema.ts` (brief, outline, pure outline edits; also the `@sleid/llm/wizard-schema` subpath for the client), `wizard-slide-schema.ts`, `wizard-abilities.ts` (research queries, outline, one slide).
+- `packages/db`: `schema/wizard.ts` (`wizard_runs`, `wizard_sources`), `wizard.ts` (queries). `llm_usage.deck_id` is now nullable (research and outline run before a deck exists). Migrations `0006_wise_owl.sql` (tables) and `0007_past_moon_knight.sql` (nullable `deck_id`, `wizard_sources.bytes`).
+- `packages/jobs`: three wizard queues (`wizard-research`, `wizard-ingest`, `wizard-generate`), with a test-only name prefix.
+- `apps/worker`: `wizard/jobs.ts` (ingest, research, generate), `wizard/provider.ts` (the run's provider: the same resolution order as the assistant, and the same pinned fetch), `wizard/collab.ts` (the collab internal client), `wizard/service.ts` (the queue wiring).
+- `apps/web`: `lib/wizard.server.ts` (service), `lib/wizard.functions.ts` (server functions), `lib/wizard.deps.server.ts`, `routes/api/wizard/$runId/files.ts` (raw-body upload), `routes/_authed/wizard/new.tsx` (brief), `routes/_authed/wizard/$runId.tsx` (references, research, outline, generate), `components/editor/WizardBanner.tsx` (progress, cancel, Sources), the dashboard button, File ▸ From prompt…, the research line on Settings › AI, and two MCP tools.
+- `deploy/searxng/settings.yml` and a `searxng` service in `compose.yml` behind the `research` profile, bound to 127.0.0.1:8888.
+
+**Flow and state.**
+- `draft` (references can be added or removed) → `ingesting` (research runs) → `draft` (references ready) → `outlining` (the outline is drafted in the web request, synchronously, as the other abilities are) → `ready` (the outline can be edited) → `generating` (a deck exists; the worker writes one slide at a time through the collab internal API as `server:wizard`) → `done`, `cancelled` or `failed`.
+- The deck is created when generation starts (`startGeneration`), owned by the caller. The collab service creates its first document, and the worker deletes the default title slide in the same batch as the first new slide, so the editor never shows an empty deck for long.
+- Cancel is checked before each slide. The slide in progress finishes, so the deck keeps what was written.
+- A slide the model cannot write (invalid JSON after the retry, or an op batch the collab service refuses) becomes a placeholder with the outline's points and a note. The run goes on, and the warning is kept in `wizard_runs.error`.
+- Ingest and research are separate jobs, so a slow page does not hold the run. A page that fails (for example, refused by the policy) fails only its own source.
+
+**Decisions.**
+- **Charts take their numbers from the reference table, never from the model.** The model names a source, a table index, a category column and value columns. Code copies the rows. A name that does not match gives no chart and a warning. Only a chart with no table behind it may use model-written numbers (`chartIllustrative`). That chart's title gets "(illustrative)", its notes say so, and the warning names it.
+- **Citations are checked.** Notes may cite only reference numbers that exist. A slide that uses references but cites none gets a "Sources: [n]" line. The Sources slide lists every ready reference in the same numbering.
+- **Only `addSlide` is proposed.** The model's answer becomes one `addSlide` op with the slide's elements. Extra keys in the answer are stripped by the schema, so an injected `ops` array has no effect. The allowlist is the same `checkOps` as the assistant. The setup slide and the default slide are removed by the worker's own ops, not by model output.
+- **A visual never goes into a shared column.** A chart or diagram takes the right column with the body on the left. Layouts that cannot hold that (`two-column`, `section`, `title`, `quote`) are switched to `title-content`. A `blank` slide with text gets a title box. Both came from the live run (see below).
+- **Outline references are symbolic.** The model names references S1, S2 ..., and the code maps them to source ids. An unknown label is dropped with a warning, and every save checks the ids again.
+- **Uploads live in the storage driver, not in `assets`.** `assets.deck_id` is NOT NULL and a run has no deck until generation starts. The key is `wizard/<runId>/<sourceId>`. The row keeps the name, the size (`bytes`, against the 50 MB total) and the key.
+- **The worker resolves the provider itself.** Same rules as the web assistant (the run's provider, then the user's default, the workspace default, the server default), the same decryption (`LLM_SECRET_KEY`), and the same pinned fetch. The copy in the worker mirrors the web app's `specFrom` and `configOf`. Two copies is a known smell; moving them into `packages/llm` is a follow-up.
+- **URL fetch is always SSRF-safe.** `fetchPublicUrl` uses `createPinnedFetch({ allowPrivate: false })` regardless of provider scope. Redirects are followed by the fetch itself, and each hop is checked again (the test shows a redirect to `169.254.169.254` refused even when private addresses are allowed for a test). Limits: 5 redirects, 5 MB, 15 s, and content types HTML, XHTML, PDF, plain text, markdown and CSV.
+- **The test-only policy override is a parameter, not a flag.** `fetchPublicUrl(url, { policy })` and the worker's `fetchUrl` option exist only for tests. Production never passes them. The web app's pre-check on `addUrl` has no override.
+- **Research queries are five at most, de-duplicated.** Results are de-duplicated by a canonical URL (tracking parameters dropped), then at most eight pages are queued. SearXNG is the one private host research may reach, and only that host is called.
+- **MCP.** `create_deck_from_prompt` runs the whole pipeline in the tool call, waiting up to 60 s for the references, then drafts the outline and starts generation. The response carries the deck id and run id. If the references are still being read after the wait, it returns the run id and status without a deck. `get_wizard_status` follows the run.
+
+**Deviations from the brief.**
+- File ▸ New ▸ From prompt is a flat menu item (File ▸ From prompt…), because the menu has no submenus.
+- The Sources panel is a drawer opened from the editor banner, not a tab in the side panel. The side panel was not changed.
+- Outline drafting is a synchronous server function, not a job. Only the three queued steps are jobs (research, ingest, generate).
+- The generation concurrency setting (`WIZARD_CONCURRENCY`, up to 4 for cloud providers) is **not implemented**. Slides are written one at a time, in order. Parallel writes would need an index per slide and an order check, which was left out.
+- `wizard_sources.file_key` is the storage key, not an asset id (see the decision above).
+- Usage rows are written for each model call, with `deck_id` null for research and outline.
+
+**Known gaps and limits (decisions to revisit).**
+- **No robots.txt check** for user-given or search-found pages (the brief allowed skipping it; this is the note it asked for). Each page is fetched once per run, with a timeout.
+- **Images are not read.** A reference image is listed by name. The brief's "pass to vision providers" is not done.
+- **Prompt-injection defence is structural, not complete.** Reference text is data inside `<<<DECK_CONTENT` blocks, the system prompt says never to follow it, and the output is limited to `addSlide`. A model can still write misleading text inside a slide; the review step (the user reads the outline and the Sources) is the control.
+- **No quotas beyond the limits above.** Wizard model calls run in the worker, not the assistant route, so `AI_RATE_LIMIT_MAX` does not count them. Their usage is recorded in `llm_usage`, and nothing caps it yet. A user can start many runs.
+- **Deck creation before the first slide.** A run that fails before its first slide leaves an empty deck titled from the outline. Deleting it is manual.
+- **The run waits for references, in the MCP tool only.** The web flow asks the user to press Draft outline when the references are ready.
+- **Two copies of provider resolution** (web and worker), described above.
+- **One worker process.** The wizard queues have no per-run lock beyond the generate queue's concurrency of 1. Two worker processes would work on different runs, but a restart in the middle of a run leaves it `generating` with no job (pg-boss expires the job; the row is not reaped). The same reaper gap as M3's exports.
+
+### M6 verification
+
+Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0.0.1:5433), Google Chrome (`CHROME_PATH`). The live model is `qwen3.8-flash-next-q2_0` at `https://gpt.knowhub.my.id/v1`, a reasoning model with `json_schema` support.
+
+- `pnpm typecheck`: exit 0 in every workspace.
+- `CHROME_PATH=… pnpm test` (root): **50 files, 592 tests, all passing, none skipped.** M5 had 45 files and 521 tests. The new files:
+  - `packages/ingest/src/ingest.test.ts` (25): each extractor on generated fixtures (CSV, XLSX with the five-sheet and 200-row caps, PDF via pdf-lib, DOCX and PPTX as minimal OOXML zips, text, image); mismatched and unknown types; the 20 MB refusal before reading; HTML sanitising; caps and chunking; BM25; the URL fetch against a loopback server with the test policy (HTML extraction, a redirect to a permitted address, a redirect to `169.254.169.254` refused, the redirect limit, an unsupported content type, the 1 MB body cap), and the production policy refusing loopback.
+  - `packages/research/src/research.test.ts` (11): precedence, a status line that never contains a key, the SearXNG adapter against a JSON server (filters non-http results, reports HTTP errors, reaches its own host), Brave and Tavily through injected transports (headers, body, a non-JSON reply), canonical URLs and de-duplication.
+  - `packages/llm/src/wizard.test.ts` (21): brief and outline schemas and pure edits; outline reference mapping; language and untrusted-block structure of the prompts; query de-duplication; a chart copied from the table; illustrative marking; a chart with no source left out; a chart naming a missing column refused; **only `addSlide` proposed, even with injected `ops` and an injected title**; the injected reference reaches the model only inside the data block; citation validation; notes off; a bad reply is an error; two-column and blank layouts for visuals.
+  - `apps/worker/src/wizard/wizard.integration.test.ts` (5, real Postgres): a full run (CSV upload, local page, outline, five slides including a table chart, an illustrative chart, a diagram and a Sources slide); the chart numbers equal the CSV; the illustrative title and notes; the citations; the default slide removed; **cancel mid-run keeps two slides and stops**; **a bad reply becomes a placeholder and the run still finishes**; research queues one ingest per de-duplicated page; a refused URL fails only its own source. The collab service is replaced by an in-memory Yjs document applying the same ops (see the decision on the test seam below).
+  - `apps/web/src/lib/wizard.server.test.ts` (9, real Postgres): ownership (another user gets not-found on every action), research refused without a provider, file type, empty and size refusals, a CSV stored under a run key and queued, URL refusal for loopback, link-local and `ftp:`, the cap and duplicates, outline save dropping unknown ids, and generation needing a drafted outline and making one deck.
+  - `apps/web/src/lib/mcp/mcp.integration.test.ts`: the tool list now includes `create_deck_from_prompt` and `get_wizard_status`. The other MCP tests pass unchanged.
+- `apps/web` build (`vite build`): exit 0. It regenerated the route tree for the wizard routes.
+- **Live model check** (`apps/web/scripts/live-wizard-check.ts`, run with `node --experimental-strip-types`): the M6 brief (Indonesian, 8 slides, bakery owners), a six-row CSV of monthly electricity bills before and after solar, and the Wikipedia page "Solar power in Indonesia" fetched through the production policy. The run made **9 model calls** (1 outline, 8 slides), about 75k input and 11k output tokens in the last run. The run found two layout defects. Both were fixed and unit-tested, and the second run was clean:
+
+| Step | First run | Second run (after the fixes) |
+|---|---|---|
+| Fetch the page | 1.9 s | 0.8 s |
+| Outline | 20.2 s | 34.5 s |
+| Slides, total | 150 s (8 slides, 12–46 s each) | 150 s (8 slides, 11–24 s each) |
+| Slide warnings | 1 (overlap on the two-column diagram slide) | 0 |
+| Charts | 1, numbers equal the CSV | 2, both numbers equal the CSV, neither illustrative |
+| Diagram | none | 1 |
+| Notes with citations | 8 of 8 | 8 of 8 |
+| Language | Indonesian (113 Indonesian vs 8 English word hits) | Indonesian (95 vs 15) |
+
+  The first run also had a blank closing slide (`blank` layout, text only in the notes), which is fixed. The slide JSON from the second run is in the session scratchpad (`live-wizard2/deck.json`).
+- **Quality notes from the live output (honest).** The Indonesian is fluent and on-topic. The English hits are proper nouns and some terms ("solar rooftop"), not whole sentences. The first slide's title is a reasonable pitch line. The notes repeat points from the bullets more than they add. The charts are plausible, but the numbers came from the CSV and were not checked against any other source. Layout was checked only by the geometry code and the overlap warnings, **not by looking at a render**.
+
+### Unverified in M6
+
+- **Browser e2e (`apps/web/tests/wizard.mjs`) and its screenshots** (`wizard-brief.png`, `wizard-outline.png`, `wizard-live.png`). Not written or run in this milestone. The UI (routes, banner, outline editor) is typechecked and built, but has not been clicked through.
+- **Live PNG renders and visual review** of the live deck (overlaps, text fit, chart appearance). Not done. The live script writes `deck.json` and `report.json` only.
+- **Re-run of the existing browser suites** (`smoke`, `collab`, `export`, `ai`, `mcp`) against the dev stack. Not run in this milestone. The unit and integration suites that cover the same server code (collab, worker export, MCP) passed.
+- **Research on a live search provider.** No SearXNG, Brave or Tavily instance was run. The adapters are tested against fake servers and injected transports. The compose service has not been started.
+- **Generation through the collab service in a browser.** The worker's tests apply ops to an in-memory Yjs document, not to the collab service. The live broadcast to an open editor, and the banner's progress updates, are not exercised.
+- **Restart of a worker in the middle of a run** (the run stays `generating`), and concurrent runs on two workers.
+- **Multi-process wizard load, large references** (the 10-file and 50 MB limits are tested only on the refusal paths), and PDF or DOCX text quality on real documents beyond the generated fixtures.
+- **Firefox and Safari.** Chrome only, as before.
+

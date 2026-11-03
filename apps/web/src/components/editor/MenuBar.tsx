@@ -99,6 +99,7 @@ function buildAllMenus(d: MenuDeps): Menu[] {
       label: 'File',
       items: [
         item('New deck', () => void a.newDeck()),
+        item('From prompt…', () => window.location.assign('/wizard/new')),
         item('Make a copy', () => void a.makeCopy()),
         sep,
         group('Download', [
