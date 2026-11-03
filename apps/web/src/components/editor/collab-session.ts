@@ -10,7 +10,20 @@ import { HocuspocusProvider, WebSocketStatus } from '@hocuspocus/provider'
 import { applyOps, createUndoManager, yDocToDeck, type Deck } from '@sleid/model'
 
 export const LOCAL_ORIGIN = 'local'
-export const COLLAB_URL: string = import.meta.env.VITE_COLLAB_URL ?? 'ws://localhost:3001'
+/**
+ * The collab WebSocket. VITE_COLLAB_URL wins when set at build time. Otherwise dev uses ws://localhost:3001,
+ * and a production build uses /collab on the page's own origin (a reverse proxy routes it to apps/collab),
+ * so one container image works on any domain.
+ */
+export const COLLAB_URL: string = resolveCollabUrl()
+
+function resolveCollabUrl(): string {
+  const configured = import.meta.env.VITE_COLLAB_URL?.trim()
+  if (configured) return configured
+  if (import.meta.env.DEV || typeof window === 'undefined') return 'ws://localhost:3001'
+  const { protocol, host } = window.location
+  return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/collab`
+}
 /** Cursor updates are sent at most this often (20 Hz). */
 export const CURSOR_INTERVAL_MS = 50
 

@@ -1,0 +1,17 @@
+**/node_modules
+**/.output
+**/.nitro
+**/.tanstack
+**/.vitest
+**/dist
+**/test-results
+**/playwright-report
+**/routeTree.gen.ts
+.git
+.github
+.env
+.env.*
+!.env.example
+data
+docs
+.impeccable

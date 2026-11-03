@@ -1,0 +1,104 @@
+# Production stack for one VM: Postgres, migrations, web, collab, worker, and Caddy (automatic HTTPS).
+# On the server: put this file and .env (from deploy/.env.example) in one folder, then
+#   docker compose pull && docker compose up -d
+# Caddy serves https://$DOMAIN, routes /collab to the collab WebSocket and everything else to web.
+
+name: sleid-prod
+
+x-app: &app
+  restart: unless-stopped
+  env_file: .env
+  environment: &app-env
+    NODE_ENV: production
+    DATABASE_URL: postgres://sleid:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/sleid
+    BETTER_AUTH_URL: https://${DOMAIN:?set DOMAIN in .env}
+    COLLAB_INTERNAL_URL: http://collab:3002
+    ASSET_DIR: /data/assets
+    EXPORT_DIR: /data/exports
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sleid
+      POSTGRES_USER: sleid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U sleid -d sleid]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Runs once on every `up`, then exits. Web, collab and worker start after it succeeds.
+  migrate:
+    <<: *app
+    image: ${SLEID_IMAGE_PREFIX:-ghcr.io/rosdyana/sleid}-web:${SLEID_TAG:-latest}
+    restart: 'no'
+    command: [node, scripts/migrate.mjs]
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    <<: *app
+    image: ${SLEID_IMAGE_PREFIX:-ghcr.io/rosdyana/sleid}-web:${SLEID_TAG:-latest}
+    volumes: [appdata:/data]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  collab:
+    <<: *app
+    image: ${SLEID_IMAGE_PREFIX:-ghcr.io/rosdyana/sleid}-collab:${SLEID_TAG:-latest}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    <<: *app
+    image: ${SLEID_IMAGE_PREFIX:-ghcr.io/rosdyana/sleid}-worker:${SLEID_TAG:-latest}
+    volumes: [appdata:/data]
+    shm_size: 1gb # Chromium needs more than Docker's 64 MB default
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ['80:80', '443:443', '443:443/udp']
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, collab]
+
+  # Optional web search for the wizard: `docker compose --profile research up -d`, then SEARXNG_URL=http://searxng:8080 in .env.
+  searxng:
+    image: searxng/searxng:latest
+    profiles: [research]
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me}
+
+configs:
+  caddyfile:
+    content: |
+      ${DOMAIN} {
+        encode zstd gzip
+        request_body /mcp* {
+          max_size 20MB
+        }
+        handle_path /collab* {
+          reverse_proxy collab:3001
+        }
+        reverse_proxy web:3000
+      }
+
+volumes:
+  pgdata:
+  appdata:
+  caddy_data:
+  caddy_config:
