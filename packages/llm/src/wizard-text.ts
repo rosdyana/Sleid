@@ -28,9 +28,10 @@ export function estimateWord(language: string): string {
 
 /** The visible note on a slide the model could not write, in the deck's language. */
 export function placeholderNote(language: string): string {
-  return language.toLowerCase().startsWith('id')
-    ? 'Tidak dapat dibuat — klik ✨ Ask AI untuk mencoba lagi.'
-    : 'Could not be generated — click ✨ Ask AI to retry.'
+  // Matches "id", "id-ID" and "Indonesian"/"Bahasa Indonesia".
+  return /^(id\b|id-|indonesia|bahasa)/i.test(language.trim()) || /indonesia/i.test(language)
+    ? 'Tidak dapat dibuat — klik "Retry failed slides" di banner.'
+    : 'Could not be generated — use "Retry failed slides" in the banner.'
 }
 
 /** The speaker-notes line that names the figures marked as estimates on a slide. */

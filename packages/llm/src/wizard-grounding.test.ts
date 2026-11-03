@@ -227,7 +227,7 @@ describe('the placeholder for a slide the model could not write', () => {
   it('the note is in English for an English deck', () => {
     const { op } = placeholderSlide({ slideIndex: 0, title: 'Next', bullets: ['A'], theme: DEFAULT_THEME, language: 'en' })
     const texts = slideElements(op).map((e) => (e.type === 'text' ? textOf(e.content) : ''))
-    expect(texts).toContain('Could not be generated — click ✨ Ask AI to retry.')
+    expect(texts).toContain('Could not be generated — use "Retry failed slides" in the banner.')
     expect(estimateWord('en')).toBe('estimate')
     expect(estimateWord('id')).toBe('perkiraan')
   })

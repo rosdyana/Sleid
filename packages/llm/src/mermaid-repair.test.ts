@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { validateMermaid } from './mermaid.ts'
 import { repairMermaid } from './mermaid-repair.ts'
 
 const LIVE_RUN_SAMPLE = 'flowchart LR\n  Sunlight --> Panels --> Inverter --> Shop appliances\n  Inverter -->|surplus| Battery'
 
 describe('repairMermaid', () => {
+  // The first validateMermaid call loads mermaid (and a DOM shim), which can exceed the 5 s test
+  // timeout when the whole suite runs in parallel. Load it once here with a longer budget.
+  beforeAll(async () => {
+    await validateMermaid('flowchart LR\n  A --> B')
+  }, 60_000)
+
   it('gives a bare multi-word node an id and a bracketed label, and the result parses', async () => {
     const repaired = repairMermaid(LIVE_RUN_SAMPLE)
     expect(repaired).toBe('flowchart LR\n  Sunlight --> Panels --> Inverter --> ShopAppliances[Shop appliances]\n  Inverter -->|surplus| Battery')
