@@ -2,7 +2,7 @@
 
 A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), import (PowerPoint, Google Slides, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 8** done (import: PowerPoint, Google Slides, Markdown and JSON). **Milestone 9 (templates and brand kits) is in progress**: built-in templates, brand kits, the logo overlay, the AI brand constraint, the wizard integration, the template gallery, Save as template, the brand kit and template settings pages, and the editor's brand kit section are in. The `m9` browser check is not written yet. See the status table and the M9 section in DESIGN.md.
+Status: **milestone 9** done (templates and brand kits: built-in templates, user templates and the gallery, brand kits with a logo overlay, the AI brand constraint, the wizard's template and kit, thumbnails, and the settings pages). Milestone 8 (import) is also done. See the status table and the M9 section in DESIGN.md.
 
 ## Layout
 
@@ -137,6 +137,7 @@ Without these values the Google button will fail at sign-in. The server logs a w
 | `pnpm --filter @sleid/web test:e2e:mcp` | MCP check over HTTP against the live editor (needs the dev servers and a token) |
 | `pnpm --filter @sleid/web test:e2e:wizard` | Prompt-to-deck check with a fake model and fake SearXNG (needs `node tests/fake-searxng.mjs 4412` and `SEARXNG_URL=http://127.0.0.1:4412`) |
 | `pnpm --filter @sleid/web test:e2e:m7` | Comments, version history, presenter and phone remote (needs the dev servers and Chrome; uses `COLLAB_INTERNAL_SECRET`) |
+| `pnpm --filter @sleid/web test:e2e:m9` | Templates and brand kits: the built-in Quarterly review (six slides, chart, table header), Save as template (everyone, and private), the gallery with thumbnails and what a second user sees, a kit with a PNG logo applied in the editor (live for a collaborator), present mode, the PNG export's logo pixels, an AI proposal snapped to the kit palette, and the wizard with a template and a kit (needs the dev servers with `SLEID_TEST_AUTH=1`, `LLM_SECRET_KEY`, `SEARXNG_URL` and the fake SearXNG on 4412, the worker, Chrome and `COLLAB_INTERNAL_SECRET`) |
 | `pnpm --filter @sleid/web test:e2e:m8` | Import: PPTX (from a seeded deck), Markdown, JSON, a public Google Slides link (fake server), a private link, a text file named .pptx (needs the dev servers started with `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413`, Chrome and `COLLAB_INTERNAL_SECRET`) |
 
 ## Browser checks
@@ -163,6 +164,19 @@ CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 SCREENSHOT_DIR=./test-results/screenshots \
   pnpm --filter @sleid/web test:e2e:m8
 ```
+
+The templates and brand kits check (`test:e2e:m9`) needs the same stack as the wizard and assistant checks, with the fake SearXNG on port 4412, and the worker (thumbnails and exports):
+
+```bash
+SLEID_TEST_AUTH=1 SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413 \
+LLM_SECRET_KEY=<32 random bytes, base64> SEARXNG_URL=http://127.0.0.1:4412 pnpm dev
+node apps/web/tests/fake-searxng.mjs 4412          # terminal 2
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+SCREENSHOT_DIR=./test-results/screenshots \
+  pnpm --filter @sleid/web test:e2e:m9
+```
+
+The check starts its own fake OpenAI-compatible server and cleans up the brand kit and templates it made. The decks it makes keep unique names.
 
 The export check (`test:e2e:export`) builds a deck with text, a chart, an uploaded image and a Mermaid diagram, exports PDF and PPTX from the menus, verifies both files, publishes the deck, opens the public page logged out, unpublishes it, and writes PNG renders of the outputs (macOS `sips`, and LibreOffice if `soffice` is installed). It needs the worker, so it runs under `pnpm dev`.
 

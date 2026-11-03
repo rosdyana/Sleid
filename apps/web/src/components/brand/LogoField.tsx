@@ -6,6 +6,7 @@ import { LOGO_MIME, logoProblem } from './logo-file'
 export function LogoField({
   file,
   hasSavedLogo,
+  savedSrc,
   removeSaved,
   onFile,
   onRemoveSaved,
@@ -13,6 +14,8 @@ export function LogoField({
 }: {
   file: File | null
   hasSavedLogo: boolean
+  /** The saved logo's URL (the kit's logo route), shown as a preview when no new file is chosen. */
+  savedSrc: string | null
   removeSaved: boolean
   onFile: (file: File | null) => void
   onRemoveSaved: (remove: boolean) => void
@@ -60,6 +63,11 @@ export function LogoField({
           </button>
         )}
       </div>
+      {savedSrc && !file && (
+        <div className="flex h-14 w-40 items-center justify-center overflow-hidden rounded border border-rule-soft bg-hover p-1">
+          <img data-testid="kit-logo-saved" src={savedSrc} alt="Saved logo" className="h-10 w-auto max-w-full object-contain" />
+        </div>
+      )}
       <p className="text-ink-muted" data-testid="kit-logo-status">
         {status}
       </p>

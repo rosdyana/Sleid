@@ -8,8 +8,8 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { and, eq, sql } from 'drizzle-orm'
 import * as Y from 'yjs'
-import { applyOps, createDeck, deckToYDoc, yDocToDeck, type Deck } from '@sleid/model'
-import { assets, decks, deckMembers, grantMembership, setTemplateThumbnail, templateThumbnailKey, templates, type Db } from '@sleid/db'
+import { applyOps, builtInTemplateDeck, createDeck, deckToYDoc, yDocToDeck, type Deck } from '@sleid/model'
+import { assets, decks, deckMembers, grantMembership, readDeck, setTemplateThumbnail, templateThumbnailKey, templates, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createLocalStorage, type StorageDriver } from '@sleid/storage'
 import { deleteTemplate, getTemplateFor, handleTemplateThumbnail, listTemplatesFor, newDeckFromTemplate, saveTemplateFromDeck, updateTemplateMeta, LibraryError, type TemplateDeps } from './templates.server.ts'
@@ -17,8 +17,10 @@ import {
   applyBrandKit,
   createBrandKit,
   deleteBrandKit,
+  handleBrandLogo,
   listBrandKitsFor,
   removeBrandKit,
+  removeBrandLogo,
   updateBrandKit,
   uploadBrandLogo,
   type BrandDeps,
@@ -370,5 +372,95 @@ describe('template thumbnails (M9)', () => {
     await storage.put(templateThumbnailKey('builtin:pitch'), PNG)
     expect((await route(outsider)).status).toBe(200)
     expect((await route(null)).status).toBe(401)
+  })
+})
+
+// M9: a kit changes the theme, the brand and the logo, and nothing on the slides. A deck made from a built-in template
+// keeps every slide and element it was made with.
+describe('a kit on a deck with content (M9)', () => {
+  /** The slide content a kit must leave alone: ids, layouts and every element. */
+  const contentOf = (deck: Deck) => deck.slides.map((s) => ({ id: s.id, layout: s.layout, elements: s.elements }))
+
+  it('a deck made from the built-in Quarterly review keeps every slide and element through apply and remove', async () => {
+    if (skipIfNoDb()) return
+    const template = builtInTemplateDeck('builtin:quarterly-review')!
+    const created = await newDeckFromTemplate(deps(), owner, { templateId: 'builtin:quarterly-review', title: 'Content kit' })
+    const { deck: stored } = await readDeck(db!, created.deckId)
+    expect(stored.slides).toHaveLength(template.slides.length)
+    expect(stored.slides.map((s) => s.elements.length)).toEqual(template.slides.map((s) => s.elements.length))
+    expect(stored.slides.reduce((n, s) => n + s.elements.length, 0)).toBeGreaterThan(0)
+
+    docs.set(created.deckId, deckToYDoc(stored))
+    const before = yDocToDeck(docs.get(created.deckId)!)
+    const { id } = await createBrandKit(deps(), owner, { name: 'Content kit', tokens: KIT_TOKENS })
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/png', bytes: PNG })
+
+    await applyBrandKit(deps(), owner, created.deckId, id)
+    const applied = yDocToDeck(docs.get(created.deckId)!)
+    expect(applied.brand?.brandKitId).toBe(id)
+    expect(applied.brand?.logo).toBeDefined()
+    expect(applied.theme.colors.accent).toBe('#0055cc')
+    expect(contentOf(applied)).toEqual(contentOf(before))
+
+    await removeBrandKit(deps(), owner, created.deckId)
+    const removed = yDocToDeck(docs.get(created.deckId)!)
+    expect(removed.brand).toBeUndefined()
+    expect(removed.theme).toEqual(applied.theme)
+    expect(contentOf(removed)).toEqual(contentOf(before))
+
+    await deleteBrandKit(deps(), owner, id)
+    await db!.execute(sql`delete from decks where id = ${created.deckId}`)
+    docs.delete(created.deckId)
+  })
+})
+
+// M9: the saved logo of a brand kit is served to whoever can read the kit, and to nobody else.
+describe('brand kit logo route (M9)', () => {
+  it('serves the saved logo to the owner, and to everyone when the kit is on this server; never to anyone else', async () => {
+    if (skipIfNoDb()) return
+    const { id } = await createBrandKit(deps(), owner, { name: 'Logo route', visibility: 'private', tokens: KIT_TOKENS })
+    const route = (userId: string | null, kitId = id) => handleBrandLogo(kitId, { db: db!, storage, userId })
+
+    // No logo yet: not found, even for the owner.
+    expect((await route(owner)).status).toBe(404)
+
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/png', bytes: PNG })
+    expect((await route(null)).status).toBe(401)
+    const ok = await route(owner)
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('content-type')).toBe('image/png')
+    expect(ok.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(PNG)
+
+    // A private kit is not readable by an editor of some other deck, or by an outsider.
+    expect((await route(editor)).status).toBe(404)
+    expect((await route(outsider)).status).toBe(404)
+    expect((await route(owner, randomUUID())).status).toBe(404)
+    expect((await route(owner, 'not-a-uuid')).status).toBe(404)
+
+    // Once the kit is on this server, every signed-in user can read its logo, as they can read the kit.
+    await updateBrandKit(deps(), owner, id, { visibility: 'instance' })
+    expect((await route(outsider)).status).toBe(200)
+    expect((await route(editor)).status).toBe(200)
+    expect((await route(null)).status).toBe(401)
+
+    // Back to private: the outsider is refused again.
+    await updateBrandKit(deps(), owner, id, { visibility: 'private' })
+    expect((await route(outsider)).status).toBe(404)
+    await deleteBrandKit(deps(), owner, id)
+    expect((await route(owner)).status).toBe(404)
+  })
+
+  it('an SVG logo is served in a sandbox, and a removed logo is not found', async () => {
+    if (skipIfNoDb()) return
+    const { id } = await createBrandKit(deps(), owner, { name: 'Svg logo', visibility: 'instance', tokens: KIT_TOKENS })
+    await uploadBrandLogo(deps(), owner, id, { mime: 'image/svg+xml', bytes: SVG_OK })
+    const svg = await handleBrandLogo(id, { db: db!, storage, userId: outsider })
+    expect(svg.status).toBe(200)
+    expect(svg.headers.get('content-type')).toBe('image/svg+xml')
+    expect(svg.headers.get('content-security-policy')).toBe('sandbox')
+    await removeBrandLogo(deps(), owner, id)
+    expect((await handleBrandLogo(id, { db: db!, storage, userId: outsider })).status).toBe(404)
+    await deleteBrandKit(deps(), owner, id)
   })
 })

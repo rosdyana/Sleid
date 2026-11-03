@@ -146,6 +146,11 @@ export function respond(body) {
   if (sawToolResult) {
     return { kind: 'stream', text: 'Here is the proposal. Review it in the card below, then Preview or Apply it.' }
   }
+  // m9: a proposal with an off-palette accent (an orange that is not in the brand kit). The brand constraint must snap it
+  // to a kit colour before the card is shown, so the stored colour is a kit colour.
+  if (/off-palette/i.test(userText)) {
+    return { kind: 'stream', tool: { name: 'apply_ops', input: { summary: 'Recolour the accent', ops: [{ op: 'setTheme', theme: { colors: { accent: '#f97316' } } }] } } }
+  }
   if (/chart/i.test(userText)) {
     return { kind: 'stream', tool: { name: 'generate_chart', input: { prompt: userText } } }
   }

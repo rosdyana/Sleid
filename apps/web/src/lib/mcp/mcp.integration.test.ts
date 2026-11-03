@@ -817,8 +817,10 @@ describe('MCP templates and brand kits (M9)', () => {
     })
     await uploadBrandLogo(kitDeps, owner.id, kit.id, { mime: 'image/png', bytes: TEST_PNG })
 
+    // The list also holds kits other people made on this server (instance-visible), so only this test's kit is compared.
     const kits = jsonOf(await tool(mcp, 'list_brand_kits', {}))
-    expect(kits.brandKits).toEqual([expect.objectContaining({ id: kit.id, name: 'Acme', owned: true, hasLogo: true, accent: '#0055cc' })])
+    const ownKits = (kits.brandKits as Array<{ id: string }>).filter((k) => k.id === kit.id)
+    expect(ownKits).toEqual([expect.objectContaining({ id: kit.id, name: 'Acme', owned: true, hasLogo: true, accent: '#0055cc' })])
 
     // 4. apply_brand_kit: the deck takes the kit's theme, and the logo is placed on the deck.
     const applied = jsonOf(await tool(mcp, 'apply_brand_kit', { deckId: made.id, brandKitId: kit.id }))

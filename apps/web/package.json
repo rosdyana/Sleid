@@ -17,7 +17,8 @@
     "test:e2e:wizard": "node --env-file-if-exists=../../.env tests/wizard.mjs",
     "test:e2e:mcp": "node --env-file-if-exists=../../.env tests/mcp.mjs",
     "test:e2e:m7": "node --env-file-if-exists=../../.env tests/m7.mjs",
-    "test:e2e:m8": "node --env-file-if-exists=../../.env tests/m8.mjs"
+    "test:e2e:m8": "node --env-file-if-exists=../../.env tests/m8.mjs",
+    "test:e2e:m9": "node --env-file-if-exists=../../.env tests/m9.mjs"
   },
   "dependencies": {
     "@hocuspocus/provider": "^4.8.0",

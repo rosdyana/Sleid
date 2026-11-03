@@ -93,7 +93,7 @@ function summaryOf(row: BrandKitRow, userId: string): BrandKitSummary {
   }
 }
 
-async function readableKit(deps: BrandDeps, userId: string, kitId: string): Promise<BrandKitRow> {
+async function readableKit(deps: Pick<BrandDeps, 'db'>, userId: string, kitId: string): Promise<BrandKitRow> {
   if (!z.uuid().safeParse(kitId).success) throw new LibraryError('Brand kit not found', 404)
   const row = await getBrandKitRow(deps.db, kitId)
   if (!row || (row.ownerId !== userId && row.visibility !== 'instance')) throw new LibraryError('Brand kit not found', 404)
@@ -195,6 +195,36 @@ export async function removeBrandLogo(deps: BrandDeps, userId: string, kitId: st
   const row = await ownedKit(deps, userId, kitId)
   await setBrandKitLogo(deps.db, userId, kitId, null)
   if (row.logoKey) await deps.storage.delete(row.logoKey).catch(() => undefined)
+}
+
+/**
+ * GET /api/brand-kits/:id/logo. A session is needed. The logo is readable by whoever can read the kit (its owner, or
+ * everyone when the kit is on this server, the same rule as the kit itself). Anyone else, a kit with no logo and a
+ * missing file are all "not found".
+ */
+export async function handleBrandLogo(kitId: string, deps: { db: Db; storage: StorageDriver; userId: string | null }): Promise<Response> {
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  if (!deps.userId) return json(401, { error: 'Sign in to see this logo.' })
+  let row: BrandKitRow
+  try {
+    row = await readableKit(deps, deps.userId, kitId)
+  } catch (err) {
+    if (err instanceof LibraryError && err.status === 404) return json(404, { error: 'Not found' })
+    throw err
+  }
+  if (!row.logoKey || !row.logoMime) return json(404, { error: 'Not found' })
+  const bytes = await deps.storage.get(row.logoKey)
+  if (!bytes) return json(404, { error: 'Not found' })
+  const headers: Record<string, string> = {
+    'content-type': row.logoMime,
+    'content-length': String(bytes.byteLength),
+    'x-content-type-options': 'nosniff',
+    // The preview in the kit editor reads this after a logo is replaced, so it must not be cached for long.
+    'cache-control': 'private, no-cache',
+  }
+  // An SVG opened on its own runs in a sandbox: no scripts, no same-origin access.
+  if (row.logoMime === 'image/svg+xml') headers['content-security-policy'] = 'sandbox'
+  return new Response(new Uint8Array(bytes), { status: 200, headers })
 }
 
 const ASSET_URL = /^\/api\/assets\/([0-9a-f-]{36})$/i

@@ -16,7 +16,7 @@ Living document. Update it as decisions change.
 | 6. Wizard + reference ingestion + research | **Done** (checks run, see M6 below; open items listed there, including the research check on a live search provider and the visual defects of live run 3) |
 | 7. Comments, version history, presenter + phone remote | **Done** (checks run, see M7 below; open items and unverified parts listed there) |
 | 8. Import: PPTX, Google Slides, Markdown, JSON | **Done** (checks run, see M8 below; open items and unverified parts listed there. Real Google OAuth, Picker and Drive were not run.) |
-| 9. Templates and brand kits | **In progress**: built-in templates, brand kit model, logo overlay, AI brand constraint (part A), the wizard, thumbnail and render fixes (part B), and the UI (part C). Not done: the m9 browser check, so the row stays open. See M9 below. |
+| 9. Templates and brand kits | **Done** (checks run, see M9 below; open items and known gaps listed there) |
 
 ### What M0 built, and decisions taken while building it
 
@@ -1291,39 +1291,71 @@ Run on this machine: macOS, Node 24.14, pnpm 10.4.1, Postgres 17 (compose, 127.0
 - **Polling.** The dialog polls once a second and stops after five minutes, with a message that the import keeps running in the background. A deck that appears after that is found on the dashboard.
 - **Images over 10 MB** in a PPTX are left out, with a warning. Larger images in the editor's own upload (10 MB) and in the export match.
 
-## M9: Templates and brand kits (in progress)
+## M9: Templates and brand kits
 
-**State: UI built, browser check not written.** Part A (the built-in templates, the brand kit model, the logo overlay, the AI brand constraint, the library tables and the MCP tools) is in `6ffc2af` and `bb8b81a`. Part B is the backend fixes listed under *Done in part B*. Part C is the UI: the dashboard start row and gallery, Save as template, the Brand kits and Templates settings pages (linked from a shared settings nav), the editor's Brand kit section, and the wizard's template and kit pickers. The `m9` browser check (`apps/web/tests/m9.mjs`) is **not** written, so status row 9 stays open.
+Scope: built-in templates, a brand kit (palette, fonts, logo placement) that a deck takes, Save as template, the template gallery, the brand kit and template settings pages, the editor's Brand kit section, and the wizard's template and kit pickers. Branch `m9-templates`: WIP commits `6ffc2af`, `bb8b81a`, `005c0e1`, `93834a2`, then the final commit.
 
-**Done in part B.**
-- **Wizard.** `templateId` (a user template uuid, or `builtin:<key>`) and `brandKitId` are optional on the brief (`packages/llm/src/wizard-schema.ts`). Creation checks that the caller can read each one (built-in, owned, or instance-visible) and answers "not found" otherwise, the same as a missing one. A brief with a kit and the AI theme is refused: the kit's palette is the rule for colours, and the AI theme invents them.
-- **Template start.** The run takes the template's theme. The outline is drafted with the template's layouts (in first-use order, only the layouts the wizard writes) as the preferred layouts. The slide layouts themselves come from the outline, as before. The brief's theme choice is ignored when a template is chosen.
-- **Kit start.** The worker applies the kit (`setBrandKit`: theme, brand reference, and the logo copied into the deck as its own asset, the same as `applyBrandKit`) **before the first slide**. Each slide is then written against the deck's brand, so `writeWizardSlide` snaps its colours to the palette. Applying the kit in the first slide's batch would have written slide 1 without the constraint; the test checks this.
-- **A kit that is gone** (deleted or no longer readable when generation runs) fails the run with a message and writes nothing.
-- **Thumbnails.** `GET /api/templates/:id/thumbnail`: a session is required for every template (401 without one). A user template follows its visibility (owner, or instance; otherwise 404). A template whose thumbnail is not rendered yet is 404. Built-in thumbnails are pre-rendered by the worker at start-up, in the background, for each built-in template that has no file yet (`renderMissingBuiltInThumbnails`). Storage keys: `template-thumbs/<id>.png`, and `template-thumbs/builtin-<key>.png` for built-ins (keys may not hold a colon). `templateThumbnailKey` in `@sleid/db` is the one place that decides the key.
-- **Thumbnail job on save.** Saving a template queues `template-thumbnail` (already wired in part A; now covered by a test that the save enqueues it, and by `apps/worker/src/thumbnail.integration.test.ts`, which runs the job through pg-boss, the export service and Chrome, and checks the PNG and the row's key). `createJobQueue` takes `thumbnailQueueName` so a test can use its own queue.
-- **Mermaid.** Diagrams use mermaid's `base` theme, with the deck's colours and body font (`packages/model/src/mermaid-theme.ts`). It is used by the HTML and PDF pages (`packages/render`), by the worker's diagram images for PPTX, and by the editor's diagram view. Before this, a dark deck got white boxes with black text.
-- **Table header text.** The contrast helper moved from `packages/llm/src/contrast.ts` to `packages/model/src/contrast.ts` (render and pptx cannot depend on llm; llm imports it from model now). `readableTextOn(fill, preferred)` picks the theme's text colour when it reads on the fill, otherwise white or near-black. Render, the editor and the PPTX export all use it for a header with a fill. The editor's header now uses the table's own `headerFill` (before, it always used the surface colour and ignored the fill), so the three outputs agree.
+**Layout.**
+- `packages/model`: `templates.ts` (the five built-in templates, `builtInTemplateDeck`, `deckFromBuiltInTemplate`), `brand.ts` (kit tokens, `themeFromBrandTokens`, `logoAppliesToBrand`), `ops.ts` (`setBrandKit`), `mermaid-theme.ts`, `contrast.ts` (moved from llm, `readableTextOn`).
+- `packages/llm`: `brand-constraint.ts` (snaps proposed colours to the kit palette, and fonts to the kit fonts), `wizard-abilities.ts`, `context.ts` (brand line for the model).
+- `packages/render`: the logo overlay (`logoOverlayHtml`), the Mermaid base theme, the table header fill rule.
+- `packages/pptx`: the brand logo picture on each slide.
+- `packages/db`: `library.ts` and `schema/library.ts` (`templates`, `brand_kits`), migration `0013_m9_templates_brand_kits.sql`, `templateThumbnailKey`.
+- `apps/web/src/lib`: `templates.server.ts`, `brand-kits.server.ts` (rules, and `handleBrandLogo`), `templates.functions.ts`, `brand-kits.functions.ts`, `library.deps.server.ts`.
+- `apps/web/src/routes`: `api/templates/$templateId/thumbnail.ts`, `api/brand-kits/$kitId/logo.ts`, `_authed/settings/brand-kits.tsx`, `_authed/settings/templates.tsx`, `_authed/index.tsx` (start row, gallery), `_authed/wizard/new.tsx`.
+- `apps/web/src/components`: `templates/` (TemplateGallery, TemplateCard, SaveTemplateDialog), `brand/` (BrandKitForm, BrandKitSection, LogoField, PlacementPreview).
+- `apps/worker`: `thumbnail.ts` (template thumbnails, built-in pre-render at start-up), `wizard/start-point.ts` (kit or template before the first slide), `formats.ts`.
+- Tests: `apps/web/src/lib/library.server.test.ts` (DB), `apps/web/src/lib/mcp/mcp.integration.test.ts`, `apps/worker/src/thumbnail.integration.test.ts`, `apps/worker/src/wizard/wizard.integration.test.ts`, `packages/model/src/templates.test.ts`, `packages/llm/src/brand-constraint.test.ts`, `packages/render/src/brand-logo.test.ts`, browser check `apps/web/tests/m9.mjs` (`test:e2e:m9`).
 
-**Decisions (M9).**
-- The logo is copied into the deck as its own asset (the same as `applyBrandKit`), so a deck does not depend on the kit's storage key, and deleting a kit leaves its decks with their logos.
-- Template images are stored as data URLs in the template row, with the 30 MB total cap (`TEMPLATE_IMAGE_TOTAL_BYTES`). A template's images are not assets of the deck it came from.
-- The AI constraint is frozen at apply time: the palette and fonts are copied into `deck.brand` when the kit is applied, and the constraint reads those, not the theme (`brandConstraintFromRef`).
-- `generateTheme` is refused on a branded deck (`generate-theme.ts`), and the wizard refuses the AI theme with a kit at creation.
-- SVG logos are accepted (the same rule as the deck's SVG images: no scripts, served with `Content-Security-Policy: sandbox`). The logo is drawn as a slide overlay, not an element, so it does not move with a selection.
-- Templates are stored without a brand reference (`saveTemplateFromDeck` drops `brand`). A template carries its theme and slides, not a kit.
-- Built-in thumbnails are rendered at worker start-up, not on request: a gallery request never waits for Chrome, and a built-in with no file yet is a plain card.
+**What it does.**
+- A built-in template (`builtin:<key>`) makes a deck with fresh ids, the owner membership and a first snapshot (`createImportedDeck`). A user template is a copy of a deck's slides and theme, with its images embedded as data URLs (30 MB total) and no brand reference.
+- A brand kit is applied to a deck through the live document (`setBrandKit`): the theme is replaced whole, the kit and its logo are recorded in `deck.brand`, and the logo is copied into the deck as its own asset. Removing the kit keeps the theme and clears the logo. Editing or deleting a kit does not change decks that already have it.
+- The logo is a slide overlay, not an element: it cannot be selected or moved, and it follows the placement (corner, width as a share of the slide, margin, and `all`, `all-but-title` or `none` slides).
+- The AI constraint is frozen at apply time (palette and fonts copied into `deck.brand`). Proposals from the assistant and the wizard are snapped to the palette. Generate theme is refused on a branded deck.
+- The wizard takes a template's theme, or a kit's theme and logo, before the first slide, so every slide is written under the constraint.
+- Thumbnails are rendered by the worker. A gallery card with no thumbnail yet shows a plain placeholder.
 
-**Verification so far.**
-- `pnpm typecheck`: exit 0.
-- `pnpm --filter @sleid/web build`: exit 0 (regenerates the route tree).
-- `CHROME_PATH=... rtk proxy pnpm test`: 83 files, 900 tests, all passed (baseline 81 and 885). The two new files are `packages/llm/src/wizard-template.test.ts` and `apps/worker/src/thumbnail.integration.test.ts`.
-- `apps/worker/scripts/m9-render-check.ts` re-run: the Project kickoff mermaid diagram draws on the dark theme (light labels, dark boxes); the Quarterly review table header is white on the blue fill; the Project kickoff table header is near-black on yellow.
+**Decisions.**
+- The logo is copied into the deck as its own asset, so a deck does not depend on the kit's storage key.
+- A template is stored without a brand reference (`saveTemplateFromDeck` drops `brand`). A template carries its theme and slides, not a kit.
+- Template images are data URLs inside the template row, capped at 30 MB in all.
+- SVG logos are accepted, with the same rule as deck SVGs: no scripts, and `Content-Security-Policy: sandbox` when served.
+- Built-in thumbnails are rendered at worker start-up, so a gallery request never waits for Chrome.
+- `GET /api/brand-kits/:id/logo` (new in the final step): a session is required (401). The logo is readable by whoever can read the kit (owner, or the kit is on this server); anyone else, a kit with no logo and a missing file are all 404. SVG gets the sandbox header, and the response is `private, no-cache` so a replaced logo shows at once in the kit editor.
+- The dashboard start row wraps instead of scrolling sideways. A horizontal scroller hid the last card with no cue.
+- A kit is not auto-applied to the wizard's decks unless chosen; a brief with a kit and the AI theme is refused.
 
-**Unverified and open.**
-- The `m9` browser check (`apps/web/tests/m9.mjs`): **not written**. The earlier browser suites other than smoke (collab, export, ai, mcp, wizard, m7, m8) were not re-run for part C.
-- Part C was checked with scratch Playwright scripts (not committed): the gallery, Save as template, the kit editor with a logo, the kit applied in the editor (logo on the canvas), the templates page, the wizard pickers and submit. Viewers and commenters get the Brand kit section disabled in code only (the side panel's read-only fieldset, and the server refuses the change); not checked in a browser.
-- A template saved just now shows a placeholder in the gallery until the gallery is reopened: the list is read on open, and the thumbnail may still be rendering.
-- The PPTX table header colour was checked in the code and in unit tests of the colour rule, not by opening the file in PowerPoint or LibreOffice.
-- The editor's Mermaid theme was not looked at in a browser.
-- `apps/worker/src/thumbnail.integration.test.ts` returns early (passes without asserting) when Chrome cannot start. It prints a message when that happens.
+**Bug found and fixed in the final step: exports dropped the brand logo.** The worker's export bundle rewrites an asset URL to a file in the bundle (`/api/assets/<id>` becomes `assets/<id>.<ext>`). `logoOverlayHtml` accepted only the asset URL and data URLs, so the logo was left out without an error. Affected: PDF, PNG/JPG and HTML zip (all three call `rewriteForBundle`). Not affected: PPTX, which resolves the logo from the original URL. Fix: the overlay accepts the bundle path through `safeBundleAssetPath`, the same as element images. A unit test covers the bundle path and refuses a path that escapes the bundle (`packages/render/src/brand-logo.test.ts`). The m9 check found it by sampling the exported PNG's corner pixel.
+
+**Content-loss investigation (not a bug).** The screenshot `10-editor-kit-applied.png` (scratch run) shows a deck with two blank slides and a logo. It came from the scratch script's dashboard "New" button, which makes a blank deck, not from the Quarterly review template. The built-in Quarterly review has six slides with content (elements 3, 11, 3, 2, 3, 2). Applying and removing a kit writes only the theme, brand and logo, so no slide content changes. The test "a kit on a deck with content (M9)" in `library.server.test.ts` proves it for a deck made from the built-in Quarterly review: every slide and element is unchanged through apply and remove.
+
+**Other fixes in the final step.**
+- `mcp.integration.test.ts`: the `list_brand_kits` assertion filters to the test's own kit id. Leftover instance-visible kits in the dev DB broke the exact-list comparison.
+- `apps/web/tests/fake-openai-server.mjs`: a message containing "off-palette" gets an `apply_ops` proposal with an off-palette accent (#f97316). The constraint snaps it to the kit's `accent2` (#ea580c), and the test checks the stored accent is a kit colour and is not the proposed value.
+
+**Verification.**
+- `pnpm typecheck`: exit 0 in every workspace.
+- `pnpm --filter @sleid/web build`: exit 0.
+- `CHROME_PATH=… pnpm test`: exit 0. **83 files, 904 tests, all passing** (the baseline was 83 and 900; the four new tests are three DB tests in `library.server.test.ts` and one render test). No DB suite was skipped.
+- Browser suites, all passing (exit 0), on the dev stack started with `SLEID_TEST_AUTH=1`, `SLEID_TEST_GOOGLE_EXPORT_ORIGIN=http://127.0.0.1:4413`, the dev secrets, `LLM_SECRET_KEY`, `SEARXNG_URL=http://127.0.0.1:4412` and the fake SearXNG on 4412: `smoke` 22 checks, `collab` 24, `export` 21, `ai` 32, `mcp` 30, `wizard` 34, `m7` 45, `m8` 30, `m9` 38.
+- What `m9.mjs` covers: the built-in Quarterly review (six slides in the editor, the chart draws, the table header text is `rgb(255, 255, 255)`); Save as template for everyone on the server and a private one; the gallery Mine tab with the rendered thumbnail; a second user sees the shared one under Shared and not the private one under Shared or Mine; a brand kit with a PNG logo and palette, and the saved logo previewed in the kit editor; the kit applied in the editor (logo on a non-title slide, every slide and element unchanged in the stored deck, the collaborator sees the theme and logo live); present mode shows the logo on non-title slides only (checked per slide against the deck's layouts); the current-slide PNG export has the logo (pixel sampled in Chrome: 214,40,40 at the corner); the AI off-palette proposal is stored as a kit colour; the wizard with `builtin:minimal` and the kit, with research over the fake SearXNG, completes with the kit theme and logo; the test then deletes its kit and templates. It ends with no page or console errors.
+- Screenshots in `scratchpad/shots-m9-final/`: `gallery.png`, `branded-editor.png`, `branded-present.png`, `kit-editor-saved-logo.png`, `wizard-result.png`. All were viewed. The one visual issue is the filmstrip (below).
+
+**Unverified.**
+- Real Google sign-in and the Google Slides import from Google: not touched by M9.
+- Chrome only. Firefox and Safari were not tried.
+- PDF and HTML-zip logos: covered by a render unit test and by the shared render path, not pixel-checked in a browser (the browser check samples PNG only).
+- PPTX brand logo: not in the browser check. The pptx package has its own test.
+- A viewer's or commenter's Brand kit section (disabled in code, and the server refuses changes): not checked in a browser.
+- Template gallery cards for a shared template: a second user does not use it to make a deck in the check.
+- The Mermaid base theme in the editor: not looked at in a browser (the render check looked at the HTML and worker output only).
+- The phone remote and the presenter view with the logo: not checked.
+
+**Known gaps.**
+- **Filmstrip clipping (pre-existing, not changed).** The filmstrip (`w-48 overflow-y-auto` in `components/editor/Filmstrip.tsx`) gets a vertical scrollbar once a deck has more than about six slides, and the thumbnails' right edge is then cut. It shows in `wizard-result.png` (seven slides). Nothing in M9 changed the filmstrip's layout. Fixing it is a separate change.
+- **Storage orphans from the test runs.** The M9 test users' rows were deleted from the dev database, but the logo and image files they wrote under `data/` were not removed, so there may be orphan files there.
+- **Dev-DB cleanup.** The check deletes its own kit and templates. Its decks (`M9 quarterly <stamp>` and the wizard deck) stay, with unique names.
+- The thumbnail for a template saved just now may still show a placeholder until the gallery is reopened. The gallery reads the list on open.
+- Viewer and commenter read-only checks for the brand section are code-only (see unverified).
+- The PPTX table header colour was checked by unit tests of the colour rule, not in PowerPoint or LibreOffice.
+- The worker's thumbnail integration test returns early (passes without asserting) when Chrome cannot start, and prints a message when that happens.

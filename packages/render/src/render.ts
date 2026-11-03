@@ -9,6 +9,7 @@ import {
   assertInlineSafe,
   escapeHtml,
   num,
+  safeBundleAssetPath,
   safeClass,
   safeColor,
   safeCssUrl,
@@ -87,10 +88,12 @@ const LOGO_POSITION: Record<string, (margin: string) => string> = {
 export function logoOverlayHtml(slide: Slide, deck: Deck): string {
   if (!logoAppliesToSlide(slide, deck)) return ''
   const logo = deck.brand!.logo!
-  // Same rule as the model's LogoSrcSchema: an asset URL or a raster data URL, never a remote one.
+  // Same rule as the model's LogoSrcSchema: an asset URL or a raster data URL, never a remote one. An export bundle
+  // rewrites the asset URL to its file in the bundle (assets/<id>.<ext>), which is accepted too, as for element images.
   const isAsset = logo.src.startsWith('/api/assets/')
   const isRaster = /^data:image\/(png|jpeg|webp|gif);base64,/.test(logo.src)
-  const src = isAsset || isRaster ? safeImageSrc(logo.src) : undefined
+  const isBundled = safeBundleAssetPath(logo.src) !== undefined
+  const src = isAsset || isRaster || isBundled ? safeImageSrc(logo.src) : undefined
   if (!src) return ''
   const position = LOGO_POSITION[logo.placement.corner]
   if (!position) return ''

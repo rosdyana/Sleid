@@ -55,6 +55,8 @@ export function BrandKitForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const logoUrl = useObjectUrl(logoFile)
+  /** The logo saved on the kit, read through the kit's logo route. Null when there is none or it is being removed. */
+  const savedLogoSrc = kit?.hasLogo && !removeSaved ? `/api/brand-kits/${encodeURIComponent(kit.id)}/logo` : null
 
   const fontOptions = [...new Set([...FONT_FAMILIES, heading, body])]
   const knownDefault = defaultTemplateId === '' || templates.some((t) => t.id === defaultTemplateId)
@@ -162,6 +164,7 @@ export function BrandKitForm({
           <LogoField
             file={logoFile}
             hasSavedLogo={kit?.hasLogo ?? false}
+            savedSrc={savedLogoSrc}
             removeSaved={removeSaved}
             onFile={setLogoFile}
             onRemoveSaved={setRemoveSaved}
@@ -214,7 +217,7 @@ export function BrandKitForm({
             </label>
           </div>
         </div>
-        <PlacementPreview placement={placement} logoSrc={logoUrl} />
+        <PlacementPreview placement={placement} logoSrc={logoUrl ?? savedLogoSrc} />
       </fieldset>
 
       <label className="block">

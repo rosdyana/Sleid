@@ -43,6 +43,14 @@ describe('brand logo overlay', () => {
     expect(html).toContain(`src="${ASSET}"`)
   })
 
+  it('is drawn from its file in an export bundle (the asset URL rewritten to assets/<id>.<ext>), and a path that escapes it is refused', () => {
+    const bundled = 'assets/0f9f9d8e-1111-4222-8333-444455556666.png'
+    const deck = branded('all', bundled)
+    expect(logoOverlayHtml(deck.slides[1]!, deck)).toContain(`src="${bundled}"`)
+    const escaping = branded('all', 'assets/../secret.png')
+    expect(logoOverlayHtml(escaping.slides[1]!, escaping)).toBe('')
+  })
+
   it('accepts a raster data URL and refuses a remote or SVG data URL', () => {
     expect(logoOverlayHtml(branded('all', PNG).slides[1]!, branded('all', PNG))).toContain('data:image/png')
     const remote = branded('all', 'https://evil.example/logo.png')

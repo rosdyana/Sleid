@@ -188,7 +188,7 @@ function Dashboard() {
               Template gallery
             </button>
           </div>
-          <div className="mt-3 flex gap-3 overflow-x-auto pb-2" data-testid="start-row">
+          <div className="mt-3 flex flex-wrap gap-3" data-testid="start-row">
             <button
               type="button"
               data-testid="start-blank"
