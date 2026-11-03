@@ -17,6 +17,8 @@ export interface CreateImportedDeckInput {
   deck: Deck
   /** Stores one image's bytes under its asset id. Called before the rows are written. */
   storeAsset: (id: string, bytes: Uint8Array, mime: string) => Promise<void>
+  /** Removes one stored image again. Used when the deck cannot be created, so no file is left without a row. */
+  deleteAsset: (id: string) => Promise<void>
 }
 
 export interface CreatedImportedDeck {
@@ -63,18 +65,31 @@ async function moveImages(deck: Deck, deckId: string, userId: string, storeAsset
   return { slides, rows, dropped }
 }
 
-/** Creates the deck. Images are stored first; the rows and the snapshot are written in one transaction. */
+/**
+ * Creates the deck. Images are stored first; the rows and the snapshot are written in one transaction.
+ * If anything fails, every image stored so far is deleted again, so no file is left without a row.
+ */
 export async function createImportedDeck(db: Db, input: CreateImportedDeckInput): Promise<CreatedImportedDeck> {
   const deckId = randomUUID()
   const title = input.deck.title.slice(0, 200) || 'Imported deck'
-  const moved = await moveImages(input.deck, deckId, input.userId, input.storeAsset)
-  const deck: Deck = { ...input.deck, id: deckId, title, slides: moved.slides as Deck['slides'] }
-  const state = Y.encodeStateAsUpdate(deckToYDoc(deck))
-  await db.transaction(async (tx) => {
-    await tx.insert(decks).values({ id: deckId, ownerId: input.userId, title })
-    await tx.insert(deckMembers).values({ deckId, userId: input.userId, role: 'owner', via: 'owner' })
-    for (const row of moved.rows) await insertAsset(tx as unknown as Db, row)
-    await tx.insert(deckSnapshots).values({ deckId, ydoc: Buffer.from(state), createdBy: input.userId })
-  })
-  return { id: deckId, droppedImages: moved.dropped }
+  const stored: string[] = []
+  const storeTracked: CreateImportedDeckInput['storeAsset'] = async (id, bytes, mime) => {
+    await input.storeAsset(id, bytes, mime)
+    stored.push(id)
+  }
+  try {
+    const moved = await moveImages(input.deck, deckId, input.userId, storeTracked)
+    const deck: Deck = { ...input.deck, id: deckId, title, slides: moved.slides as Deck['slides'] }
+    const state = Y.encodeStateAsUpdate(deckToYDoc(deck))
+    await db.transaction(async (tx) => {
+      await tx.insert(decks).values({ id: deckId, ownerId: input.userId, title })
+      await tx.insert(deckMembers).values({ deckId, userId: input.userId, role: 'owner', via: 'owner' })
+      for (const row of moved.rows) await insertAsset(tx as unknown as Db, row)
+      await tx.insert(deckSnapshots).values({ deckId, ydoc: Buffer.from(state), createdBy: input.userId })
+    })
+    return { id: deckId, droppedImages: moved.dropped }
+  } catch (err) {
+    for (const id of stored) await input.deleteAsset(id).catch(() => undefined)
+    throw err
+  }
 }

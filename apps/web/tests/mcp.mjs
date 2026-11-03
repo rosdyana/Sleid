@@ -160,6 +160,17 @@ try {
   writeFileSync(join(shotDir, 'mcp-render.png'), png)
   log('mcp-render.png saved')
 
+  // ---- import_deck: a small markdown deck, made by the worker. Three "---" sections must give three slides.
+  const imported = await call(mcp, 'import_deck', {
+    format: 'markdown',
+    title: `MCP import ${stamp}`,
+    text: '# Import one\n\nFirst slide\n\n---\n\n# Import two\n\n- alpha\n- beta\n\n---\n\n# Import three\n\nLast slide',
+  })
+  check(/^[0-9a-f-]{36}$/.test(imported.deckId) && imported.url.endsWith(`/d/${imported.deckId}`), 'import_deck returns the deck id and its URL')
+  const importedDeck = await call(mcp, 'get_deck', { deckId: imported.deckId, format: 'json' })
+  check(importedDeck.title === `MCP import ${stamp}`, 'the imported deck has the title given to import_deck')
+  check(importedDeck.slides.length === 3, `the imported deck has ${importedDeck.slides.length} slides (expected 3)`)
+
   for (const e of errors) console.log(`  captured: ${e.slice(0, 400)}`)
   check(errors.length === 0, `no page or console errors (${errors.length})`)
   console.log(`\nMCP live check passed (deck ${deckId}).`)

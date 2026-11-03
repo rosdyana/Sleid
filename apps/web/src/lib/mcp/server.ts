@@ -19,6 +19,8 @@ import {
   getDeckRole,
   getAssetWithDeck,
   getExportJob,
+  getImportJob,
+  type ImportJobRow,
   issueExportLink,
   listThreadViews,
   listVersions,
@@ -42,11 +44,15 @@ import { ToolError } from './errors.ts'
 import { buildSlide, builtInTheme, builtInThemeNames, findElement, outlineOf, pngSize, resolveSlide, textPatchFor } from './compile.ts'
 import type { McpDeps } from './deps.ts'
 import { createDeckFromPrompt, getRun as getWizardRunView, type WizardDeps } from '~/lib/wizard.server'
+import { ImportError, decodeBase64, startImport, type ImportDeps } from '~/lib/import.server'
 import { resolveProvider } from '~/lib/llm-settings.server'
 
 const NOT_FOUND = 'Deck not found.'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const RENDER_POLL_MS = 250
+/** How long import_deck waits for the worker before it returns and the import keeps running. */
+const IMPORT_WAIT_MS = 60_000
+const IMPORT_EXTENSIONS: Record<'pptx' | 'markdown' | 'json', string> = { pptx: 'pptx', markdown: 'md', json: 'json' }
 const ABILITIES = ['rewriteText', 'generateSlide', 'generateChart', 'generateDiagram', 'generateTheme', 'suggestEffects', 'speakerNotes', 'altText', 'explain'] as const
 const EXPORT_FORMAT_MAP: Record<'pdf' | 'pptx' | 'png' | 'html' | 'md' | 'json', ExportFormat> = {
   pdf: 'pdf',
@@ -180,6 +186,18 @@ async function waitForExport(deps: McpDeps, exportId: string, timeoutMs: number)
   }
 }
 
+/** Waits for a queued import to finish, up to `timeoutMs`. Returns the last row seen. */
+async function waitForImport(deps: McpDeps, importId: string, timeoutMs: number): Promise<ImportJobRow> {
+  const started = Date.now()
+  for (;;) {
+    const row = await getImportJob(deps.db, importId)
+    if (!row) throw new ToolError('The import disappeared before it finished.')
+    if (row.status === 'done' || row.status === 'failed') return row
+    if (Date.now() - started > timeoutMs) return row
+    await new Promise((resolve) => setTimeout(resolve, RENDER_POLL_MS))
+  }
+}
+
 /** Queues an export row for the worker. A failure marks the row failed, so the caller sees why. */
 async function enqueueExport(deps: McpDeps, exportId: string): Promise<void> {
   try {
@@ -276,6 +294,12 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
       resolveProvider: (userId, providerId) => resolveProvider({ db: deps.db, env: deps.env }, { id: userId, email: principal.userEmail }, providerId),
     }
   }
+  /** The importer's dependencies for this server. The queue is reached lazily, so a missing queue marks the import failed. */
+  const importDepsFor = (): ImportDeps => ({
+    db: deps.db,
+    storage: deps.assetStorage,
+    queue: { enqueueImport: async (payload) => (await deps.getQueue()).enqueueImport(payload) },
+  })
   const tool = <S extends z.ZodRawShape>(
     name: string,
     spec: { description: string; shape: S; scope?: TokenScope; readOnly?: boolean },
@@ -344,6 +368,46 @@ export function createSleidMcpServer(deps: McpDeps, principal: VerifiedToken): M
         }
       }
       return asText({ id, title: args.title.trim(), theme: theme?.name ?? null, url: `${deps.publicUrl}/d/${id}` })
+    },
+  )
+
+  tool(
+    'import_deck',
+    {
+      scope: 'decks:create',
+      description:
+        'Make a new deck you own from a file. format is pptx, markdown or json. For pptx send contentBase64 (the .pptx file, base64 encoded). For markdown or json send either the text in text, or the file in contentBase64; send exactly one of the two. Markdown slides are split on "---" lines, and the title comes from the front matter or the first slide. title overrides the title in the file. Returns deckId, url and warnings. It waits up to 60 seconds for the import; the limits are 50 MB for pptx and 5 MB for markdown or json, and 10 imports per user per hour.',
+      shape: {
+        format: z.enum(['pptx', 'markdown', 'json']),
+        contentBase64: z.string().min(1).max(70 * 1024 * 1024).optional().describe('The file, base64 encoded. Required for pptx.'),
+        text: z.string().min(1).max(5 * 1024 * 1024).optional().describe('The text of a markdown or json file.'),
+        title: z.string().min(1).max(200).optional().describe('Deck title. Defaults to the title in the file.'),
+      },
+    },
+    async (args, call) => {
+      if ((args.contentBase64 === undefined) === (args.text === undefined)) throw new ToolError('Send exactly one of contentBase64 or text.')
+      if (args.format === 'pptx' && args.contentBase64 === undefined) throw new ToolError('A pptx import needs contentBase64: the .pptx file, base64 encoded.')
+      let importId: string
+      try {
+        const bytes = args.contentBase64 !== undefined ? decodeBase64(args.contentBase64) : new TextEncoder().encode(args.text ?? '')
+        const started = await startImport(importDepsFor(), { id: principal.userId }, {
+          format: args.format,
+          fileName: `import.${IMPORT_EXTENSIONS[args.format]}`,
+          bytes,
+          ...(args.title ? { title: args.title } : {}),
+        })
+        importId = started.importId
+      } catch (err) {
+        if (err instanceof ImportError) throw new ToolError(err.message)
+        throw err
+      }
+      const row = await waitForImport(deps, importId, IMPORT_WAIT_MS)
+      if (row.status === 'failed') throw new ToolError(row.error ?? 'The import failed.')
+      if (row.status !== 'done' || !row.deckId) {
+        throw new ToolError(`The import is still running after 60 seconds (import ${importId}). It keeps running in the background, so look for the new deck with list_decks shortly.`)
+      }
+      call.deckId = row.deckId
+      return asText({ deckId: row.deckId, url: `${deps.publicUrl}/d/${row.deckId}`, warnings: row.warnings })
     },
   )
 

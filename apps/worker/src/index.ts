@@ -9,6 +9,7 @@ import { startExportService } from './service.ts'
 import { startWizardService } from './wizard/service.ts'
 import { startSnapshotRetention } from './retention.ts'
 import { createWizardCollab } from './wizard/collab.ts'
+import { startImportService } from './import/service.ts'
 import { createSearchProvider, researchFromEnv } from '@sleid/research'
 
 const config = loadWorkerConfig()
@@ -30,6 +31,17 @@ const service = await startExportService({
   logger: consoleLogger,
 })
 consoleLogger.info(`[worker] listening for export jobs (concurrency ${config.concurrency})`)
+
+// Import jobs: the uploaded file is converted into a new deck. The source upload lives in the asset root.
+const importService = await startImportService({
+  db,
+  queue,
+  uploads: assetStorageFromEnv(),
+  assets: assetStorageFromEnv(),
+  concurrency: config.concurrency,
+  logger: consoleLogger,
+})
+consoleLogger.info(`[worker] listening for import jobs (concurrency ${config.concurrency})`)
 
 // Wizard jobs need the collab service (slides land in the live deck). Without its secret they cannot run.
 const researchConfig = (() => {
@@ -61,6 +73,7 @@ async function shutdown() {
   stopping = true
   await retention.stop()
   await service.stop()
+  await importService.stop()
   await wizardService?.stop()
   await db.$client.end({ timeout: 2 })
   process.exit(0)

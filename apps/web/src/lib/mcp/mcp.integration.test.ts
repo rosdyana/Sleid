@@ -31,6 +31,7 @@ import { createCollabServer, type CollabServer } from '../../../../collab/src/se
 import { createBrowserPool, type BrowserPool } from '../../../../worker/src/browser.ts'
 import { startExportService } from '../../../../worker/src/service.ts'
 import { startWizardService } from '../../../../worker/src/wizard/service.ts'
+import { startImportService } from '../../../../worker/src/import/service.ts'
 import { createWizardCollab } from '../../../../worker/src/wizard/collab.ts'
 import { createCollabInternalClient, type CollabInternalClient } from '~/lib/collab-client.server'
 import { handleExportDownload } from '~/lib/http-handlers.server'
@@ -161,8 +162,16 @@ beforeAll(async () => {
 
   // A test-only queue name and wizard prefix: a dev worker on the same database must not take this test's jobs.
   const suffix = randomUUID().slice(0, 8)
-  queue = createJobQueue(TEST_DATABASE_URL, { queueName: `export-deck-mcp-${suffix}`, prefix: `mcp-${suffix}-` })
+  queue = createJobQueue(TEST_DATABASE_URL, { queueName: `export-deck-mcp-${suffix}`, prefix: `mcp-${suffix}-`, importQueueName: `import-deck-mcp-${suffix}` })
   await queue.start()
+  await startImportService({
+    db,
+    queue,
+    uploads: assetsStorage,
+    assets: assetsStorage,
+    concurrency: 2,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  })
   browser = createBrowserPool(BROWSER_OK ? CHROME : undefined)
   const service = await startExportService({
     db,
@@ -226,6 +235,7 @@ describe('MCP over Streamable HTTP', () => {
         'generate_with_ai',
         'get_deck',
         'get_wizard_status',
+        'import_deck',
         'insert_chart',
         'insert_diagram',
         'insert_image',
@@ -506,6 +516,51 @@ describe('MCP over Streamable HTTP', () => {
     expect(row).toMatchObject({ ok: false, deckId, userId: owner.id })
     expect(row!.error).toContain('decks:write')
     expect(row!.ms).toBeGreaterThanOrEqual(0)
+    await mcp.close()
+  }, 60_000)
+
+  it('import_deck makes a deck from markdown text through the worker, and refuses bad input before queuing it', async () => {
+    if (!db) return
+    const owner = await person('mcp-import')
+    const mcp = await client(await tokenFor(owner.id, ['decks:create', 'decks:read']))
+
+    const md = '# Imported\n\nFirst slide\n\n---\n\n# Second\n\n- one\n- two\n\n---\n\n# Third\n\nLast'
+    const made = jsonOf(await tool(mcp, 'import_deck', { format: 'markdown', text: md, title: 'MCP import' }))
+    expect(made.deckId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(made.url).toContain(`/d/${made.deckId}`)
+    expect(made.warnings).toEqual([])
+    const read = jsonOf(await tool(mcp, 'get_deck', { deckId: made.deckId, format: 'json' }))
+    expect(read.title).toBe('MCP import')
+    expect((read.slides as unknown[]).length).toBe(3)
+
+    // Exactly one of contentBase64 or text.
+    const both = await tool(mcp, 'import_deck', { format: 'markdown', text: '# a', contentBase64: 'IyBh' })
+    expect(both.isError).toBe(true)
+    expect(textOf(both)).toMatch(/exactly one of contentBase64 or text/)
+    const neither = await tool(mcp, 'import_deck', { format: 'json' })
+    expect(neither.isError).toBe(true)
+    // A pptx needs the file itself.
+    const pptxText = await tool(mcp, 'import_deck', { format: 'pptx', text: 'PK' })
+    expect(pptxText.isError).toBe(true)
+    expect(textOf(pptxText)).toMatch(/needs contentBase64/)
+    // Content checks: a NUL byte is not text, and nothing is queued for it.
+    const nul = await tool(mcp, 'import_deck', { format: 'markdown', text: '# a\u0000b' })
+    expect(nul.isError).toBe(true)
+    expect(textOf(nul)).toMatch(/NUL bytes/)
+    // A broken base64 string is refused.
+    const badBase64 = await tool(mcp, 'import_deck', { format: 'markdown', contentBase64: 'not base64!' })
+    expect(badBase64.isError).toBe(true)
+    expect(textOf(badBase64)).toMatch(/not valid base64/)
+    await mcp.close()
+  }, 120_000)
+
+  it('import_deck needs the decks:create scope', async () => {
+    if (!db) return
+    const owner = await person('mcp-import-scope')
+    const mcp = await client(await tokenFor(owner.id, ['decks:read', 'decks:write']))
+    const denied = await tool(mcp, 'import_deck', { format: 'markdown', text: '# Nope' })
+    expect(denied.isError).toBe(true)
+    expect(textOf(denied)).toMatch(/decks:create/)
     await mcp.close()
   }, 60_000)
 })

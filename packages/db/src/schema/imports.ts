@@ -20,6 +20,8 @@ export const importJobs = pgTable(
     format: importFormat('format').notNull(),
     status: importStatus('status').notNull().default('queued'),
     fileName: text('file_name'),
+    /** Deck title given by the caller (MCP). Null means the title comes from the file. */
+    title: text('title'),
     bytes: integer('bytes'),
     /** Storage key of the uploaded file. Null for Google Slides. */
     sourceKey: text('source_key'),
