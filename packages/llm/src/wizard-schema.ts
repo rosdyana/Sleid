@@ -7,8 +7,14 @@ export const WIZARD_GOALS = ['inform', 'persuade', 'teach', 'report', 'pitch'] a
 export const VISUALS = ['none', 'chart', 'diagram', 'image-placeholder'] as const
 /** Layouts a wizard slide may use. Image layouts need a picture, which the wizard does not supply. */
 export const WIZARD_LAYOUTS = ['title', 'title-content', 'two-column', 'section', 'quote', 'blank'] as const
+export type WizardLayout = (typeof WIZARD_LAYOUTS)[number]
 
-export const THEME_CHOICES = [...BUILT_IN_THEMES.map((t) => t.name), 'AI from brand colours'] as const
+/** The theme choice that asks the model for colours. It cannot be combined with a brand kit (the kit's palette is the rule). */
+export const AI_THEME = 'AI from brand colours'
+export const THEME_CHOICES = [...BUILT_IN_THEMES.map((t) => t.name), AI_THEME] as const
+
+/** A template a run starts from: a user template's id, or a built-in one's `builtin:<key>`. */
+export const WizardTemplateRef = z.union([z.uuid(), z.string().regex(/^builtin:[a-z0-9-]+$/)])
 
 export const WizardBrief = z.object({
   prompt: z.string().trim().min(1, 'Describe the deck').max(4000),
@@ -24,6 +30,10 @@ export const WizardBrief = z.object({
   includeCharts: z.boolean().default(true),
   includeSources: z.boolean().default(true),
   research: z.boolean().default(false),
+  /** A template to start from (its theme, and its layouts as the preferred layouts of the outline). Visibility is checked at run creation. */
+  templateId: WizardTemplateRef.optional(),
+  /** A brand kit to apply (its theme, its logo, and the constraint on the model's colours). Visibility is checked at run creation. */
+  brandKitId: z.uuid().optional(),
 })
 export type WizardBrief = z.infer<typeof WizardBrief>
 
@@ -80,4 +90,13 @@ export function addSlideAfter(outline: Outline, index: number): Outline {
 
 export function setKeyPointsAt(outline: Outline, index: number, keyPoints: string[]): Outline {
   return { ...outline, slides: outline.slides.map((s, i) => (i === index ? { ...s, keyPoints } : s)) }
+}
+
+/** The wizard layouts a deck's slides use, in first-use order, without duplicates. Used as a template's preferred layouts. */
+export function wizardLayoutsOf(layouts: readonly string[]): WizardLayout[] {
+  const out: WizardLayout[] = []
+  for (const layout of layouts) {
+    if ((WIZARD_LAYOUTS as readonly string[]).includes(layout) && !out.includes(layout as WizardLayout)) out.push(layout as WizardLayout)
+  }
+  return out
 }

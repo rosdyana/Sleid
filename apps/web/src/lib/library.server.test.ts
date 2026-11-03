@@ -9,10 +9,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { and, eq, sql } from 'drizzle-orm'
 import * as Y from 'yjs'
 import { applyOps, createDeck, deckToYDoc, yDocToDeck, type Deck } from '@sleid/model'
-import { assets, decks, deckMembers, grantMembership, templates, type Db } from '@sleid/db'
+import { assets, decks, deckMembers, grantMembership, setTemplateThumbnail, templateThumbnailKey, templates, type Db } from '@sleid/db'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createLocalStorage, type StorageDriver } from '@sleid/storage'
-import { deleteTemplate, getTemplateFor, listTemplatesFor, newDeckFromTemplate, saveTemplateFromDeck, updateTemplateMeta, LibraryError, type TemplateDeps } from './templates.server.ts'
+import { deleteTemplate, getTemplateFor, handleTemplateThumbnail, listTemplatesFor, newDeckFromTemplate, saveTemplateFromDeck, updateTemplateMeta, LibraryError, type TemplateDeps } from './templates.server.ts'
 import {
   applyBrandKit,
   createBrandKit,
@@ -327,3 +327,48 @@ function deck0LogoAsset(): string {
   const src = yDocToDeck(docs.get(deckId)!).brand?.logo?.src ?? ''
   return src.split('/').pop() ?? ''
 }
+
+// M9: saving a template queues its thumbnail; the thumbnail route applies the template's visibility.
+describe('template thumbnails (M9)', () => {
+  it('saving a template queues its thumbnail job with the new template id', async () => {
+    if (skipIfNoDb()) return
+    const queued: string[] = []
+    const d = { ...deps(), enqueueThumbnail: async (id: string) => void queued.push(id) }
+    const saved = await saveTemplateFromDeck(d, owner, { deckId, name: 'Thumb queued', description: '', category: 'general', visibility: 'private' })
+    expect(queued).toEqual([saved.id])
+    await deleteTemplate(deps(), owner, saved.id)
+  })
+
+  it('the thumbnail route: 401 without a session, 404 for someone else\'s private template, the PNG to those who can read it', async () => {
+    if (skipIfNoDb()) return
+    const saved = await saveTemplateFromDeck(deps(), owner, { deckId, name: 'Thumb route', description: '', category: 'general', visibility: 'private' })
+    const route = (userId: string | null, id = saved.id) => handleTemplateThumbnail(id, { db: db!, storage, userId })
+    expect((await route(null)).status).toBe(401)
+    expect((await route(owner)).status).toBe(404) // not rendered yet
+    expect((await route(outsider)).status).toBe(404)
+
+    const key = templateThumbnailKey(saved.id)
+    await storage.put(key, PNG)
+    await setTemplateThumbnail(db!, saved.id, key)
+    const ok = await route(owner)
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('content-type')).toBe('image/png')
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(PNG)
+    expect((await route(outsider)).status).toBe(404)
+    expect((await route(viewer)).status).toBe(404)
+
+    // Once it is instance-visible, everyone signed in can see the thumbnail.
+    await deps().db.update(templates).set({ visibility: 'instance' }).where(eq(templates.id, saved.id))
+    expect((await route(outsider)).status).toBe(200)
+    await deleteTemplate(deps(), owner, saved.id)
+  })
+
+  it('a built-in thumbnail is served to a signed-in user once it is in storage, and never without a session', async () => {
+    if (skipIfNoDb()) return
+    const route = (userId: string | null) => handleTemplateThumbnail('builtin:pitch', { db: db!, storage, userId })
+    expect((await route(outsider)).status).toBe(404)
+    await storage.put(templateThumbnailKey('builtin:pitch'), PNG)
+    expect((await route(outsider)).status).toBe(200)
+    expect((await route(null)).status).toBe(401)
+  })
+})

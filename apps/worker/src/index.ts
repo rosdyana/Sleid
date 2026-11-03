@@ -6,6 +6,7 @@ import { loadWorkerConfig } from './config.ts'
 import { createBrowserPool } from './browser.ts'
 import { consoleLogger } from './logger.ts'
 import { startExportService } from './service.ts'
+import { renderMissingBuiltInThumbnails } from './thumbnail.ts'
 import { startWizardService } from './wizard/service.ts'
 import { startSnapshotRetention } from './retention.ts'
 import { createWizardCollab } from './wizard/collab.ts'
@@ -31,6 +32,11 @@ const service = await startExportService({
   logger: consoleLogger,
 })
 consoleLogger.info(`[worker] listening for export jobs (concurrency ${config.concurrency})`)
+
+// Built-in template thumbnails (M9): the ones missing from storage are rendered in the background at start-up.
+renderMissingBuiltInThumbnails({ db, assets: assetStorageFromEnv(), browser, logger: consoleLogger, tmpRoot: config.tmpRoot })
+  .then((made) => made && consoleLogger.info(`[worker] rendered ${made} built-in template thumbnail(s)`))
+  .catch((err: unknown) => consoleLogger.error('[worker] built-in template thumbnails failed', err))
 
 // Import jobs: the uploaded file is converted into a new deck. The source upload lives in the asset root.
 const importService = await startImportService({

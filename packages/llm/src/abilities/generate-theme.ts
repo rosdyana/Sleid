@@ -2,7 +2,7 @@
 // the contrast rules are then enforced in code (text and muted text 4.5:1, accents 3:1 against the
 // background), and every adjustment is reported to the user.
 import { z } from 'zod'
-import { enforceThemeContrast } from '../contrast.ts'
+import { enforceThemeContrast } from '@sleid/model'
 import { LlmError } from '../errors.ts'
 import { structured } from '../structured.ts'
 import { allowlist, checkOps } from '../ops-check.ts'

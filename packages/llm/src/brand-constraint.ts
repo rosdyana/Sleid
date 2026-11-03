@@ -7,7 +7,7 @@
 // and each change is listed as a warning. The prompt also states the palette and fonts (see context.ts).
 //
 // The constraint reads deck.brand.palette and deck.brand.fonts, which are frozen when the kit is applied.
-import type { Deck, Op } from '@sleid/model'
+import type { BrandRef, Deck, Op, Theme } from '@sleid/model'
 
 export interface BrandConstraint {
   /** Palette colours as lower-case #rrggbb, in the kit's order, without duplicates. */
@@ -81,7 +81,14 @@ export function fontFamilies(stack: string): string {
 
 /** The constraint for a deck, or null when the deck has no brand kit (or no palette recorded). */
 export function brandConstraintFor(deck: Deck): BrandConstraint | null {
-  const brand = deck.brand
+  return brandConstraintFromRef(deck.brand, deck.theme)
+}
+
+/**
+ * The constraint for a brand reference and the theme it applies to. Used before a kit is on the deck (the wizard
+ * builds it from the kit it is about to apply). The fonts fall back to the theme's when the reference has none.
+ */
+export function brandConstraintFromRef(brand: BrandRef | undefined, theme: Pick<Theme, 'fonts'>): BrandConstraint | null {
   if (!brand?.palette) return null
   const seen = new Set<string>()
   const palette: string[] = []
@@ -97,8 +104,8 @@ export function brandConstraintFor(deck: Deck): BrandConstraint | null {
   if (palette.length === 0) return null
   return {
     palette,
-    headingFont: brand.fonts?.heading ?? deck.theme.fonts.heading,
-    bodyFont: brand.fonts?.body ?? deck.theme.fonts.body,
+    headingFont: brand.fonts?.heading ?? theme.fonts.heading,
+    bodyFont: brand.fonts?.body ?? theme.fonts.body,
   }
 }
 

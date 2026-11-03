@@ -319,3 +319,28 @@ describe('renderDeckHtml', () => {
     expect(html).toContain('<title>&lt;img src=x onerror=alert(1)&gt;</title>')
   })
 })
+
+// M9: a table header's text is readable on its fill, and mermaid is themed from the deck.
+describe('table headers and diagram theme (M9)', () => {
+  const tableOn = (headerFill: string) =>
+    slideWith([{ ...base, id: 't', type: 'table', x: 0, y: 0, w: 400, h: 200, rows: [['Quarter', 'Revenue'], ['Q1', '10']], header: true, style: { headerFill } } as unknown as Element])
+
+  it('a dark header fill gets a light header text, and a light fill keeps a dark one', () => {
+    const dark = renderSlideHtml(tableOn('#1a73e8'), deckWith([]))
+    expect(dark).toMatch(/<th style="background:#1a73e8;\s?color:#ffffff">/)
+    const light = renderSlideHtml(tableOn('#eeeeee'), deckWith([]))
+    const headerColour = /<th style="background:#eeeeee;\s?color:(#[0-9a-f]{6})">/i.exec(light)?.[1]
+    expect(headerColour).toBeDefined()
+    expect(headerColour).not.toBe('#ffffff')
+  })
+
+  it('mermaid is initialised with the deck theme (base theme, the deck colours and font), so dark decks get light diagrams', () => {
+    const deck = deckWith([slideWith([{ ...base, id: 'd', type: 'diagram', x: 0, y: 0, w: 10, h: 10, source: 'graph TD; A-->B' }])])
+    const dark = { ...deck, theme: { ...deck.theme, colors: { ...deck.theme.colors, background: '#0b1020', surface: '#151c33', text: '#f5f5f5', muted: '#9aa4c7', accent: '#3d5afe' } } }
+    const html = renderStandaloneDeckHtml(dark)
+    expect(html).toContain('"theme":"base"')
+    expect(html).toContain('"mainBkg":"#151c33"')
+    expect(html).toContain('"textColor":"#f5f5f5"')
+    expect(html).not.toContain("mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' })")
+  })
+})

@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type 
 import * as echarts from 'echarts'
 import { logoAppliesToBrand, type BrandLogo, type BrandRef, type ChartElement, type Element, type RichNode, type RichText, type Slide, type Theme } from '@sleid/model'
 import { chartToEchartsOption } from '@sleid/render'
+import { mermaidConfigFor, readableTextOn } from '@sleid/model'
 import { CANVAS_H, CANVAS_W } from './commands.ts'
 
 export function safeImageSrc(src: string): string | undefined {
@@ -133,7 +134,7 @@ export function ElementBody({ el, theme, scale }: { el: Element; theme: Theme; s
     case 'chart':
       return <ChartView key={scale < 0.5 ? 'lo' : 'hi'} el={el} theme={theme} scale={scale} />
     case 'diagram':
-      return <DiagramView source={el.source} />
+      return <DiagramView source={el.source} theme={theme} />
     case 'table':
       return (
         <table className="h-full w-full border-collapse" style={{ fontSize: theme.sizes.small * scale, color: theme.colors.text }}>
@@ -143,8 +144,10 @@ export function ElementBody({ el, theme, scale }: { el: Element; theme: Theme; s
                 {row.map((cell, c) => {
                   const isHeader = el.header && r === 0
                   const Tag = isHeader ? 'th' : 'td'
+                  // Same header fill and text rule as the HTML render and the PowerPoint export.
+                  const fill = isHeader ? (typeof el.style?.headerFill === 'string' ? el.style.headerFill : theme.colors.surface) : undefined
                   return (
-                    <Tag key={c} className="border border-[#c4c7c5] px-2 text-left" style={{ background: isHeader ? theme.colors.surface : undefined, fontWeight: isHeader ? 600 : 400 }}>
+                    <Tag key={c} className="border border-[#c4c7c5] px-2 text-left" style={{ background: fill, color: fill ? readableTextOn(fill, theme.colors.text) : undefined, fontWeight: isHeader ? 600 : 400 }}>
                       {cell}
                     </Tag>
                   )
@@ -301,7 +304,7 @@ function ChartView({ el, theme, scale }: { el: ChartElement; theme: Theme; scale
   )
 }
 
-function DiagramView({ source }: { source: string }) {
+function DiagramView({ source, theme }: { source: string; theme: Theme }) {
   const [svg, setSvg] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -311,7 +314,7 @@ function DiagramView({ source }: { source: string }) {
     void (async () => {
       try {
         const mermaid = (await import('mermaid')).default
-        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' })
+        mermaid.initialize(mermaidConfigFor(theme))
         const out = await mermaid.render(id, source)
         if (!cancelled) {
           setSvg(out.svg)
@@ -324,7 +327,7 @@ function DiagramView({ source }: { source: string }) {
     return () => {
       cancelled = true
     }
-  }, [source])
+  }, [source, theme])
 
   if (error) return <div className="h-full w-full overflow-auto bg-red-50 p-2 text-[11px] text-red-800">{error}</div>
   return <div className="h-full w-full [&>svg]:h-full [&>svg]:w-full" dangerouslySetInnerHTML={{ __html: svg }} />

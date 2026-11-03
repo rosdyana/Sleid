@@ -2,6 +2,7 @@
 // Node-only parts (reading reveal.js files for standalone output) live in render-node.ts.
 import { logoAppliesToSlide, type Deck, type Element, type Slide, type Theme, type TextElement, type ShapeElement, type ImageElement, type TableElement, type CodeElement, type EmbedElement, type DiagramElement } from '@sleid/model'
 import { richTextToHtml } from './rich-text.ts'
+import { mermaidConfigFor, readableTextOn } from '@sleid/model'
 import { renderChartSvg } from './chart.ts'
 import { BASE_CSS, themeCssVariables } from './styles.ts'
 import {
@@ -136,7 +137,7 @@ export function renderElement(el: Element, theme: Theme, fragments = true): stri
     case 'diagram':
       return frame(el, renderDiagram(el), 'sleid-diagram-el', fragments)
     case 'table':
-      return frame(el, renderTable(el), 'sleid-table-el', fragments)
+      return frame(el, renderTable(el, theme), 'sleid-table-el', fragments)
     case 'code':
       return frame(el, renderCode(el), 'sleid-code-el', fragments)
     case 'embed':
@@ -233,7 +234,7 @@ function renderDiagram(el: DiagramElement): string {
   return `<pre class="mermaid sleid-diagram">${escapeHtml(el.source)}</pre>`
 }
 
-function renderTable(el: TableElement): string {
+function renderTable(el: TableElement, theme: Theme): string {
   const headerFill = typeof el.style?.headerFill === 'string' ? safeColor(el.style.headerFill, '') : ''
   const borderColor = typeof el.style?.borderColor === 'string' ? safeColor(el.style.borderColor, '') : ''
   const tableStyle = [
@@ -245,7 +246,8 @@ function renderTable(el: TableElement): string {
   const rows = el.rows.map((row, rowIndex) => {
     const isHeader = el.header && rowIndex === 0
     const cellTag = isHeader ? 'th' : 'td'
-    const cellStyle = isHeader && headerFill ? ` style="background:${escapeHtml(headerFill)}"` : ''
+    // The header text is picked to read on the header fill (a dark text on a strong fill is not readable).
+    const cellStyle = isHeader && headerFill ? ` style="background:${escapeHtml(headerFill)}; color:${readableTextOn(headerFill, theme.colors.text)}"` : ''
     return `<tr>${row.map((cell) => `<${cellTag}${cellStyle}>${escapeHtml(cell)}</${cellTag}>`).join('')}</tr>`
   })
   return `<table class="sleid-table"${tableStyle ? ` style="${escapeHtml(tableStyle)}"` : ''}>${rows.join('')}</table>`
@@ -302,8 +304,10 @@ export const DEFAULT_MERMAID_SCRIPT: MermaidScript = { src: MERMAID_MODULE_URL, 
 /** Set on <html> when diagrams have been drawn (`done`) or failed (`error`). Exporters wait for it. */
 export const DIAGRAMS_STATE_ATTR = 'data-sleid-diagrams'
 
-function mermaidScriptTags(script: MermaidScript): string[] {
+function mermaidScriptTags(script: MermaidScript, config: Record<string, unknown>): string[] {
   const src = JSON.stringify(script.src).replace(/</g, '\\u003c')
+  // The deck theme for diagrams (mermaid-theme.ts). The JSON is escaped so no value can close the script element.
+  const configJson = JSON.stringify(config).replace(/</g, '\\u003c')
   // mermaid.render lays each diagram out in a scratch node on <body>, outside reveal's scaled
   // slide stage. Running in place (mermaid.run) measured labels inside the transformed, possibly
   // hidden slide and produced ~2px-tall, blank labels.
@@ -316,7 +320,7 @@ function mermaidScriptTags(script: MermaidScript): string[] {
     box.textContent = 'Diagram could not be drawn';
     return box;
   }`
-  const run = `mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+  const run = `mermaid.initialize(${configJson});
     const nodes = [...document.querySelectorAll('.mermaid')];
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
@@ -400,7 +404,7 @@ export function renderDeckHtml(deck: Deck, options: RenderDeckOptions): string {
   scripts.push(`<script>\n  Reveal.initialize({ width: 1920, height: 1080, margin: 0, hash: true, plugins: [RevealNotes]${printOptions}${notesOption} });\n</script>`)
 
   if (hasDiagrams && (mode === 'standalone' || mode === 'print' || options.mermaid)) {
-    scripts.push(...mermaidScriptTags(options.mermaid ?? DEFAULT_MERMAID_SCRIPT))
+    scripts.push(...mermaidScriptTags(options.mermaid ?? DEFAULT_MERMAID_SCRIPT, mermaidConfigFor(deck.theme)))
   }
 
   return [

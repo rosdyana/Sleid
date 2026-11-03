@@ -8,8 +8,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import { applyOps, createDeck, deckToYDoc, yDocToDeck, type Deck, type Op } from '@sleid/model'
-import { getWizardRun, insertWizardRun, insertWizardSource, listWizardSources, updateWizardRun, getWizardSource, type Db } from '@sleid/db'
+import { applyOps, builtInTemplateDeck, createDeck, deckToYDoc, yDocToDeck, type Deck, type Op } from '@sleid/model'
+import { assets, getWizardRun, insertBrandKitRow, insertWizardRun, insertWizardSource, listWizardSources, setBrandKitLogo, updateWizardRun, getWizardSource, type Db } from '@sleid/db'
+import { createHash, randomUUID } from 'node:crypto'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
 import { createLocalStorage, type StorageDriver } from '@sleid/storage'
 import { fetchPublicUrl } from '@sleid/ingest'
@@ -424,6 +425,150 @@ describe.skipIf(!db)('wizard jobs (real Postgres)', () => {
     await runGenerate(envFor(provider, fake.collab), run.id)
     expect(provider.requests).toHaveLength(0)
     expect((await getWizardRun(database, run.id))!.status).toBe('failed')
+    expect(yDocToDeck(fake.doc).slides.map((s) => s.id)).toEqual(fake.initialSlideIds)
+  }, 60_000)
+})
+
+// M9: a run that starts from a template, and a run that applies a brand kit (theme, logo copy, colour constraint).
+describe.skipIf(!db)('wizard jobs with a template or a brand kit (real Postgres)', () => {
+  const database = db!
+  let uploadsDir = ''
+  let uploads: StorageDriver
+  const users: string[] = []
+  const PNG_1X1 = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'))
+  const KIT_PALETTE = {
+    background: '#ffffff',
+    surface: '#f0f4ff',
+    text: '#102030',
+    muted: '#556677',
+    accent: '#0055cc',
+    accent2: '#00aa66',
+    accent3: '#dd7700',
+    accent4: '#8844aa',
+  }
+
+  beforeAll(() => {
+    uploadsDir = mkdtempSync(join(tmpdir(), 'sleid-wizard-kit-test-'))
+    uploads = createLocalStorage(uploadsDir)
+  })
+
+  afterAll(async () => {
+    await removeUsers(database, users)
+    rmSync(uploadsDir, { recursive: true, force: true })
+  })
+
+  async function setup(label: string) {
+    const user = await makeUser(database, label)
+    users.push(user.id)
+    const deckId = await makeDeck(database, user.id, 'Template test')
+    return { user, deckId }
+  }
+
+  function envFor(provider: ReturnType<typeof scriptedProvider>, collab: WizardCollab): WizardEnv {
+    return {
+      db: database,
+      uploads,
+      collab,
+      search: null,
+      enqueueIngest: async () => {},
+      resolveProvider: async () => ({ provider, compact: false, secrets: [], providerId: null }),
+      logger: silent,
+    }
+  }
+
+  function twoSlideOutline(title: string) {
+    return Outline.parse({
+      title,
+      slides: [
+        { title: 'Cover', layout: 'title', keyPoints: [], visual: 'none', sourceIds: [] },
+        { title: 'Point', layout: 'title-content', keyPoints: ['One'], visual: 'none', sourceIds: [] },
+      ],
+    })
+  }
+
+  it('a template run takes the template theme and writes the outline slides', async () => {
+    const { user, deckId } = await setup('wizard-template-run')
+    const brief = WizardBrief.parse({ prompt: 'Pitch', slideCount: 3, templateId: 'builtin:pitch', theme: 'Sheets Light' })
+    const run = await insertWizardRun(database, { userId: user.id, brief: brief as unknown as Record<string, unknown> })
+    const fake = fakeCollab('Template run')
+    const provider = scriptedProvider([
+      slideReply({ layout: 'title', title: 'Cover', bullets: [], notes: '' }),
+      slideReply({ layout: 'title-content', title: 'Point', bullets: ['One'], notes: '' }),
+    ])
+    await updateWizardRun(database, run.id, { status: 'ready', outline: twoSlideOutline('Template run') as unknown as Record<string, unknown>, total: 2, deckId })
+    await runGenerate(envFor(provider, fake.collab), run.id)
+    expect((await getWizardRun(database, run.id))!.status).toBe('done')
+    const deck = yDocToDeck(fake.doc)
+    expect(deck.theme).toEqual(builtInTemplateDeck('builtin:pitch')!.theme)
+    expect(deck.theme.name).not.toBe('Sheets Light')
+    expect(deck.brand).toBeUndefined()
+    expect(deck.slides).toHaveLength(2)
+  }, 120_000)
+
+  it('a brand kit run applies the kit before the first slide, copies its logo, and keeps every colour in the palette', async () => {
+    const { user, deckId } = await setup('wizard-kit-run')
+    const kitId = randomUUID()
+    await insertBrandKitRow(database, {
+      id: kitId,
+      ownerId: user.id,
+      name: 'Kit Co',
+      visibility: 'private',
+      tokens: { palette: KIT_PALETTE, fonts: { heading: 'Georgia, serif', body: 'Helvetica, sans-serif' } },
+      logoPlacement: { corner: 'tr', widthPct: 12, margin: 48, slides: 'all-but-title' },
+      defaultTemplateId: null,
+    })
+    const logoKey = `brand-logos/${kitId}-test.png`
+    await uploads.put(logoKey, PNG_1X1)
+    await setBrandKitLogo(database, user.id, kitId, { key: logoKey, mime: 'image/png', bytes: PNG_1X1.byteLength, sha256: createHash('sha256').update(PNG_1X1).digest('hex') })
+
+    const brief = WizardBrief.parse({ prompt: 'Kit deck', slideCount: 3, brandKitId: kitId })
+    const run = await insertWizardRun(database, { userId: user.id, brief: brief as unknown as Record<string, unknown> })
+    const fake = fakeCollab('Kit run')
+    const provider = scriptedProvider([
+      slideReply({ layout: 'title', title: 'Cover', bullets: [], notes: '' }),
+      slideReply({ layout: 'title-content', title: 'Point', bullets: ['One'], notes: '' }),
+    ])
+    await updateWizardRun(database, run.id, { status: 'ready', outline: twoSlideOutline('Kit run') as unknown as Record<string, unknown>, total: 2, deckId })
+    await runGenerate(envFor(provider, fake.collab), run.id)
+    expect((await getWizardRun(database, run.id))!.status).toBe('done')
+
+    const deck = yDocToDeck(fake.doc)
+    expect(deck.brand?.brandKitId).toBe(kitId)
+    expect(deck.theme.colors).toEqual(KIT_PALETTE)
+    expect(deck.theme.name).toBe('Kit Co')
+    // The first slide was written against the kit: the brand reference was on the deck before the first slide landed.
+    expect(provider.requests).toHaveLength(2)
+    expect(deck.slides).toHaveLength(2)
+
+    // The logo is a copy in the deck's own assets, and the file is in storage under the new id.
+    const src = deck.brand?.logo?.src ?? ''
+    const match = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(src)
+    expect(match).not.toBeNull()
+    const assetId = match![1]!
+    const row = (await database.select().from(assets)).find((a) => a.id === assetId)
+    expect(row?.deckId).toBe(deckId)
+    expect(row?.mime).toBe('image/png')
+    expect(Buffer.from((await uploads.get(assetId))!).equals(Buffer.from(PNG_1X1))).toBe(true)
+
+    // Every colour in the written deck is one of the kit's palette colours.
+    const palette = new Set(Object.values(KIT_PALETTE).map((c) => c.toLowerCase()))
+    const colours = JSON.stringify(deck).match(/#[0-9a-fA-F]{6}\b/g) ?? []
+    expect(colours.length).toBeGreaterThan(0)
+    for (const c of colours) expect(palette.has(c.toLowerCase())).toBe(true)
+  }, 120_000)
+
+  it('a run whose kit is no longer readable fails with a message and writes nothing', async () => {
+    const { user, deckId } = await setup('wizard-kit-gone')
+    const brief = WizardBrief.parse({ prompt: 'x', slideCount: 3, brandKitId: randomUUID() })
+    const run = await insertWizardRun(database, { userId: user.id, brief: brief as unknown as Record<string, unknown> })
+    const fake = fakeCollab('Kit gone')
+    const provider = scriptedProvider([])
+    await updateWizardRun(database, run.id, { status: 'ready', outline: twoSlideOutline('Kit gone') as unknown as Record<string, unknown>, total: 2, deckId })
+    await runGenerate(envFor(provider, fake.collab), run.id)
+    const after = await getWizardRun(database, run.id)
+    expect(after!.status).toBe('failed')
+    expect(after!.error).toContain('brand kit')
+    expect(provider.requests).toHaveLength(0)
     expect(yDocToDeck(fake.doc).slides.map((s) => s.id)).toEqual(fake.initialSlideIds)
   }, 60_000)
 })

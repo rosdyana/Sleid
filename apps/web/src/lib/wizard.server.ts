@@ -2,8 +2,8 @@
 // tests can call them. Server functions (wizard.functions.ts) and the upload route are thin wrappers.
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { LlmError, assertAllowedEndpoint, draftOutline, withKnownSources, Outline, WizardBrief, type WizardBrief as Brief, type Outline as OutlineT } from '@sleid/llm'
-import { decks, deckMembers, getWizardRunFor, insertWizardRun, insertWizardSource, listWizardSources, recordLlmUsage, updateWizardRun, updateWizardSource, wizardRuns, wizardSources, type Db, type WizardRunRow, type WizardSourceRow } from '@sleid/db'
+import { AI_THEME, LlmError, assertAllowedEndpoint, draftOutline, withKnownSources, wizardLayoutsOf, Outline, WizardBrief, type WizardBrief as Brief, type Outline as OutlineT } from '@sleid/llm'
+import { decks, deckMembers, getWizardRunFor, insertWizardRun, insertWizardSource, listWizardSources, readableBrandKit, readableTemplateDeck, recordLlmUsage, updateWizardRun, updateWizardSource, wizardRuns, wizardSources, type Db, type WizardRunRow, type WizardSourceRow } from '@sleid/db'
 import { detectFileKind, IngestError, LIMITS, baseName, testPrivateWizardUrls, type IngestedSource } from '@sleid/ingest'
 import { researchFromEnv } from '@sleid/research'
 import type { StorageDriver } from '@sleid/storage'
@@ -106,6 +106,13 @@ export async function createRun(deps: WizardDeps, user: WizardUser, rawBrief: un
   const brief = WizardBrief.parse(rawBrief)
   if (brief.research && !researchState(deps.env).available) {
     throw new WizardError('Research is not set up on this server. Set SEARXNG_URL, BRAVE_API_KEY or TAVILY_API_KEY (see the README).')
+  }
+  // A template or kit must be readable by the caller (built-in, theirs, or instance-visible). "Not yours" and "not there" look the same.
+  if (brief.templateId && !(await readableTemplateDeck(deps.db, user.id, brief.templateId))) throw new WizardError('That template was not found.', 404)
+  if (brief.brandKitId) {
+    if (!(await readableBrandKit(deps.db, user.id, brief.brandKitId))) throw new WizardError('That brand kit was not found.', 404)
+    // The kit's palette is the rule for colours, so the AI theme (which invents colours) is refused with a kit.
+    if (brief.theme === AI_THEME) throw new WizardError('The AI theme cannot be combined with a brand kit. Choose a built-in theme, or leave the theme as it is.')
   }
   const row = await insertWizardRun(deps.db, { userId: user.id, brief: brief as unknown as Record<string, unknown>, providerId: providerId ?? null })
   return runView(deps, row)
@@ -265,7 +272,10 @@ export async function draftWizardOutline(deps: WizardDeps, user: WizardUser, run
   try {
     const resolved = await deps.resolveProvider(user.id, run.providerId)
     const references = referenceSummaries(sources)
-    const result = await draftOutline({ provider: resolved.provider, compact: resolved.compact }, { brief, references })
+    // A template's layouts are the outline's preferred layouts (the slide layouts come from the outline).
+    const templateDeck = brief.templateId ? await readableTemplateDeck(deps.db, user.id, brief.templateId) : null
+    const preferredLayouts = templateDeck ? wizardLayoutsOf(templateDeck.slides.map((s) => s.layout)) : undefined
+    const result = await draftOutline({ provider: resolved.provider, compact: resolved.compact }, { brief, references, preferredLayouts })
     const outline = withKnownSources(result.outline, new Set(references.map((r) => r.id)))
     await recordLlmUsage(deps.db, {
       userId: user.id,

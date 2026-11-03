@@ -2,7 +2,7 @@
 // (apps/web/src/lib/templates.server.ts and brand-kits.server.ts). The write functions here also filter by owner,
 // so a write from any other path still cannot touch someone else's row.
 import { and, desc, eq, or } from 'drizzle-orm'
-import type { Deck, BrandTokens, LogoPlacement } from '@sleid/model'
+import { builtInTemplateDeck, DeckSchema, type Deck, type BrandTokens, type LogoPlacement } from '@sleid/model'
 import type { Db } from './client.ts'
 import { brandKits, templates, type BrandKitRow, type TemplateRow } from './schema/index.ts'
 
@@ -125,4 +125,34 @@ export async function setBrandKitLogo(db: Db, ownerId: string, id: string, logo:
 export async function deleteBrandKitRow(db: Db, ownerId: string, id: string): Promise<boolean> {
   const rows = await db.delete(brandKits).where(and(eq(brandKits.id, id), eq(brandKits.ownerId, ownerId))).returning({ id: brandKits.id })
   return rows.length > 0
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * The deck of a template the user may read: a built-in one, one the user owns, or an instance-visible one.
+ * Null when there is no such template for this user (the same answer for "not yours" and "not there").
+ */
+export async function readableTemplateDeck(db: Db, userId: string, templateId: string): Promise<Deck | null> {
+  if (templateId.startsWith('builtin:')) return builtInTemplateDeck(templateId)
+  if (!UUID.test(templateId)) return null
+  const row = await getTemplateRow(db, templateId)
+  if (!row || (row.ownerId !== userId && row.visibility !== 'instance')) return null
+  return DeckSchema.parse(row.deck)
+}
+
+/** The brand kit the user may read (owned, or instance-visible). Null otherwise. */
+export async function readableBrandKit(db: Db, userId: string, kitId: string): Promise<BrandKitRow | null> {
+  if (!UUID.test(kitId)) return null
+  const row = await getBrandKitRow(db, kitId)
+  if (!row || (row.ownerId !== userId && row.visibility !== 'instance')) return null
+  return row
+}
+
+/**
+ * Where a template's thumbnail PNG is kept in storage. Built-in templates use a key with no colon (storage keys may
+ * not hold one). The web app reads it and the worker writes it, so both use this function.
+ */
+export function templateThumbnailKey(templateId: string): string {
+  return templateId.startsWith('builtin:') ? `template-thumbs/builtin-${templateId.slice('builtin:'.length)}.png` : `template-thumbs/${templateId}.png`
 }

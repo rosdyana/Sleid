@@ -50,6 +50,7 @@ import { dedupeResults } from '@sleid/research'
 import type { Logger } from '../logger.ts'
 import type { ResolvedWizardProvider } from './provider.ts'
 import type { WizardCollab } from './collab.ts'
+import { startPointFor } from './start-point.ts'
 
 export const MAX_RESEARCH_URLS = 8
 const RESEARCH_RESULTS_PER_QUERY = 5
@@ -263,7 +264,14 @@ export async function runGenerate(env: WizardEnv, runId: string): Promise<void> 
     let theme: Theme = deck.theme as Theme
     const pending: Op[] = []
 
-    if (brief.theme === AI_THEME) {
+    const start = await startPointFor(env, { userId: run.userId, deckId }, brief)
+    if (start) {
+      // A kit's theme and brand reference go on the deck before the first slide. writeWizardSlide reads the deck's
+      // brand, so every slide is written against the kit's palette (and its snapped colours).
+      await env.collab.applyOps(deckId, 'wizard', start.ops)
+      deck = await env.collab.getDeck(deckId)
+      theme = start.theme
+    } else if (brief.theme === AI_THEME) {
       try {
         const outcome = await runAbility('generateTheme', { provider: resolved.provider, deck, compact: resolved.compact }, {
           ...(brief.brandColors?.length ? { brandColors: brief.brandColors } : {}),

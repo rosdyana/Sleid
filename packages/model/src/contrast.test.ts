@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { BUILT_IN_THEMES } from '@sleid/model'
-import { contrastRatio, contrastViolations, enforceThemeContrast, ensureContrast, parseHex, toHex } from './contrast.ts'
+import { BUILT_IN_THEMES } from './defaults.ts'
+import { contrastRatio, contrastViolations, enforceThemeContrast, ensureContrast, parseHex, readableTextOn, toHex } from './contrast.ts'
 
 /** Hue in degrees (0 to 360) of a hex colour. */
 function hueOf(hex: string): number {
@@ -83,5 +83,15 @@ describe('contrast', () => {
     const warm = BUILT_IN_THEMES.find((t) => t.name === 'Warm Paper')!
     expect(contrastRatio(warm.colors.accent3, warm.colors.background)).toBeGreaterThanOrEqual(3)
     expect(hueOf(warm.colors.accent3)).toBeCloseTo(hueOf('#c9962b'), 0)
+  })
+})
+
+describe('readableTextOn (M9)', () => {
+  it('picks white on a strong blue fill and near-black on a pale one, and keeps a readable preferred colour', () => {
+    expect(readableTextOn('#1a73e8')).toBe('#ffffff')
+    expect(readableTextOn('#f5f5f5')).toBe('#111111')
+    expect(readableTextOn('#1a73e8', '#ffffff')).toBe('#ffffff')
+    // A preferred colour that does not reach the minimum on this fill is not used.
+    expect(readableTextOn('#1a73e8', '#202124')).toBe('#ffffff')
   })
 })

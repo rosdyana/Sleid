@@ -21,6 +21,7 @@ import {
   getTemplateRow,
   insertTemplateRow,
   listTemplateRows,
+  templateThumbnailKey,
   updateTemplateRow,
   type Db,
   type TemplateRow,
@@ -136,7 +137,7 @@ export async function getTemplateFor(deps: TemplateDeps, userId: string, templat
   return { summary: summaryOfRow(row, userId), deck: DeckSchema.parse(row.deck) }
 }
 
-async function readableRow(deps: TemplateDeps, userId: string, templateId: string): Promise<TemplateRow> {
+async function readableRow(deps: Pick<TemplateDeps, 'db'>, userId: string, templateId: string): Promise<TemplateRow> {
   if (!z.uuid().safeParse(templateId).success) throw new LibraryError('Template not found', 404)
   const row = await getTemplateRow(deps.db, templateId)
   if (!row || (row.ownerId !== userId && row.visibility !== 'instance')) throw new LibraryError('Template not found', 404)
@@ -236,6 +237,33 @@ export async function deleteTemplate(deps: TemplateDeps, userId: string, templat
   const ok = await deleteTemplateRow(deps.db, userId, templateId)
   if (!ok) throw new LibraryError('Template not found', 404)
   if (row.thumbnailKey) await deps.storage.delete(row.thumbnailKey).catch(() => undefined)
+}
+
+/**
+ * GET /api/templates/:id/thumbnail. A session is needed for every template. A user template is readable only when the
+ * caller may read the template (owner, or instance-visible); otherwise it is "not found", the same as a missing one.
+ * A template whose thumbnail is not rendered yet is also 404, and the gallery shows a plain card for it.
+ */
+export async function handleTemplateThumbnail(templateId: string, deps: { db: Db; storage: StorageDriver; userId: string | null }): Promise<Response> {
+  const notFound = () => new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: { 'content-type': 'application/json' } })
+  if (!deps.userId) return new Response(JSON.stringify({ error: 'Sign in to see this template.' }), { status: 401, headers: { 'content-type': 'application/json' } })
+  try {
+    if (isBuiltInTemplateId(templateId)) {
+      if (!builtInTemplateDeck(templateId)) return notFound()
+    } else {
+      const row = await readableRow(deps, deps.userId, templateId)
+      if (!row.thumbnailKey) return notFound()
+    }
+  } catch (err) {
+    if (err instanceof LibraryError && err.status === 404) return notFound()
+    throw err
+  }
+  const bytes = await deps.storage.get(templateThumbnailKey(templateId))
+  if (!bytes) return notFound()
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: { 'content-type': 'image/png', 'content-length': String(bytes.byteLength), 'x-content-type-options': 'nosniff', 'cache-control': 'private, max-age=300' },
+  })
 }
 
 /**

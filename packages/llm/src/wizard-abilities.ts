@@ -9,7 +9,7 @@ import { allowlist, checkOps } from './ops-check.ts'
 import { brandConstraintFor, constrainOpsToBrand } from './brand-constraint.ts'
 import { validateMermaid } from './mermaid.ts'
 import { systemPrompt, untrustedBlock } from './abilities/common.ts'
-import { Outline, OutlineSlide, withKnownSources, type Outline as OutlineT, type WizardBrief as BriefT } from './wizard-schema.ts'
+import { Outline, OutlineSlide, withKnownSources, type Outline as OutlineT, type WizardBrief as BriefT, type WizardLayout } from './wizard-schema.ts'
 import { WizardSlideOutput, type WizardSlideOutput as SlideOut } from './wizard-slide-schema.ts'
 import { estimateNote, estimateWord, placeholderNote, stripSourceLabels } from './wizard-text.ts'
 import { markUnsupported, numbersIn, unsupportedFigures, type Figure } from './wizard-numbers.ts'
@@ -101,9 +101,13 @@ const ModelOutline = z.object({
 
 export async function draftOutline(
   call: ModelCall,
-  input: { brief: BriefT; references: ReferenceSummary[] },
+  input: { brief: BriefT; references: ReferenceSummary[]; preferredLayouts?: readonly WizardLayout[] },
 ): Promise<{ outline: OutlineT; usage: Usage; model: string; warnings: string[] }> {
   const { brief, references } = input
+  // A template's layouts: the outline should use these first (the layout is then fixed per slide, see writeWizardSlide).
+  const preferred = input.preferredLayouts?.length
+    ? `Prefer these layouts, in this order, because the deck is based on a template that has them: ${input.preferredLayouts.join(', ')}. Use another layout only where a slide's content does not fit any of them. `
+    : ''
   const refLabels = new Map(references.map((r, i) => [`S${i + 1}`, r.id]))
   const refBlock = references.length
     ? references.map((r, i) => `S${i + 1} (label for sourceRefs only): "${r.title}" (${r.origin})\n${r.summary}`).join('\n\n')

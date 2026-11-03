@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import JSZip from 'jszip'
-import type { Deck, DiagramElement } from '@sleid/model'
+import { mermaidConfigFor, type Deck, type DiagramElement, type Theme } from '@sleid/model'
 import { deckToMarkdown, renderDeckHtml, ASSET_URL_RE } from '@sleid/render'
 import { loadRevealAssets, renderStandaloneDeckHtml } from '@sleid/render/node'
 import { deckToPptx, type PptxAsset } from '@sleid/pptx'
@@ -272,8 +272,8 @@ class DiagramRasterizer {
       join(this.dir, 'diagram.html'),
       `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}#box{display:flex;align-items:center;justify-content:center;overflow:hidden}</style></head>
 <body><div id="box"></div><script src="mermaid/mermaid.min.js"></script><script>
-window.drawDiagram = async (source, w, h) => {
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+window.drawDiagram = async (source, w, h, config) => {
+  mermaid.initialize(config || { startOnLoad: false, securityLevel: 'strict' });
   const box = document.getElementById('box');
   box.style.width = w + 'px'; box.style.height = h + 'px';
   const { svg } = await mermaid.render('sleid-diagram-' + Math.random().toString(36).slice(2), source);
@@ -289,13 +289,17 @@ window.drawDiagram = async (source, w, h) => {
     this.context = await newExportContext(browser, { viewport: { width: 1200, height: 900 }, deviceScaleFactor: 2 })
   }
 
-  async render(element: DiagramElement): Promise<PptxAsset | null> {
+  async render(element: DiagramElement, theme: Theme): Promise<PptxAsset | null> {
     try {
       await this.ready()
       const context = this.context!
       return await withPage(context, async (page) => {
         await page.goto(`${this.server!.origin}/diagram.html`, { waitUntil: 'load' })
-        await page.evaluate(([source, w, h]) => (window as unknown as { drawDiagram: (s: string, w: number, h: number) => Promise<boolean> }).drawDiagram(source, w, h), [element.source, Math.round(element.w), Math.round(element.h)] as const)
+        // The deck's theme for the diagram (the same config as the HTML and PDF pages).
+        await page.evaluate(
+          ([source, w, h, config]) => (window as unknown as { drawDiagram: (s: string, w: number, h: number, c: unknown) => Promise<boolean> }).drawDiagram(source, w, h, config),
+          [element.source, Math.round(element.w), Math.round(element.h), mermaidConfigFor(theme)] as const,
+        )
         const png = await page.locator('#box').screenshot({ omitBackground: true, type: 'png' })
         return { data: new Uint8Array(png), mime: 'image/png' }
       })
@@ -330,7 +334,7 @@ async function renderPptx(env: ExportEnv, deck: Deck): Promise<Uint8Array> {
         // Other URLs are not fetched: the export must not reach the open internet.
         return null
       },
-      rasterizeDiagram: (element) => rasterizer.render(element),
+      rasterizeDiagram: (element) => rasterizer.render(element, deck.theme),
     })
   } finally {
     await rasterizer.close()

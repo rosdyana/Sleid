@@ -2,7 +2,7 @@
 // (hidden slides). Output is a 16:9 (13.333 x 7.5 in) presentation with native text, shapes, tables and charts.
 import PptxGenJS from 'pptxgenjs'
 import JSZip from 'jszip'
-import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, type Deck, type DiagramElement, type Element, type TableElement } from '@sleid/model'
+import { CANVAS_HEIGHT, CANVAS_WIDTH, logoAppliesToSlide, readableTextOn, type Deck, type DiagramElement, type Element, type TableElement } from '@sleid/model'
 import { chartPalette, chartSeries, pptxChartKind } from './charts.ts'
 import { monospaceRuns, richTextRuns, type PptxRun } from './text.ts'
 import { inches, pptxColor, pptxFontFace, points, transparencyFor } from './units.ts'
@@ -283,6 +283,8 @@ function addTable(s: ReturnType<PptxGenJS['addSlide']>, el: TableElement, ctx: C
   const headerFill = typeof el.style?.headerFill === 'string' ? pptxColor(el.style.headerFill) : undefined
   const border = typeof el.style?.borderColor === 'string' ? pptxColor(el.style.borderColor) : undefined
   const fontPx = typeof el.style?.fontSize === 'number' ? el.style.fontSize : ctx.theme.sizes.small
+  // The header text is picked to read on the header fill (the same rule as the HTML render and the editor).
+  const headerText = headerFill ? (pptxColor(readableTextOn(`#${headerFill}`, ctx.theme.colors.text)) ?? ctx.textColor) : ctx.textColor
   const rows = el.rows.map((row, r) => {
     const isHeader = el.header && r === 0
     return Array.from({ length: cols }, (_, c) => ({
@@ -290,7 +292,7 @@ function addTable(s: ReturnType<PptxGenJS['addSlide']>, el: TableElement, ctx: C
       options: {
         bold: isHeader,
         fill: isHeader && headerFill ? { color: headerFill } : undefined,
-        color: ctx.textColor,
+        color: isHeader && headerFill ? headerText : ctx.textColor,
         fontFace: ctx.bodyFace,
         fontSize: points(fontPx),
       },

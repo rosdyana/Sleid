@@ -46,10 +46,14 @@ export interface JobQueue {
  * `queueName` is for tests only: a separate queue keeps a running dev worker from taking a test's jobs.
  * `prefix` does the same for the wizard queues. The app always uses the defaults.
  */
-export function createJobQueue(connectionString: string, options: { maxConnections?: number; queueName?: string; importQueueName?: string; prefix?: string } = {}): JobQueue {
+export function createJobQueue(
+  connectionString: string,
+  options: { maxConnections?: number; queueName?: string; importQueueName?: string; thumbnailQueueName?: string; prefix?: string } = {},
+): JobQueue {
   const boss = new PgBoss({ connectionString, max: options.maxConnections ?? 4 })
   const queueName = options.queueName ?? EXPORT_QUEUE
   const importQueue = options.importQueueName ?? IMPORT_QUEUE
+  const thumbQueue = options.thumbnailQueueName ?? TEMPLATE_THUMBNAIL_QUEUE
   const prefix = options.prefix ?? ''
   const wizardName = (kind: WizardJobKind) => `${prefix}${WIZARD_QUEUES[kind]}`
   let started = false
@@ -60,7 +64,7 @@ export function createJobQueue(connectionString: string, options: { maxConnectio
       await boss.start()
       await boss.createQueue(queueName, { retryLimit: 0, expireInSeconds: 60 * 60 })
       await boss.createQueue(importQueue, { retryLimit: 0, expireInSeconds: 60 * 60 })
-      await boss.createQueue(TEMPLATE_THUMBNAIL_QUEUE, { retryLimit: 0, expireInSeconds: 60 * 60 })
+      await boss.createQueue(thumbQueue, { retryLimit: 0, expireInSeconds: 60 * 60 })
       for (const kind of Object.keys(WIZARD_QUEUES) as WizardJobKind[]) {
         await boss.createQueue(wizardName(kind), { retryLimit: 0, expireInSeconds: 60 * 60 })
       }
@@ -97,10 +101,10 @@ export function createJobQueue(connectionString: string, options: { maxConnectio
     },
     async enqueueTemplateThumbnail(payload) {
       const data = TemplateThumbnailPayloadSchema.parse(payload)
-      return boss.send(TEMPLATE_THUMBNAIL_QUEUE, data, { retryLimit: 0, expireInSeconds: 60 * 60 })
+      return boss.send(thumbQueue, data, { retryLimit: 0, expireInSeconds: 60 * 60 })
     },
     async workTemplateThumbnails(concurrency, handler) {
-      return boss.work(TEMPLATE_THUMBNAIL_QUEUE, { localConcurrency: concurrency }, async (jobs: Job<unknown>[]) => {
+      return boss.work(thumbQueue, { localConcurrency: concurrency }, async (jobs: Job<unknown>[]) => {
         for (const job of jobs) {
           const payload = TemplateThumbnailPayloadSchema.parse(job.data)
           await handler(payload, job.id)

@@ -156,3 +156,15 @@ export function contrastViolations(colors: ThemeColors): string[] {
   }
   return out
 }
+
+/**
+ * A text colour that reads on `background`. The preferred colour (for example the theme's text) is used when it reaches
+ * the text minimum; otherwise white or near-black, whichever contrasts more. Table headers use this on their fill, so a
+ * dark header text on a strong fill never reaches the output.
+ */
+export function readableTextOn(background: string, preferred?: string): string {
+  if (preferred && contrastRatio(preferred, background) >= TEXT_MIN_CONTRAST) return toHex(parseHex(preferred))
+  const white = '#ffffff'
+  const nearBlack = '#111111'
+  return contrastRatio(white, background) >= contrastRatio(nearBlack, background) ? white : nearBlack
+}

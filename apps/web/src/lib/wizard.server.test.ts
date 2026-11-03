@@ -1,7 +1,10 @@
 // Wizard service rules against real Postgres: ownership, upload and URL limits, outline validation, generate precondition.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { connectOrNull, makeDeck, makeUser, removeUsers } from '@sleid/db/testing'
-import { getWizardRunFor, updateWizardRun, listWizardSources, type Db } from '@sleid/db'
+import { getWizardRunFor, insertBrandKitRow, insertTemplateRow, updateWizardRun, listWizardSources, type Db } from '@sleid/db'
+import { createDeck } from '@sleid/model'
+import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { createLocalStorage } from '@sleid/storage'
 import { LIMITS } from '@sleid/ingest'
 import * as wizard from './wizard.server'
@@ -155,5 +158,60 @@ describe.skipIf(!db)('wizard service', () => {
     const run = await wizard.createRun(deps, a, { prompt: 'x' })
     const cancelled = await wizard.cancelRun(deps, a, run.id)
     expect(cancelled.status).toBe('cancelled')
+  })
+})
+
+// M9: a run may start from a template or a brand kit only when the caller can read it.
+describe.skipIf(!db)('wizard service: template and brand kit at creation', () => {
+  const database = db!
+  const people: string[] = []
+  const deps: wizard.WizardDeps = {
+    db: database,
+    uploads: createLocalStorage(tmpdir()),
+    queue: { enqueueWizard: async () => 'job' },
+    env: {},
+    resolveProvider: async () => {
+      throw new Error('no provider in this test')
+    },
+  }
+  const kitTokens = {
+    palette: { background: '#ffffff', surface: '#f0f4ff', text: '#102030', muted: '#556677', accent: '#0055cc', accent2: '#00aa66', accent3: '#dd7700', accent4: '#8844aa' },
+    fonts: { heading: 'Georgia, serif', body: 'Helvetica, sans-serif' },
+  }
+
+  afterAll(async () => {
+    await removeUsers(database, people)
+  })
+
+  async function person(label: string) {
+    const u = await makeUser(database, label)
+    people.push(u.id)
+    return { id: u.id }
+  }
+
+  it('accepts a built-in template, refuses an unknown one, and refuses a private template of someone else', async () => {
+    const a = await person('wiz-tpl-a')
+    const b = await person('wiz-tpl-b')
+    await expect(wizard.createRun(deps, a, { prompt: 'x', templateId: 'builtin:pitch' })).resolves.toMatchObject({ status: 'draft' })
+    await expect(wizard.createRun(deps, a, { prompt: 'x', templateId: 'builtin:nope' })).rejects.toMatchObject({ status: 404 })
+
+    const privateId = randomUUID()
+    await insertTemplateRow(database, { id: privateId, ownerId: a.id, name: 'Mine', description: '', category: 'general', visibility: 'private', deck: createDeck('Mine'), themeName: 'Sheets Light', slideCount: 0 })
+    await expect(wizard.createRun(deps, a, { prompt: 'x', templateId: privateId })).resolves.toMatchObject({ status: 'draft' })
+    await expect(wizard.createRun(deps, b, { prompt: 'x', templateId: privateId })).rejects.toMatchObject({ status: 404 })
+
+    const sharedId = randomUUID()
+    await insertTemplateRow(database, { id: sharedId, ownerId: a.id, name: 'Shared', description: '', category: 'general', visibility: 'instance', deck: createDeck('Shared'), themeName: 'Sheets Light', slideCount: 0 })
+    await expect(wizard.createRun(deps, b, { prompt: 'x', templateId: sharedId })).resolves.toMatchObject({ status: 'draft' })
+  })
+
+  it('accepts a readable brand kit, refuses someone else\'s private kit, and refuses the AI theme with a kit', async () => {
+    const a = await person('wiz-kit-a')
+    const b = await person('wiz-kit-b')
+    const kitId = randomUUID()
+    await insertBrandKitRow(database, { id: kitId, ownerId: a.id, name: 'A kit', visibility: 'private', tokens: kitTokens, logoPlacement: { corner: 'tr', widthPct: 12, margin: 48, slides: 'all' }, defaultTemplateId: null })
+    await expect(wizard.createRun(deps, a, { prompt: 'x', brandKitId: kitId })).resolves.toMatchObject({ status: 'draft' })
+    await expect(wizard.createRun(deps, b, { prompt: 'x', brandKitId: kitId })).rejects.toMatchObject({ status: 404 })
+    await expect(wizard.createRun(deps, a, { prompt: 'x', brandKitId: kitId, theme: 'AI from brand colours' })).rejects.toThrow(/AI theme cannot be combined/)
   })
 })

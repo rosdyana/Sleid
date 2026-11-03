@@ -2,7 +2,7 @@
 
 A lightweight web slide editor with a Google Sheets-style interface, Google-only sign-in, live co-editing with presence and sharing, export (PDF, PPTX, PNG, JPG, HTML, Markdown, JSON), import (PowerPoint, Google Slides, Markdown, JSON), publish to web, an AI assistant on your own model provider, and (planned) MCP. Design, decisions and known gaps: [docs/DESIGN.md](docs/DESIGN.md).
 
-Status: **milestone 8** (import: PowerPoint, Google Slides, Markdown and JSON). See the status table in DESIGN.md.
+Status: **milestone 8** done (import: PowerPoint, Google Slides, Markdown and JSON). **Milestone 9 (templates and brand kits) is in progress**: built-in templates, brand kits, the logo overlay, the AI brand constraint and the wizard integration are in; the gallery and brand/template settings pages are not yet. See the status table and the M9 section in DESIGN.md.
 
 ## Layout
 
